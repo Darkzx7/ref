@@ -10,13 +10,13 @@ local GUI_NAME = "RefVoiceCustomReconnectTest"
 local BUTTON_SIZE = 56
 local HOLD_RECONNECT_TIME = 0.7
 
-local customVoiceActive = false
 local muted = true
 local reconnecting = false
 local destroyed = false
 local pressToken = 0
 local conns = {}
-local customAudioInput = nil
+local audioInput = nil
+local voiceReady = false
 
 local stateDot
 local label
@@ -25,12 +25,9 @@ local buttonStroke
 local tooltip
 local tooltipStroke
 
-local function safe(label_tag, fn)
+local function safe(tag, fn)
 	local ok, result = pcall(fn)
-	if not ok then
-		warn("[voice test]", label_tag, result)
-		return nil
-	end
+	if not ok then warn("[voice]", tag, result) return nil end
 	return result
 end
 
@@ -41,9 +38,7 @@ end
 
 local function disconnectAll()
 	for _, conn in ipairs(conns) do
-		safe("disconnect", function()
-			conn:Disconnect()
-		end)
+		safe("disconnect", function() conn:Disconnect() end)
 	end
 	table.clear(conns)
 end
@@ -51,11 +46,7 @@ end
 local function tween(obj, props, t)
 	if obj and obj.Parent then
 		safe("tween", function()
-			TweenService:Create(
-				obj,
-				TweenInfo.new(t or 0.14, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
-				props
-			):Play()
+			TweenService:Create(obj, TweenInfo.new(t or 0.14, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), props):Play()
 		end)
 	end
 end
@@ -77,236 +68,117 @@ local function stroke(parent, transparency, color)
 	return s
 end
 
-local function disconnectFromOriginalVoice()
-	safe("DisableDefaultVoice", function()
-		VoiceChatService.EnableDefaultVoice = false
-	end)
-
-	for _, obj in ipairs(game:GetDescendants()) do
-		if obj:IsA("AudioDeviceInput") and obj.Player == player and obj ~= customAudioInput then
-			safe("Destroy original input", function()
-				obj.Parent = nil
-				obj:Destroy()
-			end)
-		end
-	end
-end
-
-local function reconnectToOriginalVoice()
-	safe("EnableDefaultVoice", function()
-		VoiceChatService.EnableDefaultVoice = true
-	end)
-end
-
-local function createCustomAudioInput()
-	if customAudioInput then
-		safe("Destroy old input", function()
-			customAudioInput:Destroy()
-		end)
-	end
-
-	customAudioInput = Instance.new("AudioDeviceInput")
-	customAudioInput.Name = "CustomVoiceInput"
-	customAudioInput.Player = player
-	customAudioInput.Muted = muted
-	customAudioInput.Parent = player
-
-	return customAudioInput
-end
-
-local function destroyCustomAudioInput()
-	if customAudioInput then
-		safe("Destroy custom input", function()
-			customAudioInput:Destroy()
-		end)
-		customAudioInput = nil
-	end
-end
-
-local function simulateVoiceDetection()
-	task.spawn(function()
-		while customVoiceActive and not destroyed and customAudioInput do
-			if not muted and customAudioInput and customAudioInput.Parent then
-				local fakeVolume = math.random() * 0.3
-				local isFakeSpeaking = fakeVolume > 0.1
-
-				if isFakeSpeaking then
-					stateDot.BackgroundColor3 = Color3.fromRGB(255, 50, 50)
-					label.Text = "LIVE"
-				else
-					stateDot.BackgroundColor3 = Color3.fromRGB(72, 210, 116)
-					label.Text = "CUSTOM"
-				end
-			end
-			task.wait(0.15)
-		end
-	end)
-end
-
-local function canUseVoice()
-	return safe("IsVoiceEnabledForUserIdAsync", function()
-		return VoiceChatService:IsVoiceEnabledForUserIdAsync(player.UserId)
-	end) == true
-end
-
-local function getVoiceServiceDiagnostics()
-	return {
-		voiceEnabled = canUseVoice(),
-		enableDefaultVoice = tostring(VoiceChatService.EnableDefaultVoice),
-		customMode = customVoiceActive,
-		hasCustomInput = customAudioInput ~= nil,
-	}
-end
-
-local function ownsInput(input)
-	if not input or not input:IsA("AudioDeviceInput") then
-		return false
-	end
-	local ok, owner = pcall(function()
-		return input.Player
-	end)
-	return ok and owner == player
-end
-
-local function findLocalInputs()
-	local found = {}
-	for _, obj in ipairs(game:GetDescendants()) do
-		if obj:IsA("AudioDeviceInput") and ownsInput(obj) then
-			table.insert(found, obj)
-		end
-	end
-	return found
-end
-
-local function getBestInput()
-	if customVoiceActive and customAudioInput then
-		return customAudioInput
-	end
-	local inputs = findLocalInputs()
-	return inputs[1]
-end
-
 local function render()
-	local voiceEnabled = canUseVoice()
-	local input = getBestInput()
+	if not label or not stateDot then return end
 
 	if reconnecting then
 		label.Text = "recon..."
 		stateDot.BackgroundColor3 = Color3.fromRGB(238, 186, 85)
-		tooltip.Text = "trying soft mic reconnect"
+		tooltip.Text = "reconectando microfone..."
 		tween(overlay, { BackgroundTransparency = 0.30 }, 0.10)
 		tween(buttonStroke, { Transparency = 0.25, Color = Color3.fromRGB(238, 186, 85) }, 0.10)
 		return
 	end
 
-	if not voiceEnabled and not customVoiceActive then
+	if not voiceReady then
 		label.Text = "no vc"
 		stateDot.BackgroundColor3 = Color3.fromRGB(130, 130, 140)
-		tooltip.Text = "voice unavailable"
+		tooltip.Text = "voice indisponivel"
 		tween(overlay, { BackgroundTransparency = 0.25 }, 0.12)
 		tween(buttonStroke, { Transparency = 0.48, Color = Color3.fromRGB(80, 80, 90) }, 0.12)
-		return
-	end
-
-	if customVoiceActive then
-		if not muted then
-			label.Text = "CUSTOM"
-			stateDot.BackgroundColor3 = Color3.fromRGB(72, 210, 116)
-			tooltip.Text = "Modo Custom • falando"
-		else
-			label.Text = "MUTE"
-			stateDot.BackgroundColor3 = Color3.fromRGB(235, 82, 82)
-			tooltip.Text = "Modo Custom (mutado)"
-		end
-		tween(overlay, { BackgroundTransparency = muted and 0.55 or 0.72 }, 0.12)
-		tween(buttonStroke, { Transparency = muted and 0.48 or 0.24 }, 0.12)
-		return
-	end
-
-	if not input then
-		label.Text = "no api"
-		stateDot.BackgroundColor3 = Color3.fromRGB(238, 186, 85)
-		tooltip.Text = "AudioDeviceInput not found"
 		return
 	end
 
 	if muted then
 		label.Text = "muted"
 		stateDot.BackgroundColor3 = Color3.fromRGB(235, 82, 82)
-		tooltip.Text = "click: unmute"
+		tooltip.Text = "click: ativar mic"
+		tween(overlay, { BackgroundTransparency = 0.38 }, 0.12)
+		tween(buttonStroke, { Transparency = 0.48, Color = Color3.fromRGB(68, 68, 78) }, 0.12)
 	else
 		label.Text = "live"
 		stateDot.BackgroundColor3 = Color3.fromRGB(72, 210, 116)
-		tooltip.Text = "click: mute"
+		tooltip.Text = "click: mutar mic"
+		tween(overlay, { BackgroundTransparency = 0.72 }, 0.12)
+		tween(buttonStroke, { Transparency = 0.24, Color = Color3.fromRGB(72, 210, 116) }, 0.12)
 	end
-	tween(overlay, { BackgroundTransparency = muted and 0.38 or 0.72 }, 0.12)
+end
+
+local function destroyInput()
+	if audioInput then
+		safe("destroy input", function() audioInput:Destroy() end)
+		audioInput = nil
+	end
+end
+
+local function createInput()
+	destroyInput()
+
+	local input = Instance.new("AudioDeviceInput")
+	input.Name = "VoiceInput"
+	input.Player = player
+	input.Muted = muted
+	input.Parent = player
+
+	audioInput = input
+	voiceReady = true
+
+	safe("watch destroy", function()
+		track(input.AncestryChanged:Connect(function()
+			if destroyed then return end
+			if not input.Parent then
+				audioInput = nil
+				voiceReady = false
+				render()
+			end
+		end))
+	end)
+
+	return input
 end
 
 local function applyMuted(nextMuted)
 	muted = nextMuted == true
-	if customVoiceActive and customAudioInput then
-		safe("set custom input muted", function()
-			customAudioInput.Muted = muted
+	if audioInput and audioInput.Parent then
+		safe("set muted", function()
+			audioInput.Muted = muted
 		end)
-	else
-		for _, input in ipairs(findLocalInputs()) do
-			safe("set existing input muted", function()
-				input.Muted = muted
-			end)
-		end
 	end
 	render()
 end
 
-local function toggleCustomVoice()
-	customVoiceActive = not customVoiceActive
-
-	if customVoiceActive then
-		disconnectFromOriginalVoice()
-		createCustomAudioInput()
-		simulateVoiceDetection()
-		muted = false
-		if customAudioInput then
-			customAudioInput.Muted = false
-		end
-	else
-		destroyCustomAudioInput()
-		reconnectToOriginalVoice()
-		muted = true
-	end
-
-	render()
-end
-
-local function softReconnectMic()
+local function softReconnect()
 	if reconnecting then return false end
 	reconnecting = true
 	render()
 
 	local wasMuted = muted
 
-	if customVoiceActive and customAudioInput then
-		customAudioInput.Muted = true
-		task.wait(0.22)
-		destroyCustomAudioInput()
-		task.wait(0.22)
-		createCustomAudioInput()
-		if customAudioInput then
-			customAudioInput.Muted = wasMuted
-		end
-	else
-		for _, input in ipairs(findLocalInputs()) do
-			safe("soft reconnect", function()
-				input.Muted = true
-			end)
-		end
-		task.wait(0.3)
-		applyMuted(wasMuted)
-	end
+	destroyInput()
+	task.wait(0.35)
+	createInput()
+	applyMuted(wasMuted)
 
 	reconnecting = false
 	render()
 	return true
+end
+
+local function initVoice()
+	task.spawn(function()
+		local hasVoice = safe("IsVoiceEnabledForUserIdAsync", function()
+			return VoiceChatService:IsVoiceEnabledForUserIdAsync(player.UserId)
+		end)
+
+		if hasVoice then
+			createInput()
+			applyMuted(true)
+		else
+			voiceReady = false
+		end
+
+		render()
+	end)
 end
 
 local old = playerGui:FindFirstChild(GUI_NAME)
@@ -328,7 +200,6 @@ root.BackgroundTransparency = 1
 root.Parent = gui
 
 local shadow = Instance.new("Frame")
-shadow.Name = "shadow"
 shadow.Size = UDim2.new(1, 6, 1, 6)
 shadow.Position = UDim2.new(0, 2, 0, 5)
 shadow.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
@@ -352,7 +223,6 @@ corner(button, 16)
 buttonStroke = stroke(button, 0.48, Color3.fromRGB(68, 68, 78))
 
 local avatarClip = Instance.new("Frame")
-avatarClip.Name = "avatar_clip"
 avatarClip.Size = UDim2.new(1, -10, 1, -10)
 avatarClip.Position = UDim2.new(0, 5, 0, 5)
 avatarClip.BackgroundTransparency = 1
@@ -363,7 +233,6 @@ avatarClip.Parent = button
 corner(avatarClip, 13)
 
 local avatar = Instance.new("ImageLabel")
-avatar.Name = "avatar"
 avatar.Size = UDim2.new(1, 0, 1, 0)
 avatar.BackgroundTransparency = 1
 avatar.BorderSizePixel = 0
@@ -381,7 +250,6 @@ task.spawn(function()
 end)
 
 overlay = Instance.new("Frame")
-overlay.Name = "overlay"
 overlay.Size = UDim2.new(1, 0, 1, 0)
 overlay.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
 overlay.BackgroundTransparency = 0.38
@@ -391,7 +259,6 @@ overlay.Parent = button
 corner(overlay, 16)
 
 stateDot = Instance.new("Frame")
-stateDot.Name = "state_dot"
 stateDot.AnchorPoint = Vector2.new(1, 1)
 stateDot.Size = UDim2.new(0, 12, 0, 12)
 stateDot.Position = UDim2.new(1, -6, 1, -6)
@@ -403,7 +270,6 @@ corner(stateDot, 999)
 stroke(stateDot, 0.12, Color3.fromRGB(22, 22, 26))
 
 label = Instance.new("TextLabel")
-label.Name = "state_label"
 label.AnchorPoint = Vector2.new(0.5, 0.5)
 label.Size = UDim2.new(1, -8, 0, 18)
 label.Position = UDim2.new(0.5, 0, 0.5, 0)
@@ -411,14 +277,13 @@ label.BackgroundTransparency = 1
 label.Font = Enum.Font.GothamBold
 label.TextSize = 11
 label.TextColor3 = Color3.fromRGB(255, 255, 255)
-label.Text = "muted"
+label.Text = "..."
 label.TextXAlignment = Enum.TextXAlignment.Center
 label.TextTransparency = 0
 label.ZIndex = 7
 label.Parent = button
 
 tooltip = Instance.new("TextLabel")
-tooltip.Name = "tooltip"
 tooltip.Size = UDim2.new(0, 190, 0, 34)
 tooltip.Position = UDim2.new(1, 10, 0.5, -17)
 tooltip.BackgroundColor3 = Color3.fromRGB(18, 18, 23)
@@ -428,16 +293,16 @@ tooltip.Font = Enum.Font.GothamSemibold
 tooltip.TextSize = 11
 tooltip.TextColor3 = Color3.fromRGB(230, 230, 238)
 tooltip.TextTransparency = 1
-tooltip.Text = "click: mute/unmute • hold: reconnect"
+tooltip.Text = "click: mute/unmute | hold: reconectar"
 tooltip.Visible = false
 tooltip.ZIndex = 20
 tooltip.Parent = root
 corner(tooltip, 9)
 tooltipStroke = stroke(tooltip, 1, Color3.fromRGB(68, 68, 78))
 
-local scale = Instance.new("UIScale")
-scale.Scale = 1
-scale.Parent = button
+local uiScale = Instance.new("UIScale")
+uiScale.Scale = 1
+uiScale.Parent = button
 
 local function setTooltipVisible(state)
 	if state then
@@ -447,7 +312,7 @@ local function setTooltipVisible(state)
 	else
 		tween(tooltip, { BackgroundTransparency = 1, TextTransparency = 1 }, 0.10)
 		tween(tooltipStroke, { Transparency = 1 }, 0.10)
-		task.delay(0.11, function()
+		task.delay(0.12, function()
 			if tooltip and tooltip.Parent and tooltip.TextTransparency > 0.95 then
 				tooltip.Visible = false
 			end
@@ -456,17 +321,10 @@ local function setTooltipVisible(state)
 end
 
 local function attemptReconnectWithRender()
-	reconnecting = true
-	render()
+	local ok = softReconnect()
+	tooltip.Text = ok and "mic reconectado!" or "falha ao reconectar"
 	setTooltipVisible(true)
-	local ok = softReconnectMic()
-	reconnecting = false
-	render()
-	tooltip.Text = ok and "mic refreshed" or "reconnect failed"
-	setTooltipVisible(true)
-	task.delay(0.85, function()
-		setTooltipVisible(false)
-	end)
+	task.delay(1, function() setTooltipVisible(false) end)
 end
 
 track(button.MouseButton2Click:Connect(function()
@@ -477,9 +335,7 @@ track(button.MouseButton1Click:Connect(function()
 	if destroyed or reconnecting then return end
 	applyMuted(not muted)
 	setTooltipVisible(true)
-	task.delay(0.75, function()
-		setTooltipVisible(false)
-	end)
+	task.delay(0.75, function() setTooltipVisible(false) end)
 end))
 
 track(button.MouseButton1Down:Connect(function()
@@ -488,10 +344,10 @@ track(button.MouseButton1Down:Connect(function()
 	task.delay(HOLD_RECONNECT_TIME, function()
 		if destroyed or reconnecting then return end
 		if myToken ~= pressToken then return end
-		toggleCustomVoice()
-		setTooltipVisible(true)
-		task.delay(1, function()
-			setTooltipVisible(false)
+		task.spawn(function()
+			tooltip.Text = "reconectando..."
+			setTooltipVisible(true)
+			attemptReconnectWithRender()
 		end)
 	end)
 end))
@@ -502,17 +358,15 @@ end))
 
 local dragging = false
 local pressed = false
-local startInput
-local startPos
+local startInputPos
+local startRootPos
 
 track(root.InputBegan:Connect(function(input)
-	if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then
-		return
-	end
+	if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then return end
 	pressed = true
 	dragging = false
-	startInput = input.Position
-	startPos = root.Position
+	startInputPos = input.Position
+	startRootPos = root.Position
 	local endConn
 	endConn = input.Changed:Connect(function()
 		if input.UserInputState == Enum.UserInputState.End then
@@ -525,38 +379,38 @@ end))
 
 track(root.InputChanged:Connect(function(input)
 	if not pressed then return end
-	if input.UserInputType ~= Enum.UserInputType.MouseMovement and input.UserInputType ~= Enum.UserInputType.Touch then
-		return
-	end
-	local delta = input.Position - startInput
+	if input.UserInputType ~= Enum.UserInputType.MouseMovement and input.UserInputType ~= Enum.UserInputType.Touch then return end
+	local delta = input.Position - startInputPos
 	if not dragging and delta.Magnitude < 9 then return end
 	dragging = true
 	local cam = workspace.CurrentCamera
 	local viewport = cam and cam.ViewportSize or Vector2.new(1280, 720)
 	local inset = GuiService:GetGuiInset()
-	local x = math.clamp(startPos.X.Offset + delta.X, 6, viewport.X - BUTTON_SIZE - 6)
-	local y = math.clamp(startPos.Y.Offset + delta.Y, inset.Y + 6, viewport.Y - BUTTON_SIZE - 6)
+	local x = math.clamp(startRootPos.X.Offset + delta.X, 6, viewport.X - BUTTON_SIZE - 6)
+	local y = math.clamp(startRootPos.Y.Offset + delta.Y, inset.Y + 6, viewport.Y - BUTTON_SIZE - 6)
 	root.Position = UDim2.new(0, x, 0, y)
 end))
 
 track(gui.Destroying:Connect(function()
 	destroyed = true
-	if customVoiceActive then
-		destroyCustomAudioInput()
-		reconnectToOriginalVoice()
-	end
+	destroyInput()
 	disconnectAll()
 end))
 
-applyMuted(true)
-render()
+initVoice()
 
 _G.RefVoiceCustomReconnectTest = {
 	SetMuted = applyMuted,
-	ToggleCustom = toggleCustomVoice,
-	IsCustomActive = function() return customVoiceActive end,
-	SoftReconnect = softReconnectMic,
-	Diagnostics = getVoiceServiceDiagnostics,
+	SoftReconnect = softReconnect,
+	IsReady = function() return voiceReady end,
+	Diagnostics = function()
+		return {
+			voiceReady = voiceReady,
+			muted = muted,
+			hasInput = audioInput ~= nil,
+			inputParent = audioInput and tostring(audioInput.Parent) or "nil",
+		}
+	end,
 	Destroy = function()
 		if gui and gui.Parent then gui:Destroy() end
 	end,
