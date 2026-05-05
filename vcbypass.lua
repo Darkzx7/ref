@@ -1,494 +1,324 @@
-local Players = game:GetService("Players")
-local VoiceChatService = game:GetService("VoiceChatService")
+local G2L = {};
+
+local cloneref = cloneref or function(x) return x end
+local VoiceInternal = cloneref(game:GetService("VoiceChatInternal"))
+local VoiceChatService = cloneref(game:GetService("VoiceChatService"))
+
 local TweenService = game:GetService("TweenService")
-local GuiService = game:GetService("GuiService")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
 
-local player = Players.LocalPlayer
-local playerGui = player:WaitForChild("PlayerGui")
+local IMAGE_ON  = [[rbxassetid://72678449388570]]
+local IMAGE_OFF = [[rbxassetid://104208878511392]]
+local toggleState = true 
 
-local GUI_NAME = "RefVoiceCustom"
-local BUTTON_SIZE = 56
-local HOLD_RECONNECT_TIME = 0.7
-local SPEAKING_THRESHOLD = 0.04
+local dragging = false
+local dragStartPos = nil
+local frameStartPos = nil
 
-local active = false
-local reconnecting = false
-local destroyed = false
-local speaking = false
-local pressToken = 0
-local conns = {}
+local first_time = false
+
+local Group = VoiceInternal:GetGroupId()
+
+-- AudioDeviceInput pra manter voice nativo desconectado
 local audioInput = nil
 local audioAnalyzer = nil
-local voiceReady = false
-
-local stateDot
-local label
-local overlay
-local buttonStroke
-local tooltip
-local tooltipStroke
-
-local function safe(tag, fn)
-	local ok, result = pcall(fn)
-	if not ok then warn("[voice]", tag, result) return nil end
-	return result
-end
-
-local function track(conn)
-	table.insert(conns, conn)
-	return conn
-end
-
-local function disconnectAll()
-	for _, conn in ipairs(conns) do
-		safe("disconnect", function() conn:Disconnect() end)
-	end
-	table.clear(conns)
-end
-
-local function tween(obj, props, t)
-	if obj and obj.Parent then
-		safe("tween", function()
-			TweenService:Create(obj, TweenInfo.new(t or 0.14, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), props):Play()
-		end)
-	end
-end
-
-local function corner(parent, radius)
-	local c = Instance.new("UICorner")
-	c.CornerRadius = UDim.new(0, radius)
-	c.Parent = parent
-	return c
-end
-
-local function stroke(parent, transparency, color)
-	local s = Instance.new("UIStroke")
-	s.Thickness = 1
-	s.Transparency = transparency or 0.45
-	s.Color = color or Color3.fromRGB(68, 68, 78)
-	s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-	s.Parent = parent
-	return s
-end
-
-local function render()
-	if not label or not stateDot then return end
-
-	if reconnecting then
-		label.Text = "recon..."
-		stateDot.BackgroundColor3 = Color3.fromRGB(238, 186, 85)
-		tooltip.Text = "reconectando microfone..."
-		tween(overlay, { BackgroundTransparency = 0.30 }, 0.10)
-		tween(buttonStroke, { Transparency = 0.25, Color = Color3.fromRGB(238, 186, 85) }, 0.10)
-		return
-	end
-
-	if not voiceReady then
-		label.Text = "no vc"
-		stateDot.BackgroundColor3 = Color3.fromRGB(130, 130, 140)
-		tooltip.Text = "voice indisponivel"
-		tween(overlay, { BackgroundTransparency = 0.25 }, 0.12)
-		tween(buttonStroke, { Transparency = 0.48, Color = Color3.fromRGB(80, 80, 90) }, 0.12)
-		return
-	end
-
-	if not active then
-		label.Text = "muted"
-		stateDot.BackgroundColor3 = Color3.fromRGB(235, 82, 82)
-		tooltip.Text = "click: ativar mic"
-		tween(overlay, { BackgroundTransparency = 0.38 }, 0.12)
-		tween(buttonStroke, { Transparency = 0.48, Color = Color3.fromRGB(68, 68, 78) }, 0.12)
-	else
-		if speaking then
-			label.Text = "live"
-			stateDot.BackgroundColor3 = Color3.fromRGB(72, 210, 116)
-			tween(buttonStroke, { Transparency = 0.12, Color = Color3.fromRGB(72, 210, 116) }, 0.08)
-			tween(overlay, { BackgroundTransparency = 0.80 }, 0.08)
-		else
-			label.Text = "on"
-			stateDot.BackgroundColor3 = Color3.fromRGB(100, 180, 255)
-			tween(overlay, { BackgroundTransparency = 0.72 }, 0.12)
-			tween(buttonStroke, { Transparency = 0.35, Color = Color3.fromRGB(100, 180, 255) }, 0.12)
-		end
-		tooltip.Text = "click: mutar mic"
-	end
-end
 
 local function destroyInput()
-	if audioAnalyzer then
-		safe("destroy analyzer", function() audioAnalyzer:Destroy() end)
-		audioAnalyzer = nil
-	end
-	if audioInput then
-		safe("destroy input", function() audioInput:Destroy() end)
-		audioInput = nil
-	end
-end
-
-local speakLoop
-local function stopSpeakLoop()
-	if speakLoop then
-		task.cancel(speakLoop)
-		speakLoop = nil
-	end
-	speaking = false
-end
-
-local function startSpeakLoop(analyzer)
-	stopSpeakLoop()
-	speakLoop = task.spawn(function()
-		while analyzer and analyzer.Parent and not destroyed do
-			local level = safe("amplitude", function() return analyzer.loudnessSmoothed end) or 0
-			local isSpeaking = level > SPEAKING_THRESHOLD
-			if isSpeaking ~= speaking then
-				speaking = isSpeaking
-				render()
-			end
-			task.wait(0.05)
-		end
-	end)
+    if audioAnalyzer then pcall(function() audioAnalyzer:Destroy() end) audioAnalyzer = nil end
+    if audioInput then pcall(function() audioInput:Destroy() end) audioInput = nil end
 end
 
 local function createInput()
-	destroyInput()
+    destroyInput()
+    local player = game:GetService("Players").LocalPlayer
 
-	local input = Instance.new("AudioDeviceInput")
-	input.Name = "VoiceInput_Custom"
-	input.Player = player
-	input.Muted = false
-	input.Parent = player
+    local input = Instance.new("AudioDeviceInput")
+    input.Name = "VoiceInput_Bypass"
+    input.Player = player
+    input.Muted = false
+    input.Parent = player
 
-	local wire = Instance.new("Wire")
-	wire.Name = "VoiceWire"
+    local analyzer = Instance.new("AudioAnalyzer")
+    analyzer.Name = "VoiceAnalyzer_Bypass"
+    analyzer.Parent = player
 
-	local analyzer = Instance.new("AudioAnalyzer")
-	analyzer.Name = "VoiceAnalyzer"
-	analyzer.Parent = player
+    local wire = Instance.new("Wire")
+    wire.SourceInstance = input
+    wire.TargetInstance = analyzer
+    wire.Parent = player
 
-	wire.SourceInstance = input
-	wire.TargetInstance = analyzer
-	wire.Parent = player
-
-	audioInput = input
-	audioAnalyzer = analyzer
-	voiceReady = true
-
-	track(input.AncestryChanged:Connect(function()
-		if destroyed then return end
-		if not input.Parent then
-			stopSpeakLoop()
-			audioInput = nil
-			audioAnalyzer = nil
-			voiceReady = false
-			render()
-		end
-	end))
-
-	startSpeakLoop(analyzer)
-	return input
+    audioInput = input
+    audioAnalyzer = analyzer
 end
 
 local function disconnectRobloxVoice()
-	safe("leave voice", function()
-		VoiceChatService:SetMuted(true)
-	end)
+    pcall(function()
+        VoiceChatService:SetMuted(true)
+    end)
 end
 
-local function setActive(state)
-	active = state
-	if active then
-		disconnectRobloxVoice()
-		if not audioInput or not audioInput.Parent then
-			createInput()
-		else
-			audioInput.Muted = false
-		end
-	else
-		stopSpeakLoop()
-		if audioInput and audioInput.Parent then
-			safe("mute input", function()
-				audioInput.Muted = true
-			end)
-		end
-		speaking = false
-	end
-	render()
-end
+-- [UI igual ao original]
+G2L["1"] = Instance.new("ScreenGui", game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui"));
+G2L["1"]["Name"] = [[RAHHHHH]];
+G2L["1"]["ZIndexBehavior"] = Enum.ZIndexBehavior.Sibling;
+G2L["2"] = Instance.new("Frame", G2L["1"]);
+G2L["2"]["BorderSizePixel"] = 0;
+G2L["2"]["BackgroundColor3"] = Color3.fromRGB(153, 8, 138);
+G2L["2"]["Size"] = UDim2.new(0, 209, 0, 44);
+G2L["2"]["Position"] = UDim2.new(0.09039, 0, 0.58434, 0);
+G2L["2"]["BorderColor3"] = Color3.fromRGB(0, 0, 0);
+G2L["3"] = Instance.new("UICorner", G2L["2"]);
+G2L["3"]["CornerRadius"] = UDim.new(1, 0);
+G2L["4"] = Instance.new("Frame", G2L["2"]);
+G2L["4"]["BorderSizePixel"] = 0;
+G2L["4"]["BackgroundColor3"] = Color3.fromRGB(67, 67, 67);
+G2L["4"]["Size"] = UDim2.new(0, 32, 0, 34);
+G2L["4"]["Position"] = UDim2.new(0.04088, 0, 0.12979, 0);
+G2L["4"]["BorderColor3"] = Color3.fromRGB(0, 0, 0);
+G2L["4"]["BackgroundTransparency"] = 0.6;
+G2L["5"] = Instance.new("UICorner", G2L["4"]);
+G2L["5"]["CornerRadius"] = UDim.new(1, 0);
+G2L["6"] = Instance.new("UIAspectRatioConstraint", G2L["4"]);
+G2L["7"] = Instance.new("TextButton", G2L["4"]);
+G2L["7"]["BorderSizePixel"] = 0;
+G2L["7"]["TextSize"] = 14;
+G2L["7"]["AutoButtonColor"] = false;
+G2L["7"]["TextColor3"] = Color3.fromRGB(153, 153, 153);
+G2L["7"]["BackgroundColor3"] = Color3.fromRGB(67, 67, 67);
+G2L["7"]["FontFace"] = Font.new([[rbxasset://fonts/families/SourceSansPro.json]], Enum.FontWeight.SemiBold, Enum.FontStyle.Normal);
+G2L["7"]["BackgroundTransparency"] = 0.6;
+G2L["7"]["Size"] = UDim2.new(0, 85, 0, 32);
+G2L["7"]["BorderColor3"] = Color3.fromRGB(0, 0, 0);
+G2L["7"]["Text"] = [[Restart]];
+G2L["7"]["Visible"] = false;
+G2L["7"]["Position"] = UDim2.new(1.25, 0, 0, 0);
+G2L["8"] = Instance.new("UICorner", G2L["7"]);
+G2L["8"]["CornerRadius"] = UDim.new(1, 0);
+G2L["9"] = Instance.new("ImageButton", G2L["4"]);
+G2L["9"]["BorderSizePixel"] = 0;
+G2L["9"]["BackgroundTransparency"] = 1;
+G2L["9"]["BackgroundColor3"] = Color3.fromRGB(255, 255, 255);
+G2L["9"]["Size"] = UDim2.new(1, 0, 1, 0);
+G2L["9"]["BorderColor3"] = Color3.fromRGB(0, 0, 0);
+G2L["a"] = Instance.new("ImageLabel", G2L["9"]);
+G2L["a"]["BorderSizePixel"] = 0;
+G2L["a"]["BackgroundColor3"] = Color3.fromRGB(255, 255, 255);
+G2L["a"]["Image"] = [[rbxassetid://104208878511392]];
+G2L["a"]["Size"] = UDim2.new(0, 20, 0, 19);
+G2L["a"]["BorderColor3"] = Color3.fromRGB(0, 0, 0);
+G2L["a"]["BackgroundTransparency"] = 1;
+G2L["a"]["Position"] = UDim2.new(0.1875, 0, 0.1875, 0);
+G2L["b"] = Instance.new("UIAspectRatioConstraint", G2L["a"]);
+G2L["c"] = Instance.new("TextLabel", G2L["2"]);
+G2L["c"]["BorderSizePixel"] = 0;
+G2L["c"]["TextSize"] = 14;
+G2L["c"]["BackgroundColor3"] = Color3.fromRGB(255, 255, 255);
+G2L["c"]["FontFace"] = Font.new([[rbxasset://fonts/families/SourceSansPro.json]], Enum.FontWeight.SemiBold, Enum.FontStyle.Normal);
+G2L["c"]["TextColor3"] = Color3.fromRGB(255, 255, 255);
+G2L["c"]["BackgroundTransparency"] = 1;
+G2L["c"]["Size"] = UDim2.new(0, 98, 0, 12);
+G2L["c"]["BorderColor3"] = Color3.fromRGB(0, 0, 0);
+G2L["c"]["Text"] = [[Loading the Method...]];
+G2L["c"]["Name"] = [[Status]];
+G2L["c"]["Position"] = UDim2.new(0.35713, 0, 0.34091, 0);
 
-local function softReconnect()
-	if reconnecting then return false end
-	reconnecting = true
-	render()
+G2L["d"] = Instance.new("Frame", G2L["2"]);
+G2L["d"]["Name"] = [[DragLine]];
+G2L["d"]["BorderSizePixel"] = 0;
+G2L["d"]["BackgroundColor3"] = Color3.fromRGB(237, 17, 219);
+G2L["d"]["BackgroundTransparency"] = 0.6;
+G2L["d"]["Size"] = UDim2.new(0, 55, 0, 4);
+G2L["d"]["AnchorPoint"] = Vector2.new(0.5, 0.5);
+G2L["d"]["Position"] = UDim2.new(0.5, 0, 1.1, 0);
+G2L["d"]["BorderColor3"] = Color3.fromRGB(237, 17, 219);
+G2L["e"] = Instance.new("UICorner", G2L["d"]);
+G2L["e"]["CornerRadius"] = UDim.new(1, 0);
 
-	local wasActive = active
+-- Toggle: controla PublishPause + mantém Roblox voice nativo muted
+G2L["9"].MouseButton1Click:Connect(function()
+    toggleState = not toggleState
+    VoiceInternal:PublishPause(not toggleState)
 
-	stopSpeakLoop()
-	destroyInput()
-	task.wait(0.35)
+    if toggleState then
+        -- unmutou no bypass: garante que o voice nativo continua muted
+        disconnectRobloxVoice()
+        if audioInput and audioInput.Parent then
+            audioInput.Muted = false
+        end
+    else
+        -- mutou: muta o AudioDeviceInput também
+        if audioInput and audioInput.Parent then
+            audioInput.Muted = true
+        end
+    end
 
-	if wasActive then
-		disconnectRobloxVoice()
-		createInput()
-	end
-
-	active = wasActive
-	reconnecting = false
-	render()
-	return true
-end
-
-local function initVoice()
-	task.spawn(function()
-		local hasVoice = safe("IsVoiceEnabledForUserIdAsync", function()
-			return VoiceChatService:IsVoiceEnabledForUserIdAsync(player.UserId)
-		end)
-
-		if hasVoice then
-			voiceReady = true
-			active = false
-		else
-			voiceReady = false
-		end
-
-		render()
-	end)
-end
-
-local old = playerGui:FindFirstChild(GUI_NAME)
-if old then old:Destroy() end
-
-local gui = Instance.new("ScreenGui")
-gui.Name = GUI_NAME
-gui.ResetOnSpawn = false
-gui.IgnoreGuiInset = true
-gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-gui.DisplayOrder = 999
-gui.Parent = playerGui
-
-local root = Instance.new("Frame")
-root.Name = "voice_root"
-root.Size = UDim2.new(0, BUTTON_SIZE, 0, BUTTON_SIZE)
-root.Position = UDim2.new(0, 18, 0.5, -BUTTON_SIZE / 2)
-root.BackgroundTransparency = 1
-root.Parent = gui
-
-local shadow = Instance.new("Frame")
-shadow.Size = UDim2.new(1, 6, 1, 6)
-shadow.Position = UDim2.new(0, 2, 0, 5)
-shadow.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-shadow.BackgroundTransparency = 0.84
-shadow.BorderSizePixel = 0
-shadow.ZIndex = 1
-shadow.Parent = root
-corner(shadow, 17)
-
-local button = Instance.new("ImageButton")
-button.Name = "voice_avatar_button"
-button.Size = UDim2.new(1, 0, 1, 0)
-button.BackgroundColor3 = Color3.fromRGB(18, 18, 23)
-button.BackgroundTransparency = 0.03
-button.BorderSizePixel = 0
-button.AutoButtonColor = false
-button.ZIndex = 2
-button.Parent = root
-corner(button, 16)
-
-buttonStroke = stroke(button, 0.48, Color3.fromRGB(68, 68, 78))
-
-local avatarClip = Instance.new("Frame")
-avatarClip.Size = UDim2.new(1, -10, 1, -10)
-avatarClip.Position = UDim2.new(0, 5, 0, 5)
-avatarClip.BackgroundTransparency = 1
-avatarClip.BorderSizePixel = 0
-avatarClip.ClipsDescendants = true
-avatarClip.ZIndex = 3
-avatarClip.Parent = button
-corner(avatarClip, 13)
-
-local avatar = Instance.new("ImageLabel")
-avatar.Size = UDim2.new(1, 0, 1, 0)
-avatar.BackgroundTransparency = 1
-avatar.BorderSizePixel = 0
-avatar.ScaleType = Enum.ScaleType.Crop
-avatar.ZIndex = 3
-avatar.Parent = avatarClip
-
-task.spawn(function()
-	local image = safe("thumbnail", function()
-		return Players:GetUserThumbnailAsync(player.UserId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size100x100)
-	end)
-	if image and avatar.Parent then
-		avatar.Image = image
-	end
+    G2L["a"]["Image"] = toggleState and IMAGE_ON or IMAGE_OFF
 end)
 
-overlay = Instance.new("Frame")
-overlay.Size = UDim2.new(1, 0, 1, 0)
-overlay.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-overlay.BackgroundTransparency = 0.38
-overlay.BorderSizePixel = 0
-overlay.ZIndex = 4
-overlay.Parent = button
-corner(overlay, 16)
+local StatusLabel = G2L["c"]
+local DragLine = G2L["d"]
 
-stateDot = Instance.new("Frame")
-stateDot.AnchorPoint = Vector2.new(1, 1)
-stateDot.Size = UDim2.new(0, 12, 0, 12)
-stateDot.Position = UDim2.new(1, -6, 1, -6)
-stateDot.BackgroundColor3 = Color3.fromRGB(235, 82, 82)
-stateDot.BorderSizePixel = 0
-stateDot.ZIndex = 8
-stateDot.Parent = button
-corner(stateDot, 999)
-stroke(stateDot, 0.12, Color3.fromRGB(22, 22, 26))
+DragLine.MouseEnter:Connect(function()
+    TweenService:Create(DragLine, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+        BackgroundTransparency = 0,
+        BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    }):Play()
+end)
 
-label = Instance.new("TextLabel")
-label.AnchorPoint = Vector2.new(0.5, 0.5)
-label.Size = UDim2.new(1, -8, 0, 18)
-label.Position = UDim2.new(0.5, 0, 0.5, 0)
-label.BackgroundTransparency = 1
-label.Font = Enum.Font.GothamBold
-label.TextSize = 11
-label.TextColor3 = Color3.fromRGB(255, 255, 255)
-label.Text = "..."
-label.TextXAlignment = Enum.TextXAlignment.Center
-label.TextTransparency = 0
-label.ZIndex = 7
-label.Parent = button
+DragLine.MouseLeave:Connect(function()
+    TweenService:Create(DragLine, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+        BackgroundTransparency = 0.6,
+        BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    }):Play()
+end)
 
-tooltip = Instance.new("TextLabel")
-tooltip.Size = UDim2.new(0, 190, 0, 34)
-tooltip.Position = UDim2.new(1, 10, 0.5, -17)
-tooltip.BackgroundColor3 = Color3.fromRGB(18, 18, 23)
-tooltip.BackgroundTransparency = 1
-tooltip.BorderSizePixel = 0
-tooltip.Font = Enum.Font.GothamSemibold
-tooltip.TextSize = 11
-tooltip.TextColor3 = Color3.fromRGB(230, 230, 238)
-tooltip.TextTransparency = 1
-tooltip.Text = "click: mute/unmute | hold: reconectar"
-tooltip.Visible = false
-tooltip.ZIndex = 20
-tooltip.Parent = root
-corner(tooltip, 9)
-tooltipStroke = stroke(tooltip, 1, Color3.fromRGB(68, 68, 78))
+DragLine.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        dragging = true
+        dragStartPos = input.Position
+        frameStartPos = G2L["2"].Position
+        TweenService:Create(DragLine, TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+            BackgroundTransparency = 0,
+            BackgroundColor3 = Color3.fromRGB(200, 200, 200)
+        }):Play()
+    end
+end)
 
-local uiScale = Instance.new("UIScale")
-uiScale.Scale = 1
-uiScale.Parent = button
+DragLine.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        dragging = false
+        TweenService:Create(DragLine, TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+            BackgroundTransparency = 0,
+            BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+        }):Play()
+    end
+end)
 
-local function setTooltipVisible(state)
-	if state then
-		tooltip.Visible = true
-		tween(tooltip, { BackgroundTransparency = 0.08, TextTransparency = 0 }, 0.12)
-		tween(tooltipStroke, { Transparency = 0.56 }, 0.12)
-	else
-		tween(tooltip, { BackgroundTransparency = 1, TextTransparency = 1 }, 0.10)
-		tween(tooltipStroke, { Transparency = 1 }, 0.10)
-		task.delay(0.12, function()
-			if tooltip and tooltip.Parent and tooltip.TextTransparency > 0.95 then
-				tooltip.Visible = false
-			end
-		end)
-	end
+UserInputService.InputChanged:Connect(function(input)
+    if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+        local delta = input.Position - dragStartPos
+        local viewportSize = workspace.CurrentCamera.ViewportSize
+        local newX = frameStartPos.X.Scale + (delta.X / viewportSize.X)
+        local newY = frameStartPos.Y.Scale + (delta.Y / viewportSize.Y)
+        G2L["2"].Position = UDim2.new(newX, 0, newY, 0)
+    end
+end)
+
+local function SetStatus(text, waitAfter)
+    local fadeOut = TweenService:Create(StatusLabel, TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+        TextTransparency = 1
+    })
+    fadeOut:Play()
+    fadeOut.Completed:Wait()
+
+    StatusLabel.Text = text
+
+    local fadeIn = TweenService:Create(StatusLabel, TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+        TextTransparency = 0
+    })
+    fadeIn:Play()
+    fadeIn.Completed:Wait()
+
+    if waitAfter then
+        task.wait(waitAfter)
+    end
 end
 
-local function attemptReconnectWithRender()
-	local ok = softReconnect()
-	tooltip.Text = ok and "mic reconectado!" or "falha ao reconectar"
-	setTooltipVisible(true)
-	task.delay(1, function() setTooltipVisible(false) end)
+local StartSequence = function()
+    StatusLabel.TextTransparency = 1
+    StatusLabel.Text = [[Loading the Method...]]
+
+    task.wait(0.5)
+    SetStatus("Loading the Method...", 2)
+    SetStatus("Checking if Mic is Muted", 2)
+
+    if first_time == true then
+        VoiceInternal:PublishPause(false)
+        disconnectRobloxVoice()  -- mantém nativo muted no restart
+        if toggleState == false then
+            toggleState = true
+            G2L["a"]["Image"] = IMAGE_ON
+        end
+    end
+
+    if not game:GetService("CoreGui").TopBarApp.TopBarApp.UnibarLeftFrame.UnibarMenu["2"]["3"]:FindFirstChild("toggle_mic_mute") then
+        repeat
+            SetStatus("Connect to Voice Chat", 2)
+            task.wait(2)
+        until game:GetService("CoreGui").TopBarApp.TopBarApp.UnibarLeftFrame.UnibarMenu["2"]["3"]:FindFirstChild("toggle_mic_mute")
+    end
+    if game:GetService("CoreGui").TopBarApp.TopBarApp.UnibarLeftFrame.UnibarMenu["2"]["3"].toggle_mic_mute.IntegrationIconFrame.IntegrationIcon["1"].Image == "rbxasset://textures/ui/VoiceChat/MicLight/Muted.png" then
+        repeat
+            SetStatus("Please, unmute your mic!", 2)
+            task.wait(2) 
+        until game:GetService("CoreGui").TopBarApp.TopBarApp.UnibarLeftFrame.UnibarMenu["2"]["3"].toggle_mic_mute.IntegrationIconFrame.IntegrationIcon["1"].Image ~= "rbxasset://textures/ui/VoiceChat/MicLight/Muted.png"
+        SetStatus("Disabling voice chat button", 2)
+    end
+    SetStatus("Continuing Bypassing!", 2)
+    VoiceInternal:JoinByGroupId(Group, false, false)
+    task.wait(4)
+    VoiceChatService:rejoinVoice()
+    task.wait(2)
+
+    for i = 1, 8 do 
+        VoiceInternal:JoinByGroupId(Group, false, false)
+        task.wait()
+    end
+
+    -- Aqui: cria o AudioDeviceInput e mantém o voice nativo desconectado
+    disconnectRobloxVoice()
+    createInput()
+
+    VoiceInternal:PublishPause(false)
+    first_time = true
+    G2L["a"]["Image"] = IMAGE_ON
+
+    SetStatus("All Done!", 2)
+    SetStatus("Use the UI to mute for now on!", 2)
+    SetStatus("Made By Unicorn.Man", 2.5)
+
+    local fadeOutFinal = TweenService:Create(StatusLabel, TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+        TextTransparency = 1
+    })
+    fadeOutFinal:Play()
+    fadeOutFinal.Completed:Wait()
+
+    G2L["7"].Visible = true
+    G2L["7"].BackgroundTransparency = 1
+    G2L["7"].TextTransparency = 1
+
+    local expandFrame = TweenService:Create(G2L["2"], TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+        Size = UDim2.new(0, 140, 0, 44)
+    })
+    expandFrame:Play()
+    expandFrame.Completed:Wait()
+
+    local fadeInBtn = TweenService:Create(G2L["7"], TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+        BackgroundTransparency = 0.6,
+        TextTransparency = 0
+    })
+    fadeInBtn:Play()
+    fadeInBtn.Completed:Wait()
 end
 
-track(button.MouseButton2Click:Connect(function()
-	task.spawn(attemptReconnectWithRender)
-end))
+G2L["7"].MouseButton1Click:Connect(function()
+    local fadeOutBtn = TweenService:Create(G2L["7"], TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+        BackgroundTransparency = 1,
+        TextTransparency = 1
+    })
+    fadeOutBtn:Play()
+    fadeOutBtn.Completed:Wait()
 
-track(button.MouseButton1Click:Connect(function()
-	if destroyed or reconnecting then return end
-	setActive(not active)
-	setTooltipVisible(true)
-	task.delay(0.75, function() setTooltipVisible(false) end)
-end))
+    G2L["7"].Visible = false
 
-track(button.MouseButton1Down:Connect(function()
-	pressToken += 1
-	local myToken = pressToken
-	task.delay(HOLD_RECONNECT_TIME, function()
-		if destroyed or reconnecting then return end
-		if myToken ~= pressToken then return end
-		task.spawn(function()
-			tooltip.Text = "reconectando..."
-			setTooltipVisible(true)
-			attemptReconnectWithRender()
-		end)
-	end)
-end))
+    local shrinkFrame = TweenService:Create(G2L["2"], TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+        Size = UDim2.new(0, 209, 0, 44)
+    })
+    shrinkFrame:Play()
+    shrinkFrame.Completed:Wait()
 
-track(button.MouseButton1Up:Connect(function()
-	pressToken += 1
-end))
+    StartSequence()
+end)
 
-local dragging = false
-local pressed = false
-local startInputPos
-local startRootPos
-
-track(root.InputBegan:Connect(function(input)
-	if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then return end
-	pressed = true
-	dragging = false
-	startInputPos = input.Position
-	startRootPos = root.Position
-	local endConn
-	endConn = input.Changed:Connect(function()
-		if input.UserInputState == Enum.UserInputState.End then
-			pressed = false
-			dragging = false
-			if endConn then endConn:Disconnect() end
-		end
-	end)
-end))
-
-track(root.InputChanged:Connect(function(input)
-	if not pressed then return end
-	if input.UserInputType ~= Enum.UserInputType.MouseMovement and input.UserInputType ~= Enum.UserInputType.Touch then return end
-	local delta = input.Position - startInputPos
-	if not dragging and delta.Magnitude < 9 then return end
-	dragging = true
-	local cam = workspace.CurrentCamera
-	local viewport = cam and cam.ViewportSize or Vector2.new(1280, 720)
-	local inset = GuiService:GetGuiInset()
-	local x = math.clamp(startRootPos.X.Offset + delta.X, 6, viewport.X - BUTTON_SIZE - 6)
-	local y = math.clamp(startRootPos.Y.Offset + delta.Y, inset.Y + 6, viewport.Y - BUTTON_SIZE - 6)
-	root.Position = UDim2.new(0, x, 0, y)
-end))
-
-track(gui.Destroying:Connect(function()
-	destroyed = true
-	stopSpeakLoop()
-	destroyInput()
-	disconnectAll()
-end))
-
-initVoice()
-
-_G.RefVoiceCustom = {
-	SetActive = setActive,
-	SoftReconnect = softReconnect,
-	IsReady = function() return voiceReady end,
-	IsSpeaking = function() return speaking end,
-	Diagnostics = function()
-		return {
-			voiceReady = voiceReady,
-			active = active,
-			speaking = speaking,
-			hasInput = audioInput ~= nil,
-			hasAnalyzer = audioAnalyzer ~= nil,
-			inputParent = audioInput and tostring(audioInput.Parent) or "nil",
-		}
-	end,
-	Destroy = function()
-		if gui and gui.Parent then gui:Destroy() end
-	end,
-}
+task.spawn(StartSequence)
