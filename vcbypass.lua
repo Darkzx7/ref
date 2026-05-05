@@ -6,16 +6,19 @@ local GuiService = game:GetService("GuiService")
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 
-local GUI_NAME = "RefVoiceCustomReconnectTest"
+local GUI_NAME = "RefVoiceCustom"
 local BUTTON_SIZE = 56
 local HOLD_RECONNECT_TIME = 0.7
+local SPEAKING_THRESHOLD = 0.04
 
-local muted = true
+local active = false
 local reconnecting = false
 local destroyed = false
+local speaking = false
 local pressToken = 0
 local conns = {}
 local audioInput = nil
+local audioAnalyzer = nil
 local voiceReady = false
 
 local stateDot
@@ -89,60 +92,125 @@ local function render()
 		return
 	end
 
-	if muted then
+	if not active then
 		label.Text = "muted"
 		stateDot.BackgroundColor3 = Color3.fromRGB(235, 82, 82)
 		tooltip.Text = "click: ativar mic"
 		tween(overlay, { BackgroundTransparency = 0.38 }, 0.12)
 		tween(buttonStroke, { Transparency = 0.48, Color = Color3.fromRGB(68, 68, 78) }, 0.12)
 	else
-		label.Text = "live"
-		stateDot.BackgroundColor3 = Color3.fromRGB(72, 210, 116)
+		if speaking then
+			label.Text = "live"
+			stateDot.BackgroundColor3 = Color3.fromRGB(72, 210, 116)
+			tween(buttonStroke, { Transparency = 0.12, Color = Color3.fromRGB(72, 210, 116) }, 0.08)
+			tween(overlay, { BackgroundTransparency = 0.80 }, 0.08)
+		else
+			label.Text = "on"
+			stateDot.BackgroundColor3 = Color3.fromRGB(100, 180, 255)
+			tween(overlay, { BackgroundTransparency = 0.72 }, 0.12)
+			tween(buttonStroke, { Transparency = 0.35, Color = Color3.fromRGB(100, 180, 255) }, 0.12)
+		end
 		tooltip.Text = "click: mutar mic"
-		tween(overlay, { BackgroundTransparency = 0.72 }, 0.12)
-		tween(buttonStroke, { Transparency = 0.24, Color = Color3.fromRGB(72, 210, 116) }, 0.12)
 	end
 end
 
 local function destroyInput()
+	if audioAnalyzer then
+		safe("destroy analyzer", function() audioAnalyzer:Destroy() end)
+		audioAnalyzer = nil
+	end
 	if audioInput then
 		safe("destroy input", function() audioInput:Destroy() end)
 		audioInput = nil
 	end
 end
 
+local speakLoop
+local function stopSpeakLoop()
+	if speakLoop then
+		task.cancel(speakLoop)
+		speakLoop = nil
+	end
+	speaking = false
+end
+
+local function startSpeakLoop(analyzer)
+	stopSpeakLoop()
+	speakLoop = task.spawn(function()
+		while analyzer and analyzer.Parent and not destroyed do
+			local level = safe("amplitude", function() return analyzer.loudnessSmoothed end) or 0
+			local isSpeaking = level > SPEAKING_THRESHOLD
+			if isSpeaking ~= speaking then
+				speaking = isSpeaking
+				render()
+			end
+			task.wait(0.05)
+		end
+	end)
+end
+
 local function createInput()
 	destroyInput()
 
 	local input = Instance.new("AudioDeviceInput")
-	input.Name = "VoiceInput"
+	input.Name = "VoiceInput_Custom"
 	input.Player = player
-	input.Muted = muted
+	input.Muted = false
 	input.Parent = player
 
+	local wire = Instance.new("Wire")
+	wire.Name = "VoiceWire"
+
+	local analyzer = Instance.new("AudioAnalyzer")
+	analyzer.Name = "VoiceAnalyzer"
+	analyzer.Parent = player
+
+	wire.SourceInstance = input
+	wire.TargetInstance = analyzer
+	wire.Parent = player
+
 	audioInput = input
+	audioAnalyzer = analyzer
 	voiceReady = true
 
-	safe("watch destroy", function()
-		track(input.AncestryChanged:Connect(function()
-			if destroyed then return end
-			if not input.Parent then
-				audioInput = nil
-				voiceReady = false
-				render()
-			end
-		end))
-	end)
+	track(input.AncestryChanged:Connect(function()
+		if destroyed then return end
+		if not input.Parent then
+			stopSpeakLoop()
+			audioInput = nil
+			audioAnalyzer = nil
+			voiceReady = false
+			render()
+		end
+	end))
 
+	startSpeakLoop(analyzer)
 	return input
 end
 
-local function applyMuted(nextMuted)
-	muted = nextMuted == true
-	if audioInput and audioInput.Parent then
-		safe("set muted", function()
-			audioInput.Muted = muted
-		end)
+local function disconnectRobloxVoice()
+	safe("leave voice", function()
+		VoiceChatService:SetMuted(true)
+	end)
+end
+
+local function setActive(state)
+	active = state
+	if active then
+		disconnectRobloxVoice()
+		if not audioInput or not audioInput.Parent then
+			createInput()
+		else
+			audioInput.Muted = false
+		end
+	else
+		stopSpeakLoop()
+		if audioInput and audioInput.Parent then
+			safe("mute input", function()
+				audioInput.Muted = true
+			end)
+		end
+		speaking = false
 	end
 	render()
 end
@@ -152,13 +220,18 @@ local function softReconnect()
 	reconnecting = true
 	render()
 
-	local wasMuted = muted
+	local wasActive = active
 
+	stopSpeakLoop()
 	destroyInput()
 	task.wait(0.35)
-	createInput()
-	applyMuted(wasMuted)
 
+	if wasActive then
+		disconnectRobloxVoice()
+		createInput()
+	end
+
+	active = wasActive
 	reconnecting = false
 	render()
 	return true
@@ -171,8 +244,8 @@ local function initVoice()
 		end)
 
 		if hasVoice then
-			createInput()
-			applyMuted(true)
+			voiceReady = true
+			active = false
 		else
 			voiceReady = false
 		end
@@ -333,7 +406,7 @@ end))
 
 track(button.MouseButton1Click:Connect(function()
 	if destroyed or reconnecting then return end
-	applyMuted(not muted)
+	setActive(not active)
 	setTooltipVisible(true)
 	task.delay(0.75, function() setTooltipVisible(false) end)
 end))
@@ -393,21 +466,25 @@ end))
 
 track(gui.Destroying:Connect(function()
 	destroyed = true
+	stopSpeakLoop()
 	destroyInput()
 	disconnectAll()
 end))
 
 initVoice()
 
-_G.RefVoiceCustomReconnectTest = {
-	SetMuted = applyMuted,
+_G.RefVoiceCustom = {
+	SetActive = setActive,
 	SoftReconnect = softReconnect,
 	IsReady = function() return voiceReady end,
+	IsSpeaking = function() return speaking end,
 	Diagnostics = function()
 		return {
 			voiceReady = voiceReady,
-			muted = muted,
+			active = active,
+			speaking = speaking,
 			hasInput = audioInput ~= nil,
+			hasAnalyzer = audioAnalyzer ~= nil,
 			inputParent = audioInput and tostring(audioInput.Parent) or "nil",
 		}
 	end,
