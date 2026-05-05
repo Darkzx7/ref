@@ -1,10 +1,6 @@
--- voice_custom_button_reconnect_test.client.lua
--- CORRIGIDO - Sem erros, com bypass real
-
 local Players = game:GetService("Players")
 local VoiceChatService = game:GetService("VoiceChatService")
 local TweenService = game:GetService("TweenService")
-local UserInputService = game:GetService("UserInputService")
 local GuiService = game:GetService("GuiService")
 
 local player = Players.LocalPlayer
@@ -14,7 +10,6 @@ local GUI_NAME = "RefVoiceCustomReconnectTest"
 local BUTTON_SIZE = 56
 local HOLD_RECONNECT_TIME = 0.7
 
--- ESTADO DO SISTEMA
 local customVoiceActive = false
 local muted = true
 local reconnecting = false
@@ -23,11 +18,17 @@ local pressToken = 0
 local conns = {}
 local customAudioInput = nil
 
--- FUNÇÕES SEGURAS
-local function safe(label, fn)
+local stateDot
+local label
+local overlay
+local buttonStroke
+local tooltip
+local tooltipStroke
+
+local function safe(label_tag, fn)
 	local ok, result = pcall(fn)
 	if not ok then
-		warn("[voice test]", label, result)
+		warn("[voice test]", label_tag, result)
 		return nil
 	end
 	return result
@@ -76,17 +77,11 @@ local function stroke(parent, transparency, color)
 	return s
 end
 
--- ========== BYPASS: DESCONEXÃO REAL ==========
-
 local function disconnectFromOriginalVoice()
-	print("[VoiceSystem] ⚡ Desconectando do voice chat original...")
-	
-	-- MÉTODO QUE FUNCIONA: desabilita o sistema de voz padrão
 	safe("DisableDefaultVoice", function()
 		VoiceChatService.EnableDefaultVoice = false
 	end)
-	
-	-- Força destruição dos inputs originais
+
 	for _, obj in ipairs(game:GetDescendants()) do
 		if obj:IsA("AudioDeviceInput") and obj.Player == player and obj ~= customAudioInput then
 			safe("Destroy original input", function()
@@ -95,18 +90,12 @@ local function disconnectFromOriginalVoice()
 			end)
 		end
 	end
-	
-	print("[VoiceSystem] ✅ Desconectado! (EnableDefaultVoice = false)")
 end
 
 local function reconnectToOriginalVoice()
-	print("[VoiceSystem] 🔄 Reconectando ao voice chat original...")
-	
 	safe("EnableDefaultVoice", function()
 		VoiceChatService.EnableDefaultVoice = true
 	end)
-	
-	print("[VoiceSystem] ✅ Reconectado! (EnableDefaultVoice = true)")
 end
 
 local function createCustomAudioInput()
@@ -115,14 +104,13 @@ local function createCustomAudioInput()
 			customAudioInput:Destroy()
 		end)
 	end
-	
+
 	customAudioInput = Instance.new("AudioDeviceInput")
 	customAudioInput.Name = "CustomVoiceInput"
 	customAudioInput.Player = player
 	customAudioInput.Muted = muted
 	customAudioInput.Parent = player
-	
-	print("[VoiceSystem] 🎤 Sistema customizado criado!")
+
 	return customAudioInput
 end
 
@@ -132,26 +120,22 @@ local function destroyCustomAudioInput()
 			customAudioInput:Destroy()
 		end)
 		customAudioInput = nil
-		print("[VoiceSystem] 🛑 Sistema customizado destruído!")
 	end
 end
 
--- SIMULA DETECÇÃO DE VOZ (já que VolumeDetector não funciona)
 local function simulateVoiceDetection()
 	task.spawn(function()
 		while customVoiceActive and not destroyed and customAudioInput do
 			if not muted and customAudioInput and customAudioInput.Parent then
-				-- Simula detecção baseada no estado do microfone
-				-- Na Roblox não dá pra acessar o volume real pelo cliente
 				local fakeVolume = math.random() * 0.3
 				local isFakeSpeaking = fakeVolume > 0.1
-				
+
 				if isFakeSpeaking then
 					stateDot.BackgroundColor3 = Color3.fromRGB(255, 50, 50)
-					label.Text = "🔴 LIVE"
+					label.Text = "LIVE"
 				else
 					stateDot.BackgroundColor3 = Color3.fromRGB(72, 210, 116)
-					label.Text = "🎤 CUSTOM"
+					label.Text = "CUSTOM"
 				end
 			end
 			task.wait(0.15)
@@ -159,43 +143,19 @@ local function simulateVoiceDetection()
 	end)
 end
 
-local function toggleCustomVoice()
-	customVoiceActive = not customVoiceActive
-	
-	if customVoiceActive then
-		print("[VoiceSystem] 🎯 ATIVANDO MODO CUSTOM")
-		disconnectFromOriginalVoice()
-		createCustomAudioInput()
-		simulateVoiceDetection()
-		muted = false
-		if customAudioInput then
-			customAudioInput.Muted = false
-		end
-	else
-		print("[VoiceSystem] 🔙 DESATIVANDO MODO CUSTOM")
-		destroyCustomAudioInput()
-		reconnectToOriginalVoice()
-		muted = true
-	end
-	
-	render()
-end
-
 local function canUseVoice()
-	-- No cliente, só podemos verificar se o jogador tem voz habilitada
 	return safe("IsVoiceEnabledForUserIdAsync", function()
 		return VoiceChatService:IsVoiceEnabledForUserIdAsync(player.UserId)
 	end) == true
 end
 
 local function getVoiceServiceDiagnostics()
-	local data = {
+	return {
 		voiceEnabled = canUseVoice(),
 		enableDefaultVoice = tostring(VoiceChatService.EnableDefaultVoice),
 		customMode = customVoiceActive,
-		hasCustomInput = customAudioInput ~= nil
+		hasCustomInput = customAudioInput ~= nil,
 	}
-	return data
 end
 
 local function ownsInput(input)
@@ -226,24 +186,6 @@ local function getBestInput()
 	return inputs[1]
 end
 
-local function applyMuted(nextMuted)
-	muted = nextMuted == true
-	if customVoiceActive and customAudioInput then
-		safe("set custom input muted", function()
-			customAudioInput.Muted = muted
-		end)
-	else
-		for _, input in ipairs(findLocalInputs()) do
-			safe("set existing input muted", function()
-				input.Muted = muted
-			])
-		end
-	end
-	render()
-end
-
--- ========== UI ==========
-
 local function render()
 	local voiceEnabled = canUseVoice()
 	local input = getBestInput()
@@ -268,11 +210,11 @@ local function render()
 
 	if customVoiceActive then
 		if not muted then
-			label.Text = "🎤 CUSTOM"
+			label.Text = "CUSTOM"
 			stateDot.BackgroundColor3 = Color3.fromRGB(72, 210, 116)
-			tooltip.Text = "Modo Custom • falando: 🔴"
+			tooltip.Text = "Modo Custom • falando"
 		else
-			label.Text = "🔇 MUTE"
+			label.Text = "MUTE"
 			stateDot.BackgroundColor3 = Color3.fromRGB(235, 82, 82)
 			tooltip.Text = "Modo Custom (mutado)"
 		end
@@ -281,7 +223,6 @@ local function render()
 		return
 	end
 
-	-- Modo original
 	if not input then
 		label.Text = "no api"
 		stateDot.BackgroundColor3 = Color3.fromRGB(238, 186, 85)
@@ -299,6 +240,42 @@ local function render()
 		tooltip.Text = "click: mute"
 	end
 	tween(overlay, { BackgroundTransparency = muted and 0.38 or 0.72 }, 0.12)
+end
+
+local function applyMuted(nextMuted)
+	muted = nextMuted == true
+	if customVoiceActive and customAudioInput then
+		safe("set custom input muted", function()
+			customAudioInput.Muted = muted
+		end)
+	else
+		for _, input in ipairs(findLocalInputs()) do
+			safe("set existing input muted", function()
+				input.Muted = muted
+			end)
+		end
+	end
+	render()
+end
+
+local function toggleCustomVoice()
+	customVoiceActive = not customVoiceActive
+
+	if customVoiceActive then
+		disconnectFromOriginalVoice()
+		createCustomAudioInput()
+		simulateVoiceDetection()
+		muted = false
+		if customAudioInput then
+			customAudioInput.Muted = false
+		end
+	else
+		destroyCustomAudioInput()
+		reconnectToOriginalVoice()
+		muted = true
+	end
+
+	render()
 end
 
 local function softReconnectMic()
@@ -331,8 +308,6 @@ local function softReconnectMic()
 	render()
 	return true
 end
-
--- ========== CRIAÇÃO DA UI ==========
 
 local old = playerGui:FindFirstChild(GUI_NAME)
 if old then old:Destroy() end
@@ -374,7 +349,7 @@ button.ZIndex = 2
 button.Parent = root
 corner(button, 16)
 
-local buttonStroke = stroke(button, 0.48, Color3.fromRGB(68, 68, 78))
+buttonStroke = stroke(button, 0.48, Color3.fromRGB(68, 68, 78))
 
 local avatarClip = Instance.new("Frame")
 avatarClip.Name = "avatar_clip"
@@ -405,7 +380,7 @@ task.spawn(function()
 	end
 end)
 
-local overlay = Instance.new("Frame")
+overlay = Instance.new("Frame")
 overlay.Name = "overlay"
 overlay.Size = UDim2.new(1, 0, 1, 0)
 overlay.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
@@ -415,7 +390,7 @@ overlay.ZIndex = 4
 overlay.Parent = button
 corner(overlay, 16)
 
-local stateDot = Instance.new("Frame")
+stateDot = Instance.new("Frame")
 stateDot.Name = "state_dot"
 stateDot.AnchorPoint = Vector2.new(1, 1)
 stateDot.Size = UDim2.new(0, 12, 0, 12)
@@ -427,7 +402,7 @@ stateDot.Parent = button
 corner(stateDot, 999)
 stroke(stateDot, 0.12, Color3.fromRGB(22, 22, 26))
 
-local label = Instance.new("TextLabel")
+label = Instance.new("TextLabel")
 label.Name = "state_label"
 label.AnchorPoint = Vector2.new(0.5, 0.5)
 label.Size = UDim2.new(1, -8, 0, 18)
@@ -442,7 +417,7 @@ label.TextTransparency = 0
 label.ZIndex = 7
 label.Parent = button
 
-local tooltip = Instance.new("TextLabel")
+tooltip = Instance.new("TextLabel")
 tooltip.Name = "tooltip"
 tooltip.Size = UDim2.new(0, 190, 0, 34)
 tooltip.Position = UDim2.new(1, 10, 0.5, -17)
@@ -458,7 +433,7 @@ tooltip.Visible = false
 tooltip.ZIndex = 20
 tooltip.Parent = root
 corner(tooltip, 9)
-local tooltipStroke = stroke(tooltip, 1, Color3.fromRGB(68, 68, 78))
+tooltipStroke = stroke(tooltip, 1, Color3.fromRGB(68, 68, 78))
 
 local scale = Instance.new("UIScale")
 scale.Scale = 1
@@ -480,8 +455,6 @@ local function setTooltipVisible(state)
 	end
 end
 
--- ========== EVENTOS ==========
-
 local function attemptReconnectWithRender()
 	reconnecting = true
 	render()
@@ -496,12 +469,10 @@ local function attemptReconnectWithRender()
 	end)
 end
 
--- Botão direito: reconnect
 track(button.MouseButton2Click:Connect(function()
 	task.spawn(attemptReconnectWithRender)
 end))
 
--- CLIQUE: alterna mute/unmute
 track(button.MouseButton1Click:Connect(function()
 	if destroyed or reconnecting then return end
 	applyMuted(not muted)
@@ -511,7 +482,6 @@ track(button.MouseButton1Click:Connect(function()
 	end)
 end))
 
--- SEGURAR (hold): ativa/desativa modo custom
 track(button.MouseButton1Down:Connect(function()
 	pressToken += 1
 	local myToken = pressToken
@@ -530,7 +500,6 @@ track(button.MouseButton1Up:Connect(function()
 	pressToken += 1
 end))
 
--- Arrastar
 local dragging = false
 local pressed = false
 local startInput
@@ -582,7 +551,6 @@ end))
 applyMuted(true)
 render()
 
--- COMANDOS
 _G.RefVoiceCustomReconnectTest = {
 	SetMuted = applyMuted,
 	ToggleCustom = toggleCustomVoice,
@@ -593,14 +561,3 @@ _G.RefVoiceCustomReconnectTest = {
 		if gui and gui.Parent then gui:Destroy() end
 	end,
 }
-
-print("═══════════════════════════════════════")
-print("  ✅ SISTEMA CORRIGIDO - SEM ERROS!")
-print("═══════════════════════════════════════")
-print(" SEGURE O BOTÃO → ativa/desativa MODO CUSTOM")
-print(" CLIQUE → mute/unmute")
-print(" BOTÃO DIREITO → reconecta microfone")
-print("═══════════════════════════════════════")
-print(" MODO CUSTOM: EnableDefaultVoice = false")
-print(" Isso DESCONECTA do voice chat original!")
-print("═══════════════════════════════════════")
