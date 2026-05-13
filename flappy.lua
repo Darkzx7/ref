@@ -1,10 +1,25 @@
--- AutoFlappy v3 — valores calibrados com debug real
--- Bird: 10.5x10.5px (bounds com Tail: 12.5x10.5)
--- Cano corpo: 13.7px largura | Cap: 16.2px largura (1.25px cada lado)
--- Cap_T height: ~1.5px | Cap_B height: ~4.2px
--- Vão típico: ~52px | GameArea: 105x162px
+-- AutoFlappy v4 — calibrado com scan real de 60s
+--
+-- Dados confirmados:
+--   GameArea:  left=772.17  top=129.08  right=877.62  bottom=291.31  w=105.45  h=162.23
+--   Ground:    top=275.09   h=16.22
+--   Bird cx:   801.70 (fixo, nunca se move horizontalmente)
+--   Bird body: w=10.54  h=10.54  |  com Tail: w~=12.55
+--   Bird left: ~796.43   right: ~806.97
+--   Cano corpo: w=13.71
+--   Cap:        w=16.18  (0 left=corpo.left-1.23  right=corpo.right+1.24)
+--   Cap_T height: 1.07~2.34px  (pequeno, topo do vao = corpo_T.bottom)
+--   Cap_B height: 1.75~4.57px  (maior,  fundo vao  = BOUNDS_TOTAL_B.top = corpo_B.top)
+--   GAP fixo:   51.91px
+--   Velocidade canos: ~67px/s (medido: 7.77px por 0.34s * 60fps = ~22.8px/frame)
+--   Impulso tap: ~-155px/s (média real dos 44 taps detectados)
+--   GRAVITY:    ~700px/s² (estimado)
+--
+-- Bug crítico corrigido: canos com mesmo número (ex: Pipe_4_T) aparecem multiplos
+-- pares na tela — o agrupamento por nome causava coluna errada.
+-- Solução: agrupar SOMENTE por posição X, nunca por nome.
 
-local Players  = game:GetService("Players")
+local Players    = game:GetService("Players")
 local RunService = game:GetService("RunService")
 
 local Player    = Players.LocalPlayer
@@ -12,234 +27,248 @@ local PlayerGui = Player:WaitForChild("PlayerGui")
 
 local Enabled = true
 
--- UI
+-- ── UI ────────────────────────────────────────────────────────────────────────
 local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "AutoFlappyUI"
 ScreenGui.ResetOnSpawn = false
 ScreenGui.Parent = PlayerGui
 
 local Main = Instance.new("Frame")
-Main.Size = UDim2.new(0, 150, 0, 45)
-Main.Position = UDim2.new(0, 20, 0.5, -22)
-Main.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
-Main.BorderSizePixel = 0
-Main.Active = true
+Main.Size       = UDim2.new(0,150,0,45)
+Main.Position   = UDim2.new(0,20,0.5,-22)
+Main.BackgroundColor3 = Color3.fromRGB(25,25,25)
+Main.BorderSizePixel  = 0
+Main.Active    = true
 Main.Draggable = true
-Main.Parent = ScreenGui
-Instance.new("UICorner", Main).CornerRadius = UDim.new(0, 10)
+Main.Parent    = ScreenGui
+Instance.new("UICorner", Main).CornerRadius = UDim.new(0,10)
 
 local Toggle = Instance.new("TextButton")
-Toggle.Size = UDim2.new(1, -10, 1, -10)
-Toggle.Position = UDim2.new(0, 5, 0, 5)
-Toggle.BackgroundColor3 = Color3.fromRGB(50, 160, 230)
-Toggle.BorderSizePixel = 0
-Toggle.Text = "Auto Flappy: ON"
-Toggle.TextColor3 = Color3.fromRGB(255, 255, 255)
-Toggle.TextSize = 14
-Toggle.Font = Enum.Font.GothamBold
-Toggle.Parent = Main
-Instance.new("UICorner", Toggle).CornerRadius = UDim.new(0, 8)
+Toggle.Size   = UDim2.new(1,-10,1,-10)
+Toggle.Position = UDim2.new(0,5,0,5)
+Toggle.BackgroundColor3 = Color3.fromRGB(50,160,230)
+Toggle.BorderSizePixel  = 0
+Toggle.Text      = "Auto Flappy: ON"
+Toggle.TextColor3 = Color3.fromRGB(255,255,255)
+Toggle.TextSize  = 14
+Toggle.Font      = Enum.Font.GothamBold
+Toggle.Parent    = Main
+Instance.new("UICorner", Toggle).CornerRadius = UDim.new(0,8)
 
 local function updateUI()
-	Toggle.Text  = Enabled and "Auto Flappy: ON"  or "Auto Flappy: OFF"
+	Toggle.Text = Enabled and "Auto Flappy: ON" or "Auto Flappy: OFF"
 	Toggle.BackgroundColor3 = Enabled
-		and Color3.fromRGB(50, 160, 230)
-		or  Color3.fromRGB(170, 55, 55)
+		and Color3.fromRGB(50,160,230)
+		or  Color3.fromRGB(170,55,55)
 end
-
 Toggle.MouseButton1Click:Connect(function()
 	Enabled = not Enabled
 	updateUI()
 end)
 
--- ─── Física calibrada pelo debug ────────────────────────────────────────────
--- Ajuste GRAVITY e TAP_IMPULSE se o bot ainda errar a trajetória
-local GRAVITY     =  700   -- px/s²
-local TAP_IMPULSE = -168   -- px/s  (negativo = sobe)
+-- ── Constantes calibradas ─────────────────────────────────────────────────────
+local GRAVITY     =  700    -- px/s²   (ajuste se trajetória errar)
+local TAP_IMPULSE = -155    -- px/s    (média medida: -155)
 
--- Margem de segurança fixa em pixels (baseada nos dados reais)
--- Bird real com Tail = 12.5px de largura, 10.5px de altura
--- Cap_B projeta 4.2px no corredor → margem_bottom precisa cobrir isso
--- Cap_T projeta ~1.5px → margem menor em cima
-local MARGIN_TOP    = 3.0  -- px acima do rawTop (cap_T é pequeno)
-local MARGIN_BOTTOM = 5.0  -- px abaixo do rawBottom (cap_B é maior: 4.2px)
-local BIRD_H        = 10.5 -- altura real do hitbox do bird
-local BIRD_W_REAL   = 12.5 -- largura real incluindo Tail (usado p/ colisão lateral)
+-- Hitbox real do bird (com Tail)
+local BIRD_LEFT_OFFSET = -1.37   -- Tail projeta ~1.37px à esquerda de body.left
+local BIRD_RIGHT_OFFSET =  0.63  -- Beak projeta ~0.63px à direita de body.right
+-- altura do hitbox = 10.54px (sem filhos que ficam dentro)
 
--- ─── Helpers ────────────────────────────────────────────────────────────────
-local function clamp(v, a, b)
-	return v < a and a or (v > b and b or v)
-end
+-- Margens de segurança no corredor (em px)
+-- Cap_T é pequeno (<=2.34px) — margem mínima
+-- Cap_B é maior  (<=4.57px) — margem maior
+-- Somamos ~2px extra de folga para erros de predição
+local SAFE_MARGIN_TOP    = 3.5   -- acima do rawTop
+local SAFE_MARGIN_BOTTOM = 7.0   -- abaixo do rawBottom (cap_B maior + folga)
 
-local function lerp(a, b, t)
-	return a + (b - a) * t
-end
+-- GameArea constantes (do scan — não mudam)
+local GA_LEFT   = 772.17
+local GA_TOP    = 129.08
+local GA_RIGHT  = 877.62
+local GA_BOTTOM = 291.31
+local GROUND_TOP = 275.09   -- topo do chão (limite inferior real do bird)
+
+-- Velocidade dos canos (auto-calibrada em runtime)
+local pipeSpeed = 67.0   -- px/s  (valor inicial medido)
+
+-- ── Helpers ───────────────────────────────────────────────────────────────────
+local function clamp(v,a,b) return v<a and a or (v>b and b or v) end
+local function lerp(a,b,t)  return a+(b-a)*t end
 
 local function getRect(obj)
-	local p, s = obj.AbsolutePosition, obj.AbsoluteSize
+	local p,s = obj.AbsolutePosition, obj.AbsoluteSize
 	return {
-		left   = p.X,         right  = p.X + s.X,
-		top    = p.Y,         bottom = p.Y + s.Y,
-		width  = s.X,         height = s.Y,
-		cx     = p.X + s.X/2, cy     = p.Y + s.Y/2,
+		left=p.X, right=p.X+s.X, top=p.Y, bottom=p.Y+s.Y,
+		width=s.X, height=s.Y, cx=p.X+s.X/2, cy=p.Y+s.Y/2,
 	}
 end
 
--- retorna o bounding-box real do objeto + todos os descendentes visíveis
-local function getGuiBounds(obj)
-	local p, s = obj.AbsolutePosition, obj.AbsoluteSize
-	local L, R, T, B = p.X, p.X+s.X, p.Y, p.Y+s.Y
-	for _, d in ipairs(obj:GetDescendants()) do
-		if d:IsA("GuiObject") and d.Visible then
-			local dp, ds = d.AbsolutePosition, d.AbsoluteSize
-			L = math.min(L, dp.X);        R = math.max(R, dp.X+ds.X)
-			T = math.min(T, dp.Y);        B = math.max(B, dp.Y+ds.Y)
-		end
-	end
-	return { left=L, right=R, top=T, bottom=B,
-	         width=R-L, height=B-T, cx=(L+R)/2, cy=(T+B)/2 }
-end
-
--- ─── Detecção de canos ──────────────────────────────────────────────────────
-local function isPipe(obj)
-	-- nomes confirmados pelo debug: Pipe_N_T e Pipe_N_B
-	return obj:IsA("GuiObject") and obj.Visible
-	       and obj.Name:match("^Pipe_%d+_[TB]$") ~= nil
-end
-
--- ─── Velocidade dos canos (medida em runtime) ────────────────────────────────
-local pipeSpeed         = 50   -- chute inicial; vai se auto-calibrar
-local lastPipePositions = {}
+-- ── Velocidade dos canos ──────────────────────────────────────────────────────
+local lastPipeLeft = {}   -- [obj] = {x, t}
 
 local function updatePipeSpeed(GameArea)
 	local now   = tick()
 	local total, count = 0, 0
+
 	for _, obj in ipairs(GameArea:GetChildren()) do
-		if isPipe(obj) then
-			local r   = getGuiBounds(obj)
-			local old = lastPipePositions[obj]
+		if obj:IsA("GuiObject") and obj.Visible
+		   and obj.Name:match("^Pipe_%d+_[TB]$") then
+			local x   = obj.AbsolutePosition.X
+			local old = lastPipeLeft[obj]
 			if old then
-				local dt    = math.max(now - old.t, 1/240)
-				local speed = (old.left - r.left) / dt
-				if speed > 15 and speed < 130 then
+				local dt    = math.max(now - old.t, 1/120)
+				local speed = (old.x - x) / dt
+				if speed > 20 and speed < 200 then
 					total = total + speed
 					count = count + 1
 				end
 			end
-			lastPipePositions[obj] = { left = r.left, t = now }
+			lastPipeLeft[obj] = {x=x, t=now}
 		end
 	end
-	-- limpa objetos removidos
-	for obj in pairs(lastPipePositions) do
-		if not obj.Parent then lastPipePositions[obj] = nil end
+
+	for obj in pairs(lastPipeLeft) do
+		if not obj.Parent then lastPipeLeft[obj] = nil end
 	end
+
 	if count > 0 then
-		local measured = total / count
-		pipeSpeed = pipeSpeed * 0.90 + measured * 0.10
-		pipeSpeed = clamp(pipeSpeed, 25, 120)
+		local m = total / count
+		pipeSpeed = pipeSpeed * 0.92 + m * 0.08
+		pipeSpeed = clamp(pipeSpeed, 30, 150)
 	end
 end
 
--- ─── Agrupamento de colunas de canos ────────────────────────────────────────
-local function getPipeColumns(GameArea)
-	local rects = {}
+-- ── Detecção e agrupamento de canos ──────────────────────────────────────────
+-- CRÍTICO: agrupa por posição X real, NÃO por nome.
+-- Cada par (T+B) tem o mesmo left/right — tolerância pequena (2px) para não
+-- juntar pares vizinhos que possam estar próximos.
+
+local function getPairs(GameArea)
+	-- coleta todos os canos visíveis com seus bounds incluindo cap
+	local pipes = {}
 	for _, obj in ipairs(GameArea:GetChildren()) do
-		if isPipe(obj) then
-			table.insert(rects, { r = getGuiBounds(obj), name = obj.Name })
+		if obj:IsA("GuiObject") and obj.Visible
+		   and obj.Name:match("^Pipe_%d+_[TB]$") then
+			local p, s = obj.AbsolutePosition, obj.AbsoluteSize
+			-- bounds com cap: cap sempre tem mesma left do obj - 1.23px
+			-- mas usamos getChildren para pegar o cap exato
+			local capLeft  = p.X - 1.24
+			local capRight = p.X + s.X + 1.24
+			local isTop = obj.Name:match("_T$") ~= nil
+
+			-- procura cap filho para bounds exatos
+			for _, child in ipairs(obj:GetChildren()) do
+				if child:IsA("GuiObject") and child.Visible
+				   and child.Name:lower():find("cap") then
+					local cp, cs = child.AbsolutePosition, child.AbsoluteSize
+					capLeft  = math.min(capLeft,  cp.X)
+					capRight = math.max(capRight, cp.X + cs.X)
+				end
+			end
+
+			table.insert(pipes, {
+				obj      = obj,
+				isTop    = isTop,
+				bodyLeft = p.X,
+				bodyRight= p.X + s.X,
+				capLeft  = capLeft,
+				capRight = capRight,
+				top      = p.Y,
+				bottom   = p.Y + s.Y,
+				cx       = p.X + s.X / 2,
+			})
 		end
 	end
 
-	-- agrupa por cx com tolerância generosa (cap = 16.2px, corpo = 13.7px)
-	local columns    = {}
-	local X_TOL      = 4   -- canos do mesmo par têm cx idêntico; tolerância pequena evita
-	                       -- juntar pares diferentes que por acaso estejam próximos
+	-- agrupa por cx com tolerância de 2px (pares têm cx idêntico)
+	local groups = {}
+	local X_TOL  = 2.5
 
-	for _, entry in ipairs(rects) do
-		local r    = entry.r
+	for _, pipe in ipairs(pipes) do
 		local found
-		for _, col in ipairs(columns) do
-			if math.abs(r.cx - col.cx) <= X_TOL then
-				found = col; break
+		for _, g in ipairs(groups) do
+			if math.abs(pipe.cx - g.cx) <= X_TOL then
+				found = g; break
 			end
 		end
 		if not found then
-			found = { cx = r.cx, left = r.left, right = r.right, rects = {} }
-			table.insert(columns, found)
+			found = {cx=pipe.cx, capLeft=pipe.capLeft, capRight=pipe.capRight,
+			         top_pipe=nil, bot_pipe=nil}
+			table.insert(groups, found)
 		end
-		found.left  = math.min(found.left,  r.left)
-		found.right = math.max(found.right, r.right)
-		found.cx    = (found.left + found.right) / 2
-		table.insert(found.rects, { r = r, name = entry.name })
+		found.capLeft  = math.min(found.capLeft,  pipe.capLeft)
+		found.capRight = math.max(found.capRight, pipe.capRight)
+		if pipe.isTop then
+			found.top_pipe = pipe
+		else
+			found.bot_pipe = pipe
+		end
 	end
 
-	table.sort(columns, function(a, b) return a.left < b.left end)
-	return columns
+	-- ordena da esquerda para a direita
+	table.sort(groups, function(a,b) return a.cx < b.cx end)
+	return groups
 end
 
--- ─── Construção do corredor seguro ──────────────────────────────────────────
--- Usa os bounds REAIS (getGuiBounds já inclui caps).
--- rawTop  = fundo do cano de cima (inclui cap_T)
--- rawBottom = topo do cano de baixo (inclui cap_B que projeta para dentro do vão)
-local function buildCorridor(col, birdRect, GameArea)
-	local areaT = GameArea.AbsolutePosition.Y
-	local areaB = GameArea.AbsolutePosition.Y + GameArea.AbsoluteSize.Y
-	local areaMid = (areaT + areaB) / 2
+-- ── Corredor seguro ────────────────────────────────────────────────────────────
+-- rawTop    = bottom do Pipe_T (inclui cap_T no bounds_total)
+-- rawBottom = top    do Pipe_B (é onde o cap_B começa — é a borda real do vão)
+--
+-- O cap_B projeta PARA DENTRO do vão: cap_B.top == pipe_B.top == rawBottom
+-- Então o bird já colide no rawBottom, sem precisar subtrair nada extra.
+-- SAFE_MARGIN_BOTTOM já cobre o cap_B.
 
-	local rawTop    = areaT
-	local rawBottom = areaB
+local function buildCorridor(group, birdRight)
+	local tp = group.top_pipe
+	local bp = group.bot_pipe
+	if not tp or not bp then return nil end
 
-	for _, entry in ipairs(col.rects) do
-		local r    = entry.r
-		local side = entry.name:match("^Pipe_%d+_([TB])$")
-		if side == "T" then
-			-- cano de cima: rawTop = sua borda inferior (já inclui cap_T)
-			rawTop = math.max(rawTop, r.bottom)
-		elseif side == "B" then
-			-- cano de baixo: rawBottom = sua borda superior (já inclui cap_B)
-			rawBottom = math.min(rawBottom, r.top)
-		else
-			-- fallback por posição
-			if r.cy < areaMid then
-				rawTop = math.max(rawTop, r.bottom)
-			else
-				rawBottom = math.min(rawBottom, r.top)
-			end
-		end
-	end
+	-- rawTop  = fundo do cano de cima (bounds total inclui cap_T)
+	-- cap_T fica na parte INFERIOR do Pipe_T, então tp.bottom já o inclui
+	local rawTop    = tp.bottom
 
-	local rawHeight = rawBottom - rawTop
+	-- rawBottom = topo do cano de baixo
+	-- cap_B fica na parte SUPERIOR do Pipe_B — bp.top é exatamente a borda
+	local rawBottom = bp.top
 
-	-- vão tem que ser maior que o bird + margens fixas
-	local minNeeded = BIRD_H + MARGIN_TOP + MARGIN_BOTTOM + 2
-	if rawHeight < minNeeded then
-		return nil  -- corredor impossível, ignora
-	end
+	local rawHeight = rawBottom - rawTop  -- deve ser ~51.91
 
-	-- zona segura: contrai o vão pelas margens calibradas
-	local safeTop    = rawTop    + MARGIN_TOP
-	local safeBottom = rawBottom - MARGIN_BOTTOM
+	if rawHeight < 18 then return nil end  -- vão impossível
+
+	-- zona segura
+	local safeTop    = rawTop    + SAFE_MARGIN_TOP
+	local safeBottom = rawBottom - SAFE_MARGIN_BOTTOM
 	local safeHeight = safeBottom - safeTop
 
-	-- centro ideal do corredor (bird quer ficar aqui)
-	local center = safeTop + safeHeight * 0.5
+	if safeHeight < 5 then
+		-- vão muito pequeno: usa o centro sem margem
+		local mid = (rawTop + rawBottom) / 2
+		safeTop    = mid - rawHeight * 0.45
+		safeBottom = mid + rawHeight * 0.45
+		safeHeight = safeBottom - safeTop
+	end
 
-	-- limites para o CY do bird (não encostar nos extremos da zona segura)
-	local halfBird  = BIRD_H / 2
+	local center    = (safeTop + safeBottom) / 2
+	local halfBird  = 10.54 / 2   -- metade do hitbox do bird
+
 	local minCenter = safeTop    + halfBird
 	local maxCenter = safeBottom - halfBird
-
 	if minCenter > maxCenter then
 		local mid = (rawTop + rawBottom) / 2
 		minCenter = mid - 0.5
 		maxCenter = mid + 0.5
 	end
 
-	local dist = col.left - birdRect.right   -- distância da borda direita do bird até o cano
+	-- dist = distância da borda direita do bird até a borda esquerda do cap
+	-- (cap é mais largo que o corpo, é o que colide primeiro)
+	local dist = group.capLeft - birdRight
 
 	return {
-		left  = col.left,
-		right = col.right,
-		dist  = dist,
+		cx       = group.cx,
+		capLeft  = group.capLeft,
+		capRight = group.capRight,
+		dist     = dist,
 
 		rawTop    = rawTop,
 		rawBottom = rawBottom,
@@ -255,41 +284,36 @@ local function buildCorridor(col, birdRect, GameArea)
 	}
 end
 
-local function getCorridors(GameArea, birdRect)
-	local cols     = getPipeColumns(GameArea)
+local function getCorridors(GameArea, birdRight, birdLeft)
+	local groups    = getPairs(GameArea)
 	local corridors = {}
 
-	for _, col in ipairs(cols) do
-		-- inclui colunas que ainda não passaram pela borda esquerda do bird
-		if col.right >= birdRect.left - 2 then
-			local c = buildCorridor(col, birdRect, GameArea)
+	for _, g in ipairs(groups) do
+		-- inclui colunas cujo cap ainda não passou completamente pelo bird
+		if g.capRight >= birdLeft - 4 then
+			local c = buildCorridor(g, birdRight)
 			if c then
 				table.insert(corridors, c)
 			end
 		end
 	end
 
-	-- fallback sem canos: usa a área inteira
+	-- fallback sem canos
 	if #corridors == 0 then
-		local areaT = GameArea.AbsolutePosition.Y
-		local areaB = GameArea.AbsolutePosition.Y + GameArea.AbsoluteSize.Y
-		local groundT = areaB - 16.2  -- altura do Ground real
+		local mid = GA_TOP + (GROUND_TOP - GA_TOP) * 0.5
 		table.insert(corridors, {
-			left = math.huge, right = math.huge, dist = math.huge,
-			rawTop = areaT + 2, rawBottom = groundT - 2,
-			safeTop = areaT + 6, safeBottom = groundT - 6,
-			safeHeight = groundT - areaT - 12,
-			center = areaT + (groundT - areaT) * 0.5,
-			minCenter = areaT + 12, maxCenter = groundT - 12,
+			cx=math.huge, capLeft=math.huge, capRight=math.huge, dist=math.huge,
+			rawTop=GA_TOP+10, rawBottom=GROUND_TOP-10,
+			safeTop=GA_TOP+16, safeBottom=GROUND_TOP-16,
+			safeHeight=GROUND_TOP-GA_TOP-32,
+			center=mid, minCenter=mid-20, maxCenter=mid+20,
 		})
 	end
 
 	return corridors
 end
 
--- ─── Física ─────────────────────────────────────────────────────────────────
--- Prediz posição Y do centro do bird após t segundos
--- tapped=true aplica o impulso de tap imediatamente
+-- ── Física ────────────────────────────────────────────────────────────────────
 local function predictY(cy, vel, t, tapped)
 	local v  = tapped and TAP_IMPULSE or vel
 	local y  = cy + v*t + 0.5*GRAVITY*t*t
@@ -297,79 +321,70 @@ local function predictY(cy, vel, t, tapped)
 	return y, nv
 end
 
--- Tempo em segundos para a borda direita do bird chegar à borda esquerda do cano
-local function timeToColumn(birdRect, col)
-	if col.left <= birdRect.right and col.right >= birdRect.left then
-		return 0  -- bird já está dentro da coluna
-	end
-	local t = (col.left - birdRect.right) / math.max(pipeSpeed, 20)
-	return clamp(t, 0, 1.5)
+-- Tempo para borda direita do bird chegar ao capLeft do corredor
+local function timeToReach(birdRight, corridor)
+	if corridor.capLeft <= birdRight then return 0 end
+	return clamp((corridor.capLeft - birdRight) / math.max(pipeSpeed, 30), 0, 2.0)
 end
 
--- ─── Scoring de risco ────────────────────────────────────────────────────────
--- Compara custo de tapping vs não-tapping; menor score = melhor ação
-local function scoreAction(tapped, birdRect, vel, corridors, GameArea)
-	-- penalidade base do tap (evita taps desnecessários)
-	local risk   = tapped and 20 or 0
-	local areaT  = GameArea.AbsolutePosition.Y
-	local areaB  = GameArea.AbsolutePosition.Y + GameArea.AbsoluteSize.Y
-	local groundT = areaB - 16.2  -- topo do chão
-
-	local weights = { 6.0, 3.0, 1.5, 0.7 }
+-- ── Score de risco ─────────────────────────────────────────────────────────────
+local function scoreAction(tapped, birdCy, birdTop, birdBot, birdRight, vel, corridors)
+	local risk = tapped and 18 or 0
+	local W    = {5.5, 2.8, 1.4, 0.6}
 
 	for i = 1, math.min(#corridors, 4) do
 		local c = corridors[i]
-		local t = timeToColumn(birdRect, c)
-		local y, v = predictY(birdRect.cy, vel, t, tapped)
-		local top    = y - BIRD_H/2
-		local bottom = y + BIRD_H/2
-		local w = weights[i] or 0.5
+		local t = timeToReach(birdRight, c)
+		local y, v = predictY(birdCy, vel, t, tapped)
+		local top    = y - 10.54/2
+		local bottom = y + 10.54/2
+		local w = W[i] or 0.4
 
-		-- colisão com rawTop/rawBottom (zona proibida real)
-		if top    < c.rawTop    then risk = risk + (12000 + (c.rawTop    - top)    * 600) * w end
-		if bottom > c.rawBottom then risk = risk + (12000 + (bottom - c.rawBottom) * 600) * w end
+		-- colisão real (penalidade máxima)
+		if top    < c.rawTop    then risk = risk + (14000 + (c.rawTop - top)       * 700) * w end
+		if bottom > c.rawBottom then risk = risk + (14000 + (bottom - c.rawBottom) * 700) * w end
 
-		-- saída da zona segura (inclui margens do cap)
-		if top    < c.safeTop    then risk = risk + (c.safeTop    - top)    * 60 * w end
-		if bottom > c.safeBottom then risk = risk + (bottom - c.safeBottom) * 60 * w end
+		-- saída da zona segura
+		if top    < c.safeTop    then risk = risk + (c.safeTop    - top)    * 55 * w end
+		if bottom > c.safeBottom then risk = risk + (bottom - c.safeBottom) * 55 * w end
 
 		-- desvio do centro seguro
 		if y < c.minCenter then
 			local d = c.minCenter - y
-			risk = risk + (d*d*14 + d*160) * w
+			risk = risk + (d*d*15 + d*180) * w
 		end
 		if y > c.maxCenter then
 			local d = y - c.maxCenter
-			risk = risk + (d*d*14 + d*160) * w
+			risk = risk + (d*d*15 + d*180) * w
 		end
 
-		-- antecipação: velocidade incompatível com próximo corredor
-		local next = corridors[i+1]
-		if next then
-			if next.center > c.center + 12 and v < -15 then risk = risk + 700 * w end
-			if next.center < c.center - 12 and v > 210  then risk = risk + 600 * w end
+		-- antecipação do próximo corredor
+		local nxt = corridors[i+1]
+		if nxt then
+			if nxt.center > c.center + 14 and v < -10 then risk = risk + 750 * w end
+			if nxt.center < c.center - 14 and v > 220  then risk = risk + 650 * w end
 		end
 
-		-- teto e chão da área
-		if top    < areaT   + 8  then risk = risk + (4000 + (areaT + 8 - top)      * 200) * w end
-		if bottom > groundT - 4  then risk = risk + (4000 + (bottom - (groundT-4)) * 200) * w end
+		-- bordas da área
+		if top    < GA_TOP   + 9  then risk = risk + (4500 + (GA_TOP+9 - top)         * 220) * w end
+		if bottom > GROUND_TOP-5  then risk = risk + (4500 + (bottom - (GROUND_TOP-5))* 220) * w end
 	end
 
-	-- snapshots temporais (entre canos)
-	for _, t in ipairs({0.08, 0.16, 0.26, 0.38}) do
-		local y, v = predictY(birdRect.cy, vel, t, tapped)
-		local top    = y - BIRD_H/2
-		local bottom = y + BIRD_H/2
-		if top    < areaT   + 8  then risk = risk + 3000 + (areaT + 8 - top)      * 130 end
-		if bottom > groundT - 4  then risk = risk + 3000 + (bottom - (groundT-4)) * 130 end
-		if v < -180 and top    < areaT   + 40 then risk = risk + 1200 end
-		if v >  270 and bottom > groundT - 55 then risk = risk + 1200 end
+	-- snapshots temporais
+	for _, t in ipairs({0.07, 0.14, 0.24, 0.36}) do
+		local y, v = predictY(birdCy, vel, t, tapped)
+		local top    = y - 10.54/2
+		local bottom = y + 10.54/2
+		if top    < GA_TOP   + 9  then risk = risk + 3200 + (GA_TOP+9 - top)          * 140 end
+		if bottom > GROUND_TOP-5  then risk = risk + 3200 + (bottom - (GROUND_TOP-5)) * 140 end
+		if v < -200 and top    < GA_TOP   + 42 then risk = risk + 1400 end
+		if v >  280 and bottom > GROUND_TOP-55 then risk = risk + 1400 end
 	end
 
 	return risk
 end
 
--- ─── Cálculo do target Y ─────────────────────────────────────────────────────
+-- ── Target Y ──────────────────────────────────────────────────────────────────
 local function computeTarget(corridors, vel)
 	local c1 = corridors[1]
 	local c2 = corridors[2]
@@ -381,61 +396,57 @@ local function computeTarget(corridors, vel)
 	if c2 then
 		local d12  = c2.center - c1.center
 		local bias = 0.50
-		if     d12 < -30 then bias = 0.26
-		elseif d12 < -18 then bias = 0.34
-		elseif d12 <  -8 then bias = 0.42
-		elseif d12 >  30 then bias = 0.84
-		elseif d12 >  18 then bias = 0.76
-		elseif d12 >   8 then bias = 0.65
+		if     d12 < -32 then bias = 0.24
+		elseif d12 < -20 then bias = 0.33
+		elseif d12 <  -9 then bias = 0.41
+		elseif d12 >  32 then bias = 0.86
+		elseif d12 >  20 then bias = 0.77
+		elseif d12 >   9 then bias = 0.65
 		end
 
 		if c3 then
 			local d23 = c3.center - c2.center
-			if d23 < -26 then bias = math.min(bias, 0.38) end
-			if d23 >  26 then bias = math.max(bias, 0.70) end
+			if d23 < -28 then bias = math.min(bias, 0.36) end
+			if d23 >  28 then bias = math.max(bias, 0.72) end
 		end
 
-		local exitY    = c1.safeTop + c1.safeHeight * bias
-		local timeToC1 = math.max(c1.dist, 0) / math.max(pipeSpeed, 20)
+		local timeToC1 = math.max(c1.dist, 0) / math.max(pipeSpeed, 30)
 		local prep     = 0
-		if timeToC1 < 1.60 then prep = 0.18 end
-		if timeToC1 < 1.20 then prep = 0.36 end
-		if timeToC1 < 0.85 then prep = 0.56 end
-		if timeToC1 < 0.55 then prep = 0.76 end
-		if timeToC1 < 0.30 then prep = 0.95 end
+		if timeToC1 < 1.60 then prep = 0.16 end
+		if timeToC1 < 1.20 then prep = 0.34 end
+		if timeToC1 < 0.85 then prep = 0.54 end
+		if timeToC1 < 0.55 then prep = 0.74 end
+		if timeToC1 < 0.30 then prep = 0.94 end
 
+		local exitY = c1.safeTop + c1.safeHeight * bias
 		target = lerp(c1.center, exitY, prep)
 	end
 
-	-- restringe ao mínimo/máximo do corredor atual (e próximos próximos)
-	local futureMin = c1.minCenter
-	local futureMax = c1.maxCenter
+	-- restringe ao corredor atual
+	local fMin = c1.minCenter
+	local fMax = c1.maxCenter
 	for i = 1, math.min(#corridors, 3) do
 		local c = corridors[i]
-		if c.dist < 140 then
-			futureMin = math.max(futureMin, c.minCenter)
-			futureMax = math.min(futureMax, c.maxCenter)
+		if c.dist < 150 then
+			fMin = math.max(fMin, c.minCenter)
+			fMax = math.min(fMax, c.maxCenter)
 		end
 	end
-
-	if futureMin <= futureMax and c1.dist < 100 then
-		target = clamp(target, futureMin, futureMax)
+	if fMin <= fMax and c1.dist < 110 then
+		target = clamp(target, fMin, fMax)
 	else
 		target = clamp(target, c1.minCenter, c1.maxCenter)
 	end
-
-	-- muito perto: aperta ainda mais
-	if c1.dist < 20 then
-		target = clamp(target, c1.minCenter + 1.5, c1.maxCenter - 1.5)
+	if c1.dist < 22 then
+		target = clamp(target, c1.minCenter + 2, c1.maxCenter - 2)
 	end
 
 	return target
 end
 
--- ─── Loop principal ──────────────────────────────────────────────────────────
+-- ── Loop principal ─────────────────────────────────────────────────────────────
 task.spawn(function()
 	local BaseFlappy
-
 	while true do
 		local ok = pcall(function()
 			BaseFlappy = PlayerGui.Game.Sections.ParkPhoneUI.BaseFlappy
@@ -463,7 +474,7 @@ task.spawn(function()
 	local function scanBird()
 		for _, obj in ipairs(GameArea:GetChildren()) do
 			if obj:IsA("GuiObject") and obj.Name == "Bird" then
-				bird = obj; return obj
+				bird = obj; return
 			end
 		end
 	end
@@ -475,7 +486,7 @@ task.spawn(function()
 
 	-- estado
 	local lastTap          = 0
-	local lastY
+	local lastBirdCY
 	local lastTime         = tick()
 	local velY             = 0
 	local smoothVelY       = 0
@@ -483,7 +494,6 @@ task.spawn(function()
 	local noTapUntil       = 0
 	local postTapLockUntil = 0
 
-	-- intervalos mínimos entre taps
 	local MIN_INTERVAL  = 0.10
 	local FAST_INTERVAL = 0.055
 
@@ -497,172 +507,135 @@ task.spawn(function()
 		updatePipeSpeed(GameArea)
 
 		local now = tick()
-		local b   = getRect(bird)
+		local p   = bird.AbsolutePosition
+		local s   = bird.AbsoluteSize
 
-		-- estima velocidade vertical atual
-		if lastY then
+		local bCY     = p.Y + s.Y / 2
+		local bTop    = p.Y
+		local bBottom = p.Y + s.Y
+		local bLeft   = p.X  + BIRD_LEFT_OFFSET
+		local bRight  = p.X + s.X + BIRD_RIGHT_OFFSET
+
+		-- velocidade vertical
+		if lastBirdCY then
 			local dt = math.max(now - lastTime, 1/240)
-			velY      = (b.cy - lastY) / dt
-			smoothVelY = smoothVelY * 0.68 + velY * 0.32
+			velY      = (bCY - lastBirdCY) / dt
+			smoothVelY = smoothVelY * 0.70 + velY * 0.30
 		end
-		lastY    = b.cy
-		lastTime = now
+		lastBirdCY = bCY
+		lastTime   = now
 
-		-- usa b.width real (10.5) mas compensa a Tail manualmente para colisão lateral
-		-- o hitbox real é ~12.5px; ajustamos left
-		local birdForCollision = {
-			left   = b.left   - 1.0,   -- Tail projeta ~1px à esquerda
-			right  = b.right  + 0.5,   -- Beak projeta ~0.5px à direita
-			top    = b.top,
-			bottom = b.bottom,
-			cx     = b.cx,
-			cy     = b.cy,
-			width  = BIRD_W_REAL,
-			height = BIRD_H,
-		}
-
-		local corridors = getCorridors(GameArea, birdForCollision)
+		local corridors = getCorridors(GameArea, bRight, bLeft)
 		local target    = computeTarget(corridors, smoothVelY)
-
 		if not target then return end
 
-		-- suaviza o target para evitar mudanças bruscas de objetivo
+		-- suaviza target
 		if lastTarget then
-			local maxStep = 9
-			local diff    = target - lastTarget
-			if diff >  maxStep then target = lastTarget + maxStep
-			elseif diff < -maxStep then target = lastTarget - maxStep
-			end
-			target = lastTarget * 0.30 + target * 0.70
+			local diff = target - lastTarget
+			diff = clamp(diff, -10, 10)
+			target = lastTarget * 0.32 + (lastTarget + diff) * 0.68
 		end
 		lastTarget = target
 
 		local c1 = corridors[1]
 		local c2 = corridors[2]
 
-		-- calcula riscos das duas ações
-		local noTapRisk = scoreAction(false, birdForCollision, smoothVelY, corridors, GameArea)
-		local tapRisk   = scoreAction(true,  birdForCollision, smoothVelY, corridors, GameArea)
+		local noTapRisk = scoreAction(false, bCY, bTop, bBottom, bRight, smoothVelY, corridors)
+		local tapRisk   = scoreAction(true,  bCY, bTop, bBottom, bRight, smoothVelY, corridors)
 
-		-- predição a curto prazo (sem tap)
-		local predT           = 0.15
-		local predY, predVel  = predictY(b.cy, smoothVelY, predT, false)
-		local predTop         = predY - BIRD_H/2
-		local predBottom      = predY + BIRD_H/2
+		-- predição sem tap
+		local predT           = 0.16
+		local predY, predVel  = predictY(bCY, smoothVelY, predT, false)
+		local predTop         = predY - 10.54/2
+		local predBottom      = predY + 10.54/2
 
 		local shouldTap = false
 		local emergency = false
 
-		local errNow  = b.cy  - target
+		local errNow  = bCY   - target
 		local errPred = predY - target
 
-		-- perigo de bater no teto do vão (cima do cap_T)
-		local topDanger = b.top    <= c1.rawTop  + MARGIN_TOP  + 1
-		               or predTop  <= c1.rawTop  + MARGIN_TOP  + 1.5
+		-- perigos imediatos
+		local topDanger    = bTop    <= c1.rawTop    + SAFE_MARGIN_TOP    + 1.5
+		                  or predTop <= c1.rawTop    + SAFE_MARGIN_TOP    + 2.0
+		local bottomDanger = bBottom  >= c1.rawBottom - SAFE_MARGIN_BOTTOM - 1.5
+		                  or predBottom >= c1.rawBottom - SAFE_MARGIN_BOTTOM - 2.0
 
-		-- perigo de bater no chão do vão (cap_B)
-		local bottomDanger = b.bottom  >= c1.rawBottom - MARGIN_BOTTOM - 1
-		                  or predBottom >= c1.rawBottom - MARGIN_BOTTOM - 1.5
+		-- dead zone adaptativa
+		local dz = 6.0
+		if c1.dist < 65  then dz = 4.5 end
+		if c1.dist < 32  then dz = 2.8 end
+		if c1.dist < 15  then dz = 1.8 end
 
-		-- zona morta proporcional à distância
-		local deadZone = 5.5
-		if c1.dist < 60  then deadZone = 4.0 end
-		if c1.dist < 30  then deadZone = 2.5 end
-		if c1.dist < 14  then deadZone = 1.5 end
-
-		-- decisão por risco comparado
-		if noTapRisk < 900 and not bottomDanger then
+		-- decisão por risco
+		if noTapRisk < 800 and not bottomDanger then
 			shouldTap = false
-		elseif tapRisk + 280 < noTapRisk then
+		elseif tapRisk + 300 < noTapRisk then
 			shouldTap = true
 		end
 
-		-- bird caindo abaixo do target
-		if errNow > deadZone and errPred > deadZone and smoothVelY > -90 then
+		if errNow > dz and errPred > dz and smoothVelY > -80 then
+			shouldTap = true
+		end
+		if smoothVelY > 130 and errPred > -8 then
 			shouldTap = true
 		end
 
-		-- velocidade descendente alta e ainda vai passar do target
-		if smoothVelY > 125 and errPred > -10 then
-			shouldTap = true
-		end
-
-		-- emergência: vai bater embaixo
-		if bottomDanger then
-			shouldTap = true
-			emergency = true
-		end
-
-		-- emergência inversa: vai bater em cima → não tapa
-		if topDanger then
-			shouldTap  = false
-			emergency  = false
-			noTapUntil = now + 0.15
+		if bottomDanger then shouldTap = true;  emergency = true  end
+		if topDanger    then
+			shouldTap = false; emergency = false
+			noTapUntil = now + 0.16
 		end
 
 		-- bordas da área de jogo
-		local areaT  = GameArea.AbsolutePosition.Y
-		local groundT = GameArea.AbsolutePosition.Y + GameArea.AbsoluteSize.Y - 16.2
-
-		if predTop <= areaT + 9 then
-			shouldTap  = false
-			emergency  = false
-			noTapUntil = now + 0.15
+		if predTop    <= GA_TOP    + 9 then
+			shouldTap = false; emergency = false
+			noTapUntil = now + 0.16
+		end
+		if predBottom >= GROUND_TOP - 5 then
+			shouldTap = true; emergency = true
 		end
 
-		if predBottom >= groundT - 4 then
-			shouldTap = true
-			emergency = true
-		end
-
-		-- subindo rápido e já no target
-		if smoothVelY < -130 and b.cy < target + 14 then
-			shouldTap  = false
-			emergency  = false
+		-- subindo rápido e já no target — aguarda
+		if smoothVelY < -140 and bCY < target + 16 then
+			shouldTap = false; emergency = false
 			noTapUntil = now + 0.10
 		end
 
-		-- antecipação do próximo cano
+		-- antecipação próximo cano
 		if c2 then
-			local nextLower     = c2.center > c1.center + 10
-			local nextMuchLower = c2.center > c1.center + 22
-			local nextHigher    = c2.center < c1.center - 14
+			local nL  = c2.center > c1.center + 10
+			local nML = c2.center > c1.center + 24
+			local nH  = c2.center < c1.center - 14
 
-			if nextLower and (b.cy < target + 4 or smoothVelY < 30) then
-				shouldTap  = false
-				emergency  = false
+			if nL  and (bCY < target + 4 or smoothVelY < 30) then
+				shouldTap = false; emergency = false
 				noTapUntil = math.max(noTapUntil, now + 0.10)
 			end
-
-			if nextMuchLower and smoothVelY < 70 then
-				shouldTap  = false
-				emergency  = false
-				noTapUntil = math.max(noTapUntil, now + 0.13)
+			if nML and smoothVelY < 72 then
+				shouldTap = false; emergency = false
+				noTapUntil = math.max(noTapUntil, now + 0.14)
 			end
-
-			if nextHigher and smoothVelY > 80 and b.cy > target - 7 then
+			if nH  and smoothVelY > 82 and bCY > target - 7 then
 				shouldTap = true
 			end
 		end
 
-		-- zona crítica: bird chegando ao cano
-		local critDist = BIRD_W_REAL * 3
+		-- zona crítica: perto do cano
+		local critDist = 38   -- px  (largura cap 16.18 + folga)
 		if c1.dist < critDist then
-			if b.top    <= c1.rawTop    + MARGIN_TOP    + 2
-			or predTop  <= c1.rawTop    + MARGIN_TOP    + 3 then
-				shouldTap  = false
-				emergency  = false
-				noTapUntil = now + 0.16
+			if bTop     <= c1.rawTop    + SAFE_MARGIN_TOP    + 2.5
+			or predTop  <= c1.rawTop    + SAFE_MARGIN_TOP    + 3.5 then
+				shouldTap = false; emergency = false
+				noTapUntil = now + 0.17
 			end
-
-			if b.bottom  >= c1.rawBottom - MARGIN_BOTTOM - 2
-			or predBottom >= c1.rawBottom - MARGIN_BOTTOM - 3 then
-				shouldTap = true
-				emergency = true
+			if bBottom   >= c1.rawBottom - SAFE_MARGIN_BOTTOM - 2.5
+			or predBottom >= c1.rawBottom - SAFE_MARGIN_BOTTOM - 3.5 then
+				shouldTap = true; emergency = true
 			end
 		end
 
-		-- respeita travas de tempo
+		-- travas de tempo
 		if now < noTapUntil       and not emergency then shouldTap = false end
 		if now < postTapLockUntil and not emergency then shouldTap = false end
 
@@ -671,17 +644,12 @@ task.spawn(function()
 		if shouldTap and (now - lastTap) >= interval then
 			tap()
 			lastTap = now
-			-- lock pós-tap: evita double-tap no mesmo flap
-			if c2 and c2.center > c1.center + 10 then
-				postTapLockUntil = now + 0.17
-			else
-				postTapLockUntil = now + 0.10
-			end
+			postTapLockUntil = now + (c2 and c2.center > c1.center + 10 and 0.18 or 0.10)
 		end
 	end)
 
-	print("AutoFlappy v3 iniciado.")
+	print("AutoFlappy v4 iniciado. pipeSpeed inicial = " .. pipeSpeed)
 end)
 
 updateUI()
-print("AutoFlappy v3 UI criada.")
+print("AutoFlappy v4 UI criada.")
