@@ -173,6 +173,49 @@ task.spawn(function()
 		}
 	end
 
+	local pipeSpeed = 42
+	local lastPipePositions = {}
+
+	local function updatePipeSpeed()
+		local now = tick()
+		local total = 0
+		local count = 0
+
+		for _, obj in ipairs(GameArea:GetChildren()) do
+			if isPipe(obj) then
+				local r = getGuiBounds(obj)
+				local old = lastPipePositions[obj]
+
+				if old then
+					local dt = math.max(now - old.t, 1 / 240)
+					local speed = (old.left - r.left) / dt
+
+					if speed > 22 and speed < 90 then
+						total = total + speed
+						count = count + 1
+					end
+				end
+
+				lastPipePositions[obj] = {
+					left = r.left,
+					t = now,
+				}
+			end
+		end
+
+		for obj in pairs(lastPipePositions) do
+			if not obj.Parent then
+				lastPipePositions[obj] = nil
+			end
+		end
+
+		if count > 0 then
+			local measured = total / count
+			pipeSpeed = pipeSpeed * 0.78 + measured * 0.22
+			pipeSpeed = clamp(pipeSpeed, 30, 70)
+		end
+	end
+
 	local function getPipeColumns()
 		local rects = {}
 
@@ -246,29 +289,35 @@ task.spawn(function()
 
 		local rawHeight = rawBottom - rawTop
 
-		if rawHeight <= b.height + 2 then
+		if rawHeight <= b.height + 4 then
 			return nil
 		end
 
-		local topClearance = math.clamp(b.height * 0.38, 4.2, 6.2)
-		local bottomClearance = math.clamp(b.height * 0.48, 5.0, 7.2)
+		local dist = col.left - b.cx
 
-		if col.left - b.cx < 35 then
-			topClearance += 0.8
-			bottomClearance += 0.9
+		local topClearance = math.clamp(b.height * 0.42, 4.4, 6.4)
+		local bottomClearance = math.clamp(b.height * 0.52, 5.2, 7.4)
+
+		if dist < 35 then
+			topClearance = topClearance + 0.9
+			bottomClearance = bottomClearance + 1.0
 		end
 
-		if col.left - b.cx < 16 then
-			topClearance += 0.7
-			bottomClearance += 0.8
+		if dist < 16 then
+			topClearance = topClearance + 0.8
+			bottomClearance = bottomClearance + 0.9
 		end
 
-		local maxTotalClearance = rawHeight - b.height - 3
+		local maxTotalClearance = rawHeight - b.height - 4
+
+		if maxTotalClearance < 2 then
+			maxTotalClearance = 2
+		end
 
 		if topClearance + bottomClearance > maxTotalClearance then
 			local scale = maxTotalClearance / math.max(topClearance + bottomClearance, 1)
-			topClearance *= scale
-			bottomClearance *= scale
+			topClearance = topClearance * scale
+			bottomClearance = bottomClearance * scale
 		end
 
 		topClearance = math.max(topClearance, 2.5)
@@ -280,8 +329,14 @@ task.spawn(function()
 
 		if safeHeight < b.height + 2 then
 			local remaining = rawHeight - b.height - 2
-			topClearance = math.max(2, remaining * 0.45)
-			bottomClearance = math.max(2, remaining * 0.55)
+
+			if remaining < 2 then
+				remaining = 2
+			end
+
+			topClearance = remaining * 0.45
+			bottomClearance = remaining * 0.55
+
 			safeTop = rawTop + topClearance
 			safeBottom = rawBottom - bottomClearance
 			safeHeight = safeBottom - safeTop
@@ -290,10 +345,16 @@ task.spawn(function()
 		local minCenter = rawTop + b.height / 2 + topClearance
 		local maxCenter = rawBottom - b.height / 2 - bottomClearance
 
+		if minCenter > maxCenter then
+			local mid = (rawTop + rawBottom) / 2
+			minCenter = mid - 1
+			maxCenter = mid + 1
+		end
+
 		return {
 			left = col.left,
 			right = col.right,
-			dist = col.left - b.cx,
+			dist = dist,
 
 			rawTop = rawTop,
 			rawBottom = rawBottom,
@@ -360,6 +421,19 @@ task.spawn(function()
 		return corridors
 	end
 
+	local function predictCenterAtColumn(b, vel, c)
+		local gravity = 680
+		local distToHit = c.left - b.right
+		local t = distToHit / math.max(pipeSpeed, 28)
+
+		t = clamp(t, 0, 0.85)
+
+		local y = b.cy + vel * t + 0.5 * gravity * t * t
+		local v = vel + gravity * t
+
+		return y, v, t
+	end
+
 	local function computeTarget(corridors, b, vel)
 		local c1 = corridors[1]
 		local c2 = corridors[2]
@@ -376,50 +450,51 @@ task.spawn(function()
 			local bias = 0.50
 
 			if d12 < -28 then
-				bias = 0.30
+				bias = 0.28
 			elseif d12 < -16 then
-				bias = 0.37
+				bias = 0.36
 			elseif d12 < -8 then
-				bias = 0.43
+				bias = 0.42
 			elseif d12 > 28 then
-				bias = 0.72
+				bias = 0.78
 			elseif d12 > 16 then
-				bias = 0.64
+				bias = 0.70
 			elseif d12 > 8 then
-				bias = 0.58
+				bias = 0.62
 			end
 
 			if c3 then
 				local d23 = c3.center - c2.center
 
 				if d23 < -24 then
-					bias = math.min(bias, 0.42)
+					bias = math.min(bias, 0.40)
 				elseif d23 > 24 then
-					bias = math.max(bias, 0.60)
+					bias = math.max(bias, 0.64)
 				end
 			end
 
 			local exitY = c1.top + c1.height * bias
+			local timeToC1 = c1.dist / math.max(pipeSpeed, 28)
 			local prep = 0
 
-			if c1.dist < 95 then
-				prep = 0.18
+			if timeToC1 < 1.60 then
+				prep = 0.20
 			end
 
-			if c1.dist < 70 then
-				prep = 0.34
+			if timeToC1 < 1.20 then
+				prep = 0.38
 			end
 
-			if c1.dist < 48 then
-				prep = 0.54
+			if timeToC1 < 0.85 then
+				prep = 0.58
 			end
 
-			if c1.dist < 28 then
-				prep = 0.76
+			if timeToC1 < 0.55 then
+				prep = 0.78
 			end
 
-			if c1.dist < 14 then
-				prep = 0.94
+			if timeToC1 < 0.30 then
+				prep = 0.96
 			end
 
 			target = lerp(c1.center, exitY, prep)
@@ -430,126 +505,35 @@ task.spawn(function()
 
 		for i = 1, math.min(#corridors, 3) do
 			local c = corridors[i]
+			local predictedY = predictCenterAtColumn(b, vel, c)
+			local predictedTop = predictedY - b.height / 2
+			local predictedBottom = predictedY + b.height / 2
 
-			if c.dist < 100 then
+			if c.dist < 115 then
 				futureMin = math.max(futureMin, c.minCenter)
 				futureMax = math.min(futureMax, c.maxCenter)
+
+				if predictedTop < c.rawTop + c.topClearance then
+					target = math.max(target, c.minCenter + 4)
+				end
+
+				if predictedBottom > c.rawBottom - c.bottomClearance then
+					target = math.min(target, c.maxCenter - 4)
+				end
 			end
 		end
 
-		if futureMin <= futureMax then
-			if c1.dist < 60 then
-				target = clamp(target, futureMin, futureMax)
-			end
+		if futureMin <= futureMax and c1.dist < 80 then
+			target = clamp(target, futureMin, futureMax)
 		else
 			target = clamp(target, c1.minCenter, c1.maxCenter)
 		end
 
-		if c1.dist < 20 then
-			target = clamp(target, c1.minCenter + 1.5, c1.maxCenter - 1.5)
-		else
-			target = clamp(target, c1.minCenter, c1.maxCenter)
-		end
-
-		if c2 then
-			local d = c2.center - c1.center
-
-			if d > 14 and vel < -20 then
-				target = math.max(target, c1.center + 3)
-			end
-
-			if d < -14 and vel > 35 then
-				target = math.min(target, c1.center - 3)
-			end
+		if c1.dist < 24 then
+			target = clamp(target, c1.minCenter + 2, c1.maxCenter - 2)
 		end
 
 		return target, c1, c2, c3
-	end
-
-	local function estimateTapRisk(doTap, b, vel, corridors)
-		local y = b.cy
-		local v = vel
-		local gravity = 680
-		local tapImpulse = -165
-
-		if doTap then
-			v = tapImpulse
-		end
-
-		local risk = doTap and 18 or 0
-		local dt = 1 / 75
-		local steps = 48
-
-		for i = 1, steps do
-			local t = i * dt
-			local yy = y + v * t + 0.5 * gravity * t * t
-			local vv = v + gravity * t
-			local top = yy - b.height / 2
-			local bottom = yy + b.height / 2
-
-			for index, c in ipairs(corridors) do
-				if index > 3 then
-					break
-				end
-
-				local xSoon = c.dist < 26 or (c.dist > 0 and c.dist < 85)
-				local weight = index == 1 and 1 or 0.55
-
-				if xSoon then
-					if top < c.rawTop then
-						risk += 4500 * weight + (c.rawTop - top) * 280 * weight
-					end
-
-					if bottom > c.rawBottom then
-						risk += 4500 * weight + (bottom - c.rawBottom) * 280 * weight
-					end
-
-					if top < c.top then
-						risk += (c.top - top) * 42 * weight
-					end
-
-					if bottom > c.bottom then
-						risk += (bottom - c.bottom) * 42 * weight
-					end
-
-					local ideal = c.center
-					local n = corridors[index + 1]
-
-					if n then
-						local d = n.center - c.center
-
-						if d > 16 then
-							ideal = c.top + c.height * 0.64
-						elseif d < -16 then
-							ideal = c.top + c.height * 0.36
-						end
-					end
-
-					risk += math.abs(yy - ideal) * 1.25 * weight
-				end
-			end
-
-			local areaTop = GameArea.AbsolutePosition.Y
-			local areaBottom = GameArea.AbsolutePosition.Y + GameArea.AbsoluteSize.Y
-
-			if top < areaTop + 7 then
-				risk += 2600 + ((areaTop + 7) - top) * 120
-			end
-
-			if bottom > areaBottom - 20 then
-				risk += 2600 + (bottom - (areaBottom - 20)) * 120
-			end
-
-			if vv < -145 and top < areaTop + 34 then
-				risk += 800
-			end
-
-			if vv > 230 and bottom > areaBottom - 48 then
-				risk += 800
-			end
-		end
-
-		return risk
 	end
 
 	local lastTap = 0
@@ -573,13 +557,15 @@ task.spawn(function()
 			return
 		end
 
+		updatePipeSpeed()
+
 		local now = tick()
 		local b = getRect(bird)
 
 		if lastY then
 			local dt = math.max(now - lastTime, 1 / 240)
 			velY = (b.cy - lastY) / dt
-			smoothVelY = smoothVelY * 0.60 + velY * 0.40
+			smoothVelY = smoothVelY * 0.55 + velY * 0.45
 		end
 
 		lastY = b.cy
@@ -593,7 +579,7 @@ task.spawn(function()
 		end
 
 		if lastTarget then
-			local maxStep = 7
+			local maxStep = 8
 			local diff = target - lastTarget
 
 			if diff > maxStep then
@@ -602,18 +588,15 @@ task.spawn(function()
 				target = lastTarget - maxStep
 			end
 
-			target = lastTarget * 0.35 + target * 0.65
+			target = lastTarget * 0.30 + target * 0.70
 		end
 
 		lastTarget = target
 
-		local predT = 0.13
-		local predY = b.cy + smoothVelY * predT
-		local predTop = b.top + smoothVelY * predT
-		local predBottom = b.bottom + smoothVelY * predT
-
-		local noTapRisk = estimateTapRisk(false, b, smoothVelY, corridors)
-		local tapRisk = estimateTapRisk(true, b, smoothVelY, corridors)
+		local predNowT = 0.13
+		local predY = b.cy + smoothVelY * predNowT
+		local predTop = b.top + smoothVelY * predNowT
+		local predBottom = b.bottom + smoothVelY * predNowT
 
 		local shouldTap = false
 		local emergency = false
@@ -621,25 +604,28 @@ task.spawn(function()
 		local error = b.cy - target
 		local predError = predY - target
 
-		local topDanger = b.top <= c1.rawTop + c1.topClearance * 0.75 or predTop <= c1.rawTop + c1.topClearance
-		local bottomDanger = b.bottom >= c1.rawBottom - c1.bottomClearance * 0.85 or predBottom >= c1.rawBottom - c1.bottomClearance
+		local c1FutureY = predictCenterAtColumn(b, smoothVelY, c1)
+		local c1FutureTop = c1FutureY - b.height / 2
+		local c1FutureBottom = c1FutureY + b.height / 2
 
-		local deadZone = 4.8
+		local willHitTopC1 = c1FutureTop < c1.rawTop + c1.topClearance
+		local willHitBottomC1 = c1FutureBottom > c1.rawBottom - c1.bottomClearance
+
+		local topDangerNow = b.top <= c1.rawTop + c1.topClearance or predTop <= c1.rawTop + c1.topClearance + 1.5
+		local bottomDangerNow = b.bottom >= c1.rawBottom - c1.bottomClearance or predBottom >= c1.rawBottom - c1.bottomClearance - 1.5
+
+		local deadZone = 5
 
 		if c1.dist < 50 then
-			deadZone = 3.0
+			deadZone = 3.2
 		end
 
 		if c1.dist < 25 then
-			deadZone = 1.8
+			deadZone = 2.0
 		end
 
 		if c1.dist < 12 then
-			deadZone = 1.0
-		end
-
-		if tapRisk + 70 < noTapRisk then
-			shouldTap = true
+			deadZone = 1.1
 		end
 
 		if error > deadZone and predError > deadZone and smoothVelY > -115 then
@@ -650,15 +636,15 @@ task.spawn(function()
 			shouldTap = true
 		end
 
-		if bottomDanger then
+		if willHitBottomC1 or bottomDangerNow then
 			shouldTap = true
 			emergency = true
 		end
 
-		if topDanger then
+		if willHitTopC1 or topDangerNow then
 			shouldTap = false
 			emergency = false
-			noTapUntil = now + 0.10
+			noTapUntil = now + 0.12
 		end
 
 		local areaTop = GameArea.AbsolutePosition.Y
@@ -667,7 +653,7 @@ task.spawn(function()
 		if predTop <= areaTop + 8 then
 			shouldTap = false
 			emergency = false
-			noTapUntil = now + 0.12
+			noTapUntil = now + 0.13
 		end
 
 		if predBottom >= areaBottom - 20 then
@@ -675,35 +661,47 @@ task.spawn(function()
 			emergency = true
 		end
 
-		if smoothVelY < -110 and b.cy < target + 12 then
+		if smoothVelY < -115 and b.cy < target + 14 then
 			shouldTap = false
 			emergency = false
-			noTapUntil = now + 0.065
+			noTapUntil = now + 0.075
 		end
 
 		if c2 then
-			local nextLower = c2.minCenter > c1.minCenter + 5 or c2.center > c1.center + 12
-			local nextHigher = c2.center < c1.center - 12
+			local c2FutureY = predictCenterAtColumn(b, smoothVelY, c2)
+			local c2FutureTop = c2FutureY - b.height / 2
+			local c2FutureBottom = c2FutureY + b.height / 2
 
-			if nextLower and (b.cy < target + 2 or smoothVelY < 10) then
+			local willHitTopC2 = c2FutureTop < c2.rawTop + c2.topClearance
+			local willHitBottomC2 = c2FutureBottom > c2.rawBottom - c2.bottomClearance
+
+			if willHitTopC2 then
 				shouldTap = false
 				emergency = false
-				noTapUntil = math.max(noTapUntil, now + 0.06)
+				noTapUntil = math.max(noTapUntil, now + 0.09)
 			end
 
-			if nextHigher and smoothVelY > 50 and b.cy > target - 5 then
+			if willHitBottomC2 and not willHitTopC1 then
 				shouldTap = true
+			end
+
+			local nextLower = c2.center > c1.center + 10
+
+			if nextLower and (b.cy < target + 3 or smoothVelY < 5) then
+				shouldTap = false
+				emergency = false
+				noTapUntil = math.max(noTapUntil, now + 0.07)
 			end
 		end
 
-		if c1.dist < b.width * 2.6 then
-			if b.top <= c1.rawTop + c1.topClearance or predTop <= c1.rawTop + c1.topClearance + 1.5 then
+		if c1.dist < b.width * 2.8 then
+			if b.top <= c1.rawTop + c1.topClearance + 1 or predTop <= c1.rawTop + c1.topClearance + 2 then
 				shouldTap = false
 				emergency = false
-				noTapUntil = now + 0.105
+				noTapUntil = now + 0.13
 			end
 
-			if b.bottom >= c1.rawBottom - c1.bottomClearance or predBottom >= c1.rawBottom - c1.bottomClearance - 1.5 then
+			if b.bottom >= c1.rawBottom - c1.bottomClearance - 1 or predBottom >= c1.rawBottom - c1.bottomClearance - 2 then
 				shouldTap = true
 				emergency = true
 			end
@@ -721,7 +719,7 @@ task.spawn(function()
 		end
 	end)
 
-	print("Auto Flappy com CAP corrigido iniciado.")
+	print("Auto Flappy CAP + previsão X iniciado.")
 end)
 
 updateUI()
