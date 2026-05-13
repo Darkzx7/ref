@@ -1,41 +1,68 @@
-local Players = game:GetService("Players")
+--[[
+	AutoFlappy v5
+	Correcoes baseadas no deep dump real:
+	- Cap do pipe e FIXO em pixels (~4.5px), nao proporcional ao tamanho do pipe
+	- Hitbox horizontal sem overhang (capXOverhang removido)
+	- UI draggable corrigida (frame inteiro e draggable, toggle nao interfere)
+	- effTop/effBottom calculados subtraindo o cap do vao bruto
+--]]
+
+local Players    = game:GetService("Players")
 local RunService = game:GetService("RunService")
 
-local Player = Players.LocalPlayer
+local Player    = Players.LocalPlayer
 local PlayerGui = Player:WaitForChild("PlayerGui")
 
 local Enabled = true
 
+-- ══════════════════════════════════════
+--  UI
+-- ══════════════════════════════════════
 local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = "AutoFlappyUI"
-ScreenGui.ResetOnSpawn = false
-ScreenGui.Parent = PlayerGui
+ScreenGui.Name           = "AutoFlappyUI"
+ScreenGui.ResetOnSpawn   = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.Parent         = PlayerGui
 
 local Main = Instance.new("Frame")
-Main.Size = UDim2.new(0, 150, 0, 45)
-Main.Position = UDim2.new(0, 20, 0.5, -22)
-Main.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
-Main.BorderSizePixel = 0
-Main.Active = true
-Main.Draggable = true
-Main.Parent = ScreenGui
+Main.Size             = UDim2.new(0, 160, 0, 58)
+Main.Position         = UDim2.new(0, 20, 0.5, -29)
+Main.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
+Main.BorderSizePixel  = 0
+Main.Active           = true
+Main.Draggable        = true
+Main.Parent           = ScreenGui
 Instance.new("UICorner", Main).CornerRadius = UDim.new(0, 10)
 
+local TitleBar = Instance.new("TextLabel")
+TitleBar.Size                   = UDim2.new(1, 0, 0, 18)
+TitleBar.Position               = UDim2.new(0, 0, 0, 2)
+TitleBar.BackgroundTransparency = 1
+TitleBar.Text                   = "AutoFlappy v5"
+TitleBar.TextColor3             = Color3.fromRGB(120, 120, 120)
+TitleBar.TextSize               = 11
+TitleBar.Font                   = Enum.Font.GothamBold
+TitleBar.TextXAlignment         = Enum.TextXAlignment.Center
+TitleBar.Parent                 = Main
+
 local Toggle = Instance.new("TextButton")
-Toggle.Size = UDim2.new(1, -10, 1, -10)
-Toggle.Position = UDim2.new(0, 5, 0, 5)
+Toggle.Size             = UDim2.new(1, -10, 0, 30)
+Toggle.Position         = UDim2.new(0, 5, 0, 22)
 Toggle.BackgroundColor3 = Color3.fromRGB(50, 160, 230)
-Toggle.BorderSizePixel = 0
-Toggle.Text = "Auto Flappy: ON"
-Toggle.TextColor3 = Color3.fromRGB(255, 255, 255)
-Toggle.TextSize = 14
-Toggle.Font = Enum.Font.GothamBold
-Toggle.Parent = Main
+Toggle.BorderSizePixel  = 0
+Toggle.Text             = "Auto: ON"
+Toggle.TextColor3       = Color3.fromRGB(255, 255, 255)
+Toggle.TextSize         = 13
+Toggle.Font             = Enum.Font.GothamBold
+Toggle.AutoButtonColor  = false
+Toggle.Parent           = Main
 Instance.new("UICorner", Toggle).CornerRadius = UDim.new(0, 8)
 
 local function updateUI()
-	Toggle.Text = Enabled and "Auto Flappy: ON" or "Auto Flappy: OFF"
-	Toggle.BackgroundColor3 = Enabled and Color3.fromRGB(50, 160, 230) or Color3.fromRGB(170, 55, 55)
+	Toggle.Text             = Enabled and "Auto: ON" or "Auto: OFF"
+	Toggle.BackgroundColor3 = Enabled
+		and Color3.fromRGB(50, 160, 230)
+		or  Color3.fromRGB(170, 55, 55)
 end
 
 Toggle.MouseButton1Click:Connect(function()
@@ -43,10 +70,15 @@ Toggle.MouseButton1Click:Connect(function()
 	updateUI()
 end)
 
+-- ══════════════════════════════════════
+--  LOGICA PRINCIPAL
+-- ══════════════════════════════════════
 task.spawn(function()
 	local BaseFlappy
 	while true do
-		local ok = pcall(function() BaseFlappy = PlayerGui.Game.Sections.ParkPhoneUI.BaseFlappy end)
+		local ok = pcall(function()
+			BaseFlappy = PlayerGui.Game.Sections.ParkPhoneUI.BaseFlappy
+		end)
 		if ok and BaseFlappy then break end
 		task.wait(0.5)
 	end
@@ -54,12 +86,28 @@ task.spawn(function()
 	local GameArea   = BaseFlappy:WaitForChild("GameArea", 30)
 	local TapOverlay = GameArea:WaitForChild("TapOverlay", 30)
 
+	-- Fisica
 	local GRAVITY     = 680
 	local TAP_IMPULSE = -165
 	local SIM_DT      = 1 / 60
 	local SIM_STEPS   = 60
 	local PIPE_PAT    = "^Pipe_%d+_([TB])$"
 	local COL_X_TOL   = 2
+
+	--[[
+		CAP_PX: medido diretamente do dump.
+		  Pipe_3_T bottom = 203.706, SafeA effTop = 207.969
+		  Diferenca = 4.263 px  →  esse e o cap real em pixels de tela.
+		  Pipe_3_B top = 255.620, SafeA effBottom = 251.356
+		  Diferenca = 4.264 px  →  confirma.
+		Usamos 4.5 com margem minima de seguranca.
+
+		NAO usamos mais capXOverhang no sentido de EXPANDIR a hitbox;
+		o cap lateral (se existir) seria um INSET, nao um overhang.
+		CAP_X_PX = 0 por enquanto (pipe width = 13.708px, sem dado de cap lateral).
+	--]]
+	local CAP_PX   = 4.5
+	local CAP_X_PX = 0.0
 
 	local function tap()
 		if typeof(firesignal) == "function" then
@@ -74,14 +122,11 @@ task.spawn(function()
 		local p = obj.AbsolutePosition
 		local s = obj.AbsoluteSize
 		return {
-			left   = p.X,
-			right  = p.X + s.X,
-			top    = p.Y,
-			bottom = p.Y + s.Y,
+			left   = p.X,       right  = p.X + s.X,
+			top    = p.Y,       bottom = p.Y + s.Y,
 			cx     = p.X + s.X * 0.5,
 			cy     = p.Y + s.Y * 0.5,
-			width  = s.X,
-			height = s.Y,
+			width  = s.X,       height = s.Y,
 		}
 	end
 
@@ -89,8 +134,7 @@ task.spawn(function()
 	local function findBird()
 		for _, obj in ipairs(GameArea:GetChildren()) do
 			if obj:IsA("GuiObject") and obj.Name:lower() == "bird" then
-				bird = obj
-				return
+				bird = obj; return
 			end
 		end
 	end
@@ -102,21 +146,18 @@ task.spawn(function()
 		if obj == bird then bird = nil end
 	end)
 
-	local pipeSpeed    = 50
-	local prevPipePos  = {}
+	local pipeSpeed   = 50
+	local prevPipePos = {}
 
 	local function measurePipeSpeed(dt)
-		local newPos = {}
-		local deltas = {}
+		local newPos, deltas = {}, {}
 		for _, obj in ipairs(GameArea:GetChildren()) do
 			if obj:IsA("GuiObject") and obj.Name:match(PIPE_PAT) then
 				local cx = obj.AbsolutePosition.X
 				local prev = prevPipePos[obj]
 				if prev and dt > 0.002 then
 					local spd = (prev - cx) / dt
-					if spd > 5 and spd < 600 then
-						table.insert(deltas, spd)
-					end
+					if spd > 5 and spd < 600 then table.insert(deltas, spd) end
 				end
 				newPos[obj] = cx
 			end
@@ -125,8 +166,7 @@ task.spawn(function()
 		if #deltas > 0 then
 			local sum = 0
 			for _, v in ipairs(deltas) do sum += v end
-			local measured = sum / #deltas
-			pipeSpeed = pipeSpeed * 0.75 + measured * 0.25
+			pipeSpeed = pipeSpeed * 0.75 + (sum / #deltas) * 0.25
 		end
 	end
 
@@ -139,11 +179,9 @@ task.spawn(function()
 					local p = obj.AbsolutePosition
 					local s = obj.AbsoluteSize
 					local r = {
-						left   = p.X,
-						right  = p.X + s.X,
-						top    = p.Y,
-						bottom = p.Y + s.Y,
-						cx     = p.X + s.X * 0.5,
+						left = p.X, right = p.X + s.X,
+						top  = p.Y, bottom = p.Y + s.Y,
+						cx   = p.X + s.X * 0.5,
 					}
 					if r.right > birdRight - 4 then
 						table.insert(pipes, { r = r, side = side })
@@ -156,10 +194,7 @@ task.spawn(function()
 		for _, p in ipairs(pipes) do
 			local found = nil
 			for _, col in ipairs(cols) do
-				if math.abs(p.r.cx - col.cx) <= COL_X_TOL then
-					found = col
-					break
-				end
+				if math.abs(p.r.cx - col.cx) <= COL_X_TOL then found = col; break end
 			end
 			if not found then
 				found = { cx = p.r.cx, left = p.r.left, right = p.r.right, T = nil, B = nil }
@@ -185,43 +220,45 @@ task.spawn(function()
 		return valid
 	end
 
-	local function buildCorridor(col, birdRect, capH, capXOverhang)
-		local bodyTop    = col.T.bottom
-		local bodyBottom = col.B.top
+	--[[
+		buildCorridor
+		─────────────
+		effTop    = col.T.bottom - CAP_PX   ← subtrai o cap do vao (pipe T inclui cap na ponta)
+		effBottom = col.B.top    + CAP_PX   ← subtrai o cap do vao (pipe B inclui cap na ponta)
 
-		local effTop    = bodyTop    + capH
-		local effBottom = bodyBottom - capH
-		local effH      = effBottom  - effTop
+		Resultado: effTop/effBottom delimitam o vao REAL onde o passaro pode estar.
 
-		if effH < birdRect.height + 4 then return nil end
+		hitLeft/hitRight: sem overhang. O cap lateral nao esta expandindo para fora do frame
+		do pipe (nao ha dado de cap lateral no dump), entao a hitbox horizontal
+		e simplesmente o frame do pipe.
+	--]]
+	local function buildCorridor(col, birdRect)
+		local effTop    = col.T.bottom - CAP_PX
+		local effBottom = col.B.top    + CAP_PX
+		local effH      = effBottom - effTop
 
-		local halfB    = birdRect.height * 0.5
-		local margin   = halfB + 2.2
+		if effH < birdRect.height + 6 then return nil end
 
+		local halfB  = birdRect.height * 0.5
+		local margin = halfB + 2.5
 		if margin * 2 >= effH then
 			margin = (effH - halfB * 2) * 0.5 - 0.5
 		end
 
 		local safeTop    = effTop    + margin
 		local safeBottom = effBottom - margin
-
-		local hitLeft  = col.left  - capXOverhang
-		local hitRight = col.right + capXOverhang
-		local distLeft = hitLeft   - birdRect.right
+		local hitLeft    = col.left  + CAP_X_PX
+		local hitRight   = col.right - CAP_X_PX
+		local distLeft   = hitLeft   - birdRect.right
 
 		return {
-			left       = col.left,
-			right      = col.right,
-			hitLeft    = hitLeft,
-			hitRight   = hitRight,
+			left       = col.left,      right      = col.right,
+			hitLeft    = hitLeft,        hitRight   = hitRight,
 			distLeft   = distLeft,
-			bodyTop    = bodyTop,
-			bodyBottom = bodyBottom,
-			effTop     = effTop,
-			effBottom  = effBottom,
+			bodyTop    = col.T.bottom,  bodyBottom = col.B.top,
+			effTop     = effTop,        effBottom  = effBottom,
 			effH       = effH,
-			safeTop    = safeTop,
-			safeBottom = safeBottom,
+			safeTop    = safeTop,       safeBottom = safeBottom,
 			center     = (safeTop + safeBottom) * 0.5,
 			minCY      = effTop    + halfB + 0.5,
 			maxCY      = effBottom - halfB - 0.5,
@@ -232,23 +269,19 @@ task.spawn(function()
 		local c1 = corridors[1]
 		if not c1 then return nil end
 		local c2 = corridors[2]
-
 		local base = c1.center
 
 		if c2 then
-			local d = c2.center - c1.center
-
+			local d    = c2.center - c1.center
 			local bias = 0.5
 			if     d >  30 then bias = 0.70
 			elseif d >  15 then bias = 0.60
 			elseif d < -30 then bias = 0.30
 			elseif d < -15 then bias = 0.40
 			end
-
 			local exitY = c1.safeTop + (c1.safeBottom - c1.safeTop) * bias
-
-			local dl   = c1.distLeft
-			local prep = 0.0
+			local dl    = c1.distLeft
+			local prep  = 0.0
 			if     dl < -8  then prep = 1.00
 			elseif dl <  8  then prep = 0.90
 			elseif dl <  22 then prep = 0.76
@@ -256,7 +289,6 @@ task.spawn(function()
 			elseif dl <  68 then prep = 0.34
 			elseif dl < 100 then prep = 0.16
 			end
-
 			base = c1.center + (exitY - c1.center) * prep
 		end
 
@@ -264,8 +296,8 @@ task.spawn(function()
 	end
 
 	local function simulate(birdRect, velY, corridors, doTap, areaTop, areaBottom)
-		local y = birdRect.cy
-		local v = doTap and TAP_IMPULSE or velY
+		local y    = birdRect.cy
+		local v    = doTap and TAP_IMPULSE or velY
 		local risk = 0.0
 
 		for i = 1, SIM_STEPS do
@@ -275,46 +307,35 @@ task.spawn(function()
 			local bTop = y - birdRect.height * 0.5
 			local bBot = y + birdRect.height * 0.5
 
-			if bTop < areaTop + 2 then
-				risk += 8000 + (areaTop + 2 - bTop) * 500
-			end
-			if bBot > areaBottom - 2 then
-				risk += 8000 + (bBot - (areaBottom - 2)) * 500
-			end
+			if bTop < areaTop  + 2 then risk += 8000 + (areaTop  + 2 - bTop) * 500 end
+			if bBot > areaBottom - 2 then risk += 8000 + (bBot - (areaBottom - 2)) * 500 end
 
 			for idx = 1, math.min(#corridors, 3) do
 				local c = corridors[idx]
 				local w = idx == 1 and 1.0 or (idx == 2 and 0.60 or 0.30)
-
 				local t      = i * SIM_DT
 				local pLeft  = c.hitLeft  - pipeSpeed * t
 				local pRight = c.hitRight - pipeSpeed * t
 
-				local xOverlap = birdRect.right > pLeft and birdRect.left < pRight
-
-				if xOverlap then
+				if birdRect.right > pLeft and birdRect.left < pRight then
 					if bTop < c.effTop then
-						local pen = (c.effTop - bTop)
-						risk += (10000 + pen * 600) * w
+						risk += (10000 + (c.effTop - bTop) * 600) * w
 					elseif bBot > c.effBottom then
-						local pen = (bBot - c.effBottom)
-						risk += (10000 + pen * 600) * w
+						risk += (10000 + (bBot - c.effBottom) * 600) * w
 					else
-						local topGap = y - c.effTop    - birdRect.height * 0.5
-						local botGap = c.effBottom - y - birdRect.height * 0.5
-						local minGap = math.min(topGap, botGap)
-						if minGap < 4 then
-							risk += (4 - minGap) * 220 * w
-						end
+						local minGap = math.min(
+							y - c.effTop    - birdRect.height * 0.5,
+							c.effBottom - y - birdRect.height * 0.5
+						)
+						if minGap < 4 then risk += (4 - minGap) * 220 * w end
 					end
-
 					if bTop < c.bodyTop or bBot > c.bodyBottom then
 						risk += 3000 * w
 					end
 				end
 			end
 
-			if v < -155 and bTop < areaTop + 25 then risk += 1200 end
+			if v < -155 and bTop < areaTop  + 25 then risk += 1200 end
 			if v >  240 and bBot > areaBottom - 35 then risk += 1200 end
 		end
 
@@ -334,14 +355,15 @@ task.spawn(function()
 
 	RunService.Heartbeat:Connect(function()
 		if not Enabled then return end
-		if not bird or not bird.Parent then findBird() return end
+		if not bird or not bird.Parent then findBird(); return end
 
-		local now  = tick()
-		local b    = getRect(bird)
+		local now = tick()
+		local b   = getRect(bird)
+
 		local areaPos  = GameArea.AbsolutePosition
 		local areaSize = GameArea.AbsoluteSize
-		local aT   = areaPos.Y
-		local aB   = aT + areaSize.Y
+		local aT = areaPos.Y
+		local aB = aT + areaSize.Y
 
 		local dt = math.max(now - lastTime, 1 / 240)
 		measurePipeSpeed(dt)
@@ -353,13 +375,10 @@ task.spawn(function()
 		lastY    = b.cy
 		lastTime = now
 
-		local capH        = areaSize.Y * 0.065
-		local capXOverhang = areaSize.X * 0.015
-
 		local cols      = getColumns(b.right)
 		local corridors = {}
 		for _, col in ipairs(cols) do
-			local c = buildCorridor(col, b, capH, capXOverhang)
+			local c = buildCorridor(col, b)
 			if c then table.insert(corridors, c) end
 		end
 
@@ -370,17 +389,16 @@ task.spawn(function()
 				hitLeft = math.huge, hitRight = math.huge,
 				distLeft = math.huge,
 				bodyTop = aT + 8, bodyBottom = aB - 20,
-				effTop = aT + 8, effBottom = aB - 20,
-				effH = aB - aT - 28,
-				safeTop  = aT + 18, safeBottom = aB - 30,
-				center   = midY,
-				minCY    = aT + b.height * 0.5 + 8,
-				maxCY    = aB - b.height * 0.5 - 20,
+				effTop  = aT + 8, effBottom  = aB - 20,
+				effH    = aB - aT - 28,
+				safeTop = aT + 18, safeBottom = aB - 30,
+				center  = midY,
+				minCY   = aT + b.height * 0.5 + 8,
+				maxCY   = aB - b.height * 0.5 - 20,
 			})
 		end
 
 		local c1 = corridors[1]
-
 		local target = computeTarget(corridors, b.cy)
 		if not target then return end
 
@@ -410,38 +428,26 @@ task.spawn(function()
 		local shouldTap = false
 		local emergency = false
 
-		if riskTap < riskNo - 60 then
-			shouldTap = true
-		end
-
-		if err > dz and predErr > dz and smoothVelY > -80 then
-			shouldTap = true
-		end
-
-		if smoothVelY > 120 and predErr > -4 then
-			shouldTap = true
-		end
+		if riskTap < riskNo - 60 then shouldTap = true end
+		if err > dz and predErr > dz and smoothVelY > -80 then shouldTap = true end
+		if smoothVelY > 120 and predErr > -4 then shouldTap = true end
 
 		if b.bottom >= c1.effBottom - 4 or predBot >= c1.effBottom - 6 then
-			shouldTap = true
-			emergency = true
+			shouldTap = true; emergency = true
 		end
 
 		if b.top <= c1.effTop + 4 or predTop <= c1.effTop + 6 then
-			shouldTap = false
-			emergency = false
+			shouldTap = false; emergency = false
 			noTapUntil = math.max(noTapUntil, now + 0.110)
 		end
 
 		if smoothVelY < -140 and b.cy < target + 8 then
-			shouldTap = false
-			emergency = false
+			shouldTap = false; emergency = false
 			noTapUntil = math.max(noTapUntil, now + 0.075)
 		end
 
 		if predTop <= aT + 4 then
-			shouldTap = false
-			emergency = false
+			shouldTap = false; emergency = false
 			noTapUntil = math.max(noTapUntil, now + 0.125)
 		end
 
@@ -455,19 +461,15 @@ task.spawn(function()
 
 		if c1.distLeft < b.width * 2.2 then
 			if b.top <= c1.effTop + 5 or predTop <= c1.effTop + 7 then
-				shouldTap = false
-				emergency = false
+				shouldTap = false; emergency = false
 				noTapUntil = math.max(noTapUntil, now + 0.110)
 			end
 			if b.bottom >= c1.effBottom - 5 or predBot >= c1.effBottom - 7 then
-				shouldTap = true
-				emergency = true
+				shouldTap = true; emergency = true
 			end
 		end
 
-		if now < noTapUntil and not emergency then
-			shouldTap = false
-		end
+		if now < noTapUntil and not emergency then shouldTap = false end
 
 		local interval = emergency and EMRG_INTERVAL or MIN_INTERVAL
 		if shouldTap and (now - lastTap) >= interval then
@@ -477,7 +479,7 @@ task.spawn(function()
 		end
 	end)
 
-	print("[AutoFlappy v4] Pronto.")
+	print("[AutoFlappy v5] Pronto. CAP_PX=" .. CAP_PX)
 end)
 
 updateUI()
