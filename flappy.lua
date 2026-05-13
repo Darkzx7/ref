@@ -68,11 +68,12 @@ task.spawn(function()
 	local PIPE_PAT    = "^Pipe_%d+_([TB])$"
 	local COL_X_TOL   = 3
 
-	-- cap medido do dump: 4.263px. Usamos 6.5px (cap + folga visual confortável).
-	-- Tap não cancela colisão imediata (bird continua descendo ~0.5s após tap),
-	-- então o sistema trabalha por antecipação, não por reação.
-	local CAP_PX       = 6.5
-	local SAFE_MARGIN  = 3.5  -- margem extra sobre effTop/effBottom para o safeTop/safeBottom
+	-- cap interno medido do dump: 4.263px
+	-- UIStroke thickness=2 position=outer: +2px pra cada lado vertical
+	-- buffer de segurança visual: +2px
+	-- total: 8.5px
+	local CAP_PX      = 8.5
+	local SAFE_MARGIN = 3.0
 
 	local function tap()
 		if typeof(firesignal) == "function" then
@@ -115,7 +116,7 @@ task.spawn(function()
 				local cx   = obj.AbsolutePosition.X
 				local prev = prevPipePos[obj]
 				if prev and dt > 0.002 then
-					local spd = (prev - cx) / dt
+					local spd = (prev-cx)/dt
 					if spd > 5 and spd < 600 then table.insert(deltas, spd) end
 				end
 				newPos[obj] = cx
@@ -125,7 +126,7 @@ task.spawn(function()
 		if #deltas > 0 then
 			local sum = 0
 			for _, v in ipairs(deltas) do sum += v end
-			pipeSpeed = pipeSpeed * 0.80 + (sum / #deltas) * 0.20
+			pipeSpeed = pipeSpeed * 0.80 + (sum/#deltas) * 0.20
 		end
 	end
 
@@ -145,7 +146,7 @@ task.spawn(function()
 		for _, p in ipairs(pipes) do
 			local found = nil
 			for _, col in ipairs(cols) do
-				if math.abs(p.r.cx - col.cx) <= COL_X_TOL then found=col; break end
+				if math.abs(p.r.cx-col.cx) <= COL_X_TOL then found=col; break end
 			end
 			if not found then
 				found = {cx=p.r.cx, left=p.r.left, right=p.r.right, T=nil, B=nil}
@@ -153,7 +154,7 @@ task.spawn(function()
 			end
 			found.left  = math.min(found.left,  p.r.left)
 			found.right = math.max(found.right, p.r.right)
-			found.cx    = (found.left + found.right) * .5
+			found.cx    = (found.left+found.right)*.5
 			if p.side == "T" then
 				if not found.T or p.r.bottom > found.T.bottom then found.T = p.r end
 			else
@@ -169,7 +170,6 @@ task.spawn(function()
 	end
 
 	local function buildCorridor(col, bRect)
-		-- cap entra dentro do vão: effTop sobe, effBottom desce
 		local effTop    = col.T.bottom + CAP_PX
 		local effBottom = col.B.top    - CAP_PX
 		local effH      = effBottom - effTop
@@ -191,13 +191,12 @@ task.spawn(function()
 			bodyTop=col.T.bottom, bodyBottom=col.B.top,
 			effTop=effTop, effBottom=effBottom, effH=effH,
 			safeTop=safeTop, safeBottom=safeBottom,
-			center=(safeTop + safeBottom) * .5,
+			center=(safeTop+safeBottom)*.5,
 			minCY=effTop    + halfB + 1.5,
 			maxCY=effBottom - halfB - 1.5,
 		}
 	end
 
-	-- Simula a trajetória completa e retorna risco + posição mínima/máxima atingida
 	local function simulate(bRect, velY, corridors, doTap, aT, aB)
 		local y    = bRect.cy
 		local v    = doTap and TAP_IMPULSE or velY
@@ -211,9 +210,8 @@ task.spawn(function()
 			local bTop = y - hw
 			local bBot = y + hw
 
-			-- Penalidade de parede (teto/chão)
-			if bTop < aT + 2 then risk += 15000 + (aT + 2 - bTop) * 1000 end
-			if bBot > aB - 2 then risk += 15000 + (bBot - (aB - 2)) * 1000 end
+			if bTop < aT + 2 then risk += 15000 + (aT+2-bTop) * 1000 end
+			if bBot > aB - 2 then risk += 15000 + (bBot-(aB-2)) * 1000 end
 
 			for idx = 1, math.min(#corridors, 3) do
 				local c = corridors[idx]
@@ -224,25 +222,19 @@ task.spawn(function()
 
 				if bRect.right > pL and bRect.left < pR then
 					if bTop < c.effTop then
-						-- bateu no cap de cima: penalidade máxima proporcional à invasão
-						risk += (15000 + (c.effTop - bTop) * 1000) * w
+						risk += (15000 + (c.effTop-bTop) * 1000) * w
 					elseif bBot > c.effBottom then
-						-- bateu no cap de baixo
-						risk += (15000 + (bBot - c.effBottom) * 1000) * w
+						risk += (15000 + (bBot-c.effBottom) * 1000) * w
 					else
-						-- dentro do vão: penaliza proximidade com as bordas
 						local gapTop = y - c.effTop    - hw
 						local gapBot = c.effBottom - y - hw
 						local minGap = math.min(gapTop, gapBot)
-						-- penalidade suave começa a 8px da borda
-						if minGap < 8 then risk += (8 - minGap) * 400 * w end
-						-- penalidade forte se estiver a menos de 3px
-						if minGap < 3 then risk += (3 - minGap) * 2000 * w end
+						if minGap < 8 then risk += (8-minGap) * 400 * w end
+						if minGap < 3 then risk += (3-minGap) * 2000 * w end
 					end
 				end
 			end
 
-			-- Penaliza trajetórias com velocidade extrema perto das bordas
 			if v < -160 and bTop < aT + 35 then risk += 2000 end
 			if v >  260 and bBot > aB - 45  then risk += 2000 end
 		end
@@ -250,8 +242,7 @@ task.spawn(function()
 		return risk
 	end
 
-	-- Calcula target com lookahead para o próximo pipe
-	local function computeTarget(corridors, bCY)
+	local function computeTarget(corridors)
 		local c1 = corridors[1]
 		if not c1 then return nil end
 		local c2 = corridors[2]
@@ -298,13 +289,13 @@ task.spawn(function()
 		if not Enabled then return end
 		if not bird or not bird.Parent then findBird(); return end
 
-		local now  = tick()
-		local b    = getRect(bird)
-		local ap   = GameArea.AbsolutePosition
-		local as_  = GameArea.AbsoluteSize
-		local aT   = ap.Y
-		local aB   = aT + as_.Y
-		local dt   = math.max(now - lastTime, 1/240)
+		local now = tick()
+		local b   = getRect(bird)
+		local ap  = GameArea.AbsolutePosition
+		local as_ = GameArea.AbsoluteSize
+		local aT  = ap.Y
+		local aB  = aT + as_.Y
+		local dt  = math.max(now - lastTime, 1/240)
 
 		measurePipeSpeed(dt)
 
@@ -323,7 +314,7 @@ task.spawn(function()
 		end
 
 		if #corridors == 0 then
-			local midY = (aT + aB) * .5
+			local midY = (aT+aB)*.5
 			table.insert(corridors, {
 				left=math.huge, right=math.huge,
 				hitLeft=math.huge, hitRight=math.huge,
@@ -338,33 +329,28 @@ task.spawn(function()
 		end
 
 		local c1 = corridors[1]
-		local target = computeTarget(corridors, b.cy)
+		local target = computeTarget(corridors)
 		if not target then return end
 
-		-- Suavização de target com limite de mudança por frame
 		if lastTarget then
-			target = math.clamp(target, lastTarget - 14, lastTarget + 14)
+			target = math.clamp(target, lastTarget-14, lastTarget+14)
 			target = lastTarget * 0.20 + target * 0.80
 		end
 		lastTarget = target
 
-		-- Janela de predição dinâmica: maior quando velocidade é alta
-		-- Cobre pelo menos o tempo que o bird leva para percorrer metade do vão vertical
 		local absVel = math.abs(smoothVelY)
-		local predT  = math.clamp(0.06 + absVel / 3500, 0.045, 0.130)
+		local predT  = math.clamp(0.06 + absVel/3500, 0.045, 0.130)
 
-		local predCY  = b.cy + smoothVelY * predT + 0.5 * GRAVITY * predT * predT
-		local predTop = predCY - b.height * .5
-		local predBot = predCY + b.height * .5
+		local predCY  = b.cy + smoothVelY*predT + 0.5*GRAVITY*predT*predT
+		local predTop = predCY - b.height*.5
+		local predBot = predCY + b.height*.5
 
-		-- Duas comparações de risco: sem tap vs com tap agora
 		local riskNo  = simulate(b, smoothVelY, corridors, false, aT, aB)
 		local riskTap = simulate(b, smoothVelY, corridors, true,  aT, aB)
 
 		local err     = b.cy   - target
 		local predErr = predCY - target
 
-		-- Zona morta proporcional à distância do pipe (mais apertada perto)
 		local dz = 6.0
 		if     c1.distLeft < 8  then dz = 1.2
 		elseif c1.distLeft < 20 then dz = 2.5
@@ -374,18 +360,10 @@ task.spawn(function()
 		local shouldTap = false
 		local emergency = false
 
-		-- Decisão primária: simulação de risco
-		-- Threshold maior (120) para só tapar quando for claramente melhor
 		if riskTap < riskNo - 120 then shouldTap = true end
-
-		-- Controle P: bird abaixo do target e descendo
 		if err > dz and predErr > dz and smoothVelY > -60 then shouldTap = true end
-
-		-- Velocidade de descida alta e ainda acima do target: tap preventivo
 		if smoothVelY > 140 and predErr > -3 then shouldTap = true end
 
-		-- Bordas: verificação com predição
-		-- effBottom - 5: borda segura (não é emergência ainda)
 		if b.bottom >= c1.effBottom - 5 or predBot >= c1.effBottom - 7 then
 			shouldTap = true
 			if b.bottom >= c1.effBottom - 2 or predBot >= c1.effBottom - 4 then
@@ -393,29 +371,24 @@ task.spawn(function()
 			end
 		end
 
-		-- Teto do vão: bloquear tap
 		if b.top <= c1.effTop + 5 or predTop <= c1.effTop + 7 then
 			shouldTap = false
 			emergency = false
 			noTapUntil = math.max(noTapUntil, now + 0.120)
 		end
 
-		-- Subindo rápido e já abaixo do target: não tapar
 		if smoothVelY < -150 and b.cy < target + 6 then
 			shouldTap = false
 			emergency = false
 			noTapUntil = math.max(noTapUntil, now + 0.085)
 		end
 
-		-- Teto da área (paredes do jogo)
 		if predTop <= aT + 6 then
 			shouldTap = false
 			emergency = false
 			noTapUntil = math.max(noTapUntil, now + 0.135)
 		end
 
-		-- Lookahead para próximo pipe: se o próximo está mais abaixo e o bird
-		-- já está na zona boa do atual, deixar cair um pouco
 		local c2 = corridors[2]
 		if c2 and not emergency then
 			if c2.center > c1.center + 16 and err < 3 and smoothVelY < 8 then
@@ -424,7 +397,6 @@ task.spawn(function()
 			end
 		end
 
-		-- Zona crítica de aproximação do pipe (distLeft pequeno): checks mais rígidos
 		if c1.distLeft < b.width * 2.8 then
 			if b.top <= c1.effTop + 6 or predTop <= c1.effTop + 8 then
 				shouldTap = false
@@ -440,14 +412,14 @@ task.spawn(function()
 		if now < noTapUntil and not emergency then shouldTap = false end
 
 		local interval = emergency and EMRG_INTERVAL or MIN_INTERVAL
-		if shouldTap and (now - lastTap) >= interval then
+		if shouldTap and (now-lastTap) >= interval then
 			tap()
 			lastTap    = now
 			smoothVelY = TAP_IMPULSE
 		end
 	end)
 
-	print("[AutoFlappy v5] OK - CAP_PX=" .. CAP_PX)
+	print("[AutoFlappy v5] OK")
 end)
 
 updateUI()
