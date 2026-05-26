@@ -1,6 +1,7 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
+local UserInputService = game:GetService("UserInputService")
 local VirtualInputManager = game:GetService("VirtualInputManager")
 local GuiService = game:GetService("GuiService")
 
@@ -74,8 +75,20 @@ local function setAutoMouseHidden(hidden)
 		return
 	end
 
+	if not UserInputService then
+		return
+	end
+
 	if originalMouseIconEnabled == nil then
-		originalMouseIconEnabled = UserInputService.MouseIconEnabled
+		local ok, value = pcall(function()
+			return UserInputService.MouseIconEnabled
+		end)
+
+		if ok then
+			originalMouseIconEnabled = value
+		else
+			originalMouseIconEnabled = true
+		end
 	end
 
 	pcall(function()
@@ -84,6 +97,11 @@ local function setAutoMouseHidden(hidden)
 end
 
 local function restoreMouseIcon()
+	if not UserInputService then
+		originalMouseIconEnabled = nil
+		return
+	end
+
 	if originalMouseIconEnabled ~= nil then
 		pcall(function()
 			UserInputService.MouseIconEnabled = originalMouseIconEnabled
