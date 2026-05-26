@@ -16,7 +16,8 @@ Miner.Enabled = Miner.Enabled ~= false
 Miner.Debug = Miner.Debug == true
 Miner.Teleport = Miner.Teleport ~= false
 Miner.TryMineRemote = Miner.TryMineRemote ~= false
-Miner.RemoteFinishFallback = Miner.RemoteFinishFallback ~= false
+Miner.RemoteFinishFallback = Miner.RemoteFinishFallback == true
+Miner.RequireCatchBeforeNextOre = Miner.RequireCatchBeforeNextOre ~= false
 Miner.HideMouseDuringClicks = Miner.HideMouseDuringClicks ~= false
 Miner.CatchAfterCircles = Miner.CatchAfterCircles ~= false
 Miner.SwingDelay = tonumber(Miner.SwingDelay) or 0.18
@@ -25,7 +26,7 @@ Miner.CircleTimeout = tonumber(Miner.CircleTimeout) or 18
 Miner.CircleClickDelay = tonumber(Miner.CircleClickDelay) or 0.045
 Miner.NextOreDelay = tonumber(Miner.NextOreDelay) or 0.75
 Miner.CatchClickRepeats = tonumber(Miner.CatchClickRepeats) or 3
-Miner.CatchCandidateClicks = tonumber(Miner.CatchCandidateClicks) or 5
+Miner.CatchCandidateClicks = tonumber(Miner.CatchCandidateClicks) or 12
 Miner.TeleportOffset = Miner.TeleportOffset or Vector3.new(0, 2.35, 4.25)
 Miner.Allowed = Miner.Allowed or {
 	Blue = true,
@@ -921,6 +922,10 @@ local function clickCatchButtonStrong(button)
 	end)
 
 	for _ = 1, Miner.CatchClickRepeats do
+		pcall(function()
+			button:Activate()
+		end)
+
 		fireButtonSignals(button)
 
 		task.wait(0.015)
@@ -1010,6 +1015,10 @@ local function completeCurrentOreAfterCircles(reason)
 		return false
 	end
 
+	if Miner.RequireCatchBeforeNextOre and not catchClicked then
+		return false
+	end
+
 	finishRemoteSent = true
 	lastRemoteFinishAt = tick()
 
@@ -1040,6 +1049,15 @@ end
 
 local function finishCurrentOre(reason)
 	if finishing then return end
+
+	if Miner.RequireCatchBeforeNextOre
+		and currentOre
+		and currentOre.Parent
+		and phase == "waiting_collect"
+		and not catchClicked then
+		log("blocked finish before catch", reason or "unknown")
+		return
+	end
 
 	finishing = true
 	log("finish", reason or "unknown", "clicked", clickedCount, "expected", expectedClicks or "?")
@@ -1109,7 +1127,7 @@ local function beginWaitingCollect(reason)
 	end)
 
 	task.delay(9.5, function()
-		if currentOre and waitingCollected and catchClicked then
+		if currentOre and waitingCollected and catchClicked and not Miner.RequireCatchBeforeNextOre then
 			finishCurrentOre("catch_or_remote_timeout")
 		end
 	end)
@@ -1244,24 +1262,28 @@ task.spawn(function()
 				solveCircleStep()
 
 				if tick() - circleStartedAt > Miner.CircleTimeout then
-					finishCurrentOre("circle_timeout")
+					if clickedCount > 0 then
+						beginWaitingCollect("circle_timeout")
+					elseif not Miner.RequireCatchBeforeNextOre then
+						finishCurrentOre("circle_timeout")
+					end
 				end
 			elseif phase == "waiting_collect" then
 				clickCatchButton()
 
-				if Miner.RemoteFinishFallback and tick() - lastRemoteFinishAt > 0.65 then
+				if Miner.RemoteFinishFallback and catchClicked and tick() - lastRemoteFinishAt > 0.65 then
 					completeCurrentOreAfterCircles("waiting_collect")
 				end
 
-				if catchClicked and tick() - catchClickedAt > 5 then
+				if catchClicked and tick() - catchClickedAt > 5 and not Miner.RequireCatchBeforeNextOre then
 					finishCurrentOre("catch_or_remote_wait_timeout")
-				elseif finishRemoteSent and tick() - lastRemoteFinishAt > 10 then
+				elseif finishRemoteSent and tick() - lastRemoteFinishAt > 10 and not Miner.RequireCatchBeforeNextOre then
 					finishCurrentOre("remote_finish_no_catch_button")
 				elseif tick() - circleStartedAt > Miner.CircleTimeout + 10 then
-					if catchClicked then
+					if catchClicked and not Miner.RequireCatchBeforeNextOre then
 						finishCurrentOre("collect_timeout")
 					else
-						log("waiting catch/direct complete")
+						log("still waiting catch/collect")
 					end
 				end
 			elseif phase == "hitting" then
