@@ -12,7 +12,7 @@ getgenv().RefMiningProbe = getgenv().RefMiningProbe or {}
 
 local Probe = getgenv().RefMiningProbe
 Probe.Enabled = Probe.Enabled ~= false
-Probe.FileName = Probe.FileName or ("ref_mining_probe_" .. tostring(game.PlaceId) .. "_" .. tostring(os.time()) .. ".jsonl")
+Probe.FileName = "REFORE.jsonl"
 Probe.FlushInterval = tonumber(Probe.FlushInterval) or 0.75
 Probe.ScanInterval = tonumber(Probe.ScanInterval) or 0.22
 Probe.ActiveScanSeconds = tonumber(Probe.ActiveScanSeconds) or 18
@@ -31,7 +31,8 @@ end)
 
 local writeOk = type(writefile) == "function"
 local appendOk = type(appendfile) == "function"
-local fileName = Probe.FileName
+local fileName = "REFORE.jsonl"
+Probe.FileName = fileName
 
 local buffer = {}
 local allLines = {}
@@ -259,15 +260,14 @@ local function flush(force)
 
 	totalBytes += #chunk
 
-	if appendOk then
-		pcall(function()
-			appendfile(fileName, chunk)
-		end)
-	elseif writeOk then
+	if writeOk then
 		table.insert(allLines, chunk)
-
 		pcall(function()
 			writefile(fileName, table.concat(allLines))
+		end)
+	elseif appendOk then
+		pcall(function()
+			appendfile(fileName, chunk)
 		end)
 	end
 end
@@ -290,10 +290,15 @@ local function initFile()
 		pcall(function()
 			writefile(fileName, "")
 		end)
+
+		pcall(function()
+			writefile("REFORE_status.txt", "REFORE scanner started. Main log: " .. fileName .. "\nIf the main log is empty, keep this scanner running while doing the mining minigame.\n")
+		end)
 	end
 
 	log("probe_started", {
 		file = fileName,
+		statusFile = "REFORE_status.txt",
 		placeId = game.PlaceId,
 		jobId = game.JobId,
 		hasWritefile = writeOk,
@@ -825,3 +830,5 @@ end)
 getgenv().RefMiningProbeStop = function()
 	Probe.Enabled = false
 end
+
+print("[ref mining probe] saving to executor workspace as", fileName)
