@@ -413,6 +413,16 @@ local function isGuiVisible(obj)
 			return false
 		end
 
+		if parent:IsA("LayerCollector") then
+			local ok, enabled = pcall(function()
+				return parent.Enabled
+			end)
+
+			if ok and enabled == false then
+				return false
+			end
+		end
+
 		parent = parent.Parent
 	end
 
@@ -580,7 +590,6 @@ local function clickButton(button)
 	end
 
 	local x, y = getCenter(target)
-	local inset = GuiService:GetGuiInset()
 
 	if not isPointOwnedByButton(button, x, y) then
 		return false
@@ -676,55 +685,73 @@ local function isReleaseText(txt)
 		or txt == "descartar"
 end
 
-local function findMushCatchButton()
-	local catchIndicator = playerGui:FindFirstChild("CatchOrReleaseIndicator")
+local catchButtonPaths = {
+	{ "Frame", "Frame", "TextButton" },
+	{ "Frame", "Frame", "Frame", "TextButton" },
+	{ "Frame", "TextButton" },
+	{ "TextButton" },
+}
 
-	if catchIndicator then
-		local frame = catchIndicator:FindFirstChild("Frame")
+local function getPath(root, path)
+	local node = root
 
-		if frame then
-			local innerFrame = frame:FindFirstChild("Frame")
-
-			if innerFrame then
-				local innerInnerFrame = innerFrame:FindFirstChild("Frame")
-
-				if innerInnerFrame then
-					local catchButton = innerInnerFrame:FindFirstChild("TextButton")
-
-					if catchButton and catchButton:IsA("TextButton") and isGuiVisible(catchButton) then
-						return catchButton
-					end
-				end
-			end
+	for _, name in ipairs(path) do
+		if not node then
+			return nil
 		end
+
+		node = node:FindFirstChild(name)
 	end
 
-	local catchRelease = playerGui:FindFirstChild("CatchOrRelease")
+	return node
+end
 
-	if catchRelease then
-		local enabled = true
+local function getDeepText(obj)
+	local parts = {}
+
+	local function addText(target)
 		pcall(function()
-			enabled = catchRelease.Enabled
+			local value = tostring(target.Text or "")
+
+			if value ~= "" then
+				table.insert(parts, value)
+			end
 		end)
+	end
 
-		if enabled then
-			for _, obj in ipairs(catchRelease:GetDescendants()) do
-				if obj:IsA("TextButton") and isGuiVisible(obj) then
-					local txt = cleanButtonText(getButtonText(obj))
+	if obj:IsA("TextButton") or obj:IsA("TextLabel") or obj:IsA("TextBox") then
+		addText(obj)
+	end
 
-					if txt:find("catch", 1, true)
-						or txt:find("captur", 1, true)
-						or txt == "✓"
-						or tostring(obj.Name or ""):lower():find("catch", 1, true)
-						or tostring(obj.Name or ""):lower():find("captur", 1, true) then
-						return obj
-					end
-				end
+	for _, desc in ipairs(obj:GetDescendants()) do
+		if desc:IsA("TextButton") or desc:IsA("TextLabel") or desc:IsA("TextBox") then
+			addText(desc)
+		end
+	end
+
+	return table.concat(parts, " ")
+end
+
+local function getNearbyText(button)
+	local parts = { getDeepText(button) }
+	local parent = button and button.Parent
+
+	if parent then
+		for _, child in ipairs(parent:GetChildren()) do
+			if child ~= button and (child:IsA("TextButton") or child:IsA("TextLabel") or child:IsA("TextBox")) then
+				table.insert(parts, getDeepText(child))
 			end
 		end
 	end
 
-	return nil
+	return table.concat(parts, " ")
+end
+
+local function isReleaseBlob(blob)
+	return blob:find("release", 1, true)
+		or blob:find("soltar", 1, true)
+		or blob:find("liberar", 1, true)
+		or blob:find("descartar", 1, true)
 end
 
 local function hasReleaseSibling(button)
@@ -742,57 +769,114 @@ local function hasReleaseSibling(button)
 	return false
 end
 
-local function findComponentCatchButton()
-	local candidates = {}
-	local camera = Workspace.CurrentCamera
-	local viewport = camera and camera.ViewportSize or Vector2.new(1280, 720)
-
-	for _, obj in ipairs(playerGui:GetDescendants()) do
-		if obj:IsA("TextButton") and isGuiVisible(obj) and isCatchText(getButtonText(obj)) then
-			local x, y = getCenter(obj)
-			local score = 100
-
-			if hasReleaseSibling(obj) then
-				score += 100
-			end
-
-			local parent = obj.Parent
-			if parent then
-				local blob = string.lower(safeFullName(parent))
-
-				if blob:find("catchorrelease", 1, true) then
-					score += 80
-				elseif blob:find("catch", 1, true) or blob:find("release", 1, true) then
-					score += 40
-				end
-
-				for _, child in ipairs(parent:GetChildren()) do
-					if child:IsA("UIListLayout") then
-						score += 25
-					end
-				end
-			end
-
-			if y >= viewport.Y * 0.50 and y <= viewport.Y * 0.95 then
-				score += 25
-			end
-
-			if x >= viewport.X * 0.05 and x <= viewport.X * 0.55 then
-				score += 15
-			end
-
-			table.insert(candidates, {
-				button = obj,
-				score = score,
-			})
-		end
+local function scoreCatchButton(button, boost)
+	if not button or not button:IsA("TextButton") or not isGuiVisible(button) then
+		return nil
 	end
 
+	local buttonBlob = cleanButtonText(getDeepText(button) .. " " .. tostring(button.Name or ""))
+
+	if isReleaseBlob(buttonBlob) then
+		return nil
+	end
+
+	local fullBlob = cleanButtonText(safeFullName(button))
+	local nearbyBlob = cleanButtonText(getNearbyText(button))
+	local blob = buttonBlob .. " " .. nearbyBlob .. " " .. fullBlob
+	local score = boost or 0
+
+	if isCatchText(buttonBlob) then score += 260 end
+	if blob:find("catch", 1, true) then score += 180 end
+	if blob:find("captur", 1, true) then score += 170 end
+	if blob:find("collect", 1, true) or blob:find("colet", 1, true) then score += 95 end
+	if blob:find("claim", 1, true) or blob:find("take", 1, true) then score += 65 end
+
+	if hasReleaseSibling(button) then
+		score += 85
+	end
+
+	if fullBlob:find("catchorreleaseindicator", 1, true) then
+		score += 180
+	elseif fullBlob:find("catchorrelease", 1, true) then
+		score += 140
+	end
+
+	local camera = Workspace.CurrentCamera
+	local viewport = camera and camera.ViewportSize or Vector2.new(1280, 720)
+	local x, y = getCenter(button)
+
+	if y >= viewport.Y * 0.45 and y <= viewport.Y * 0.98 then score += 25 end
+	if x >= viewport.X * 0.02 and x <= viewport.X * 0.70 then score += 15 end
+
+	return score >= 120 and score or nil
+end
+
+local function pushCatchCandidate(candidates, button, boost, source)
+	local score = scoreCatchButton(button, boost)
+
+	if score then
+		table.insert(candidates, {
+			button = button,
+			score = score,
+			source = source,
+		})
+	end
+end
+
+local function bestCatchCandidate(candidates)
 	table.sort(candidates, function(a, b)
 		return a.score > b.score
 	end)
 
-	return candidates[1] and candidates[1].button or nil
+	local best = candidates[1]
+
+	if best then
+		log("catch candidate", best.source, math.floor(best.score), safeFullName(best.button), getDeepText(best.button))
+		return best.button
+	end
+
+	return nil
+end
+
+local function findMushCatchButton()
+	local candidates = {}
+
+	for _, rootGui in ipairs({
+		playerGui:FindFirstChild("CatchOrReleaseIndicator"),
+		playerGui:FindFirstChild("CatchOrRelease"),
+	}) do
+		if rootGui then
+			for _, path in ipairs(catchButtonPaths) do
+				pushCatchCandidate(candidates, getPath(rootGui, path), 220, "named_path")
+			end
+
+			for _, obj in ipairs(rootGui:GetDescendants()) do
+				if obj:IsA("TextButton") then
+					pushCatchCandidate(candidates, obj, 130, "named_scan")
+				end
+			end
+		end
+	end
+
+	for _, rootGui in ipairs(playerGui:GetChildren()) do
+		for _, path in ipairs(catchButtonPaths) do
+			pushCatchCandidate(candidates, getPath(rootGui, path), 125, "playergui_frame_path")
+		end
+	end
+
+	return bestCatchCandidate(candidates)
+end
+
+local function findComponentCatchButton()
+	local candidates = {}
+
+	for _, obj in ipairs(playerGui:GetDescendants()) do
+		if obj:IsA("TextButton") then
+			pushCatchCandidate(candidates, obj, 0, "global_scan")
+		end
+	end
+
+	return bestCatchCandidate(candidates)
 end
 
 local function findCatchButton()
@@ -817,7 +901,7 @@ local function clickCatchButton()
 	catchClicked = true
 	catchClickedAt = tick()
 
-	log("catch button", safeFullName(button), "text", getButtonText(button))
+	log("catch button", safeFullName(button), "text", getDeepText(button))
 
 	clickGuiObject(button)
 	task.wait(0.25)
