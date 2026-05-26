@@ -24,6 +24,8 @@ Miner.TargetTimeout = tonumber(Miner.TargetTimeout) or 26
 Miner.CircleTimeout = tonumber(Miner.CircleTimeout) or 18
 Miner.CircleClickDelay = tonumber(Miner.CircleClickDelay) or 0.045
 Miner.NextOreDelay = tonumber(Miner.NextOreDelay) or 0.75
+Miner.CatchClickRepeats = tonumber(Miner.CatchClickRepeats) or 3
+Miner.CatchCandidateClicks = tonumber(Miner.CatchCandidateClicks) or 5
 Miner.TeleportOffset = Miner.TeleportOffset or Vector3.new(0, 2.35, 4.25)
 Miner.Allowed = Miner.Allowed or {
 	Blue = true,
@@ -57,12 +59,16 @@ local currentTool = nil
 local phase = "idle"
 local targetStartedAt = 0
 local circleStartedAt = 0
+local lastCircleSeenAt = 0
+local lastCircleClickAt = 0
 local expectedClicks = nil
 local clickedCount = 0
 local waitingCollected = false
 local finishing = false
 local catchClicked = false
 local catchClickedAt = 0
+local finishRemoteSent = false
+local lastRemoteFinishAt = 0
 local originalMouseIconEnabled = nil
 local lastCatchClick = 0
 
@@ -663,6 +669,11 @@ local function cleanButtonText(txt)
 	return tostring(txt or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
 end
 
+local function isCheckMarkText(txt)
+	return txt == (utf8 and utf8.char and utf8.char(10003) or "check")
+		or txt == "âœ“"
+end
+
 local function isCatchText(txt)
 	txt = cleanButtonText(txt)
 
@@ -838,7 +849,27 @@ local function bestCatchCandidate(candidates)
 	return nil
 end
 
-local function findMushCatchButton()
+local function sortAndDedupeCatchCandidates(candidates)
+	table.sort(candidates, function(a, b)
+		return a.score > b.score
+	end)
+
+	local deduped = {}
+	local seen = {}
+
+	for _, candidate in ipairs(candidates) do
+		local button = candidate.button
+
+		if button and button.Parent and not seen[button] then
+			seen[button] = true
+			table.insert(deduped, candidate)
+		end
+	end
+
+	return deduped
+end
+
+local function collectCatchCandidates(includeGlobal)
 	local candidates = {}
 
 	for _, rootGui in ipairs({
@@ -847,12 +878,12 @@ local function findMushCatchButton()
 	}) do
 		if rootGui then
 			for _, path in ipairs(catchButtonPaths) do
-				pushCatchCandidate(candidates, getPath(rootGui, path), 220, "named_path")
+				pushCatchCandidate(candidates, getPath(rootGui, path), 360, "named_path")
 			end
 
 			for _, obj in ipairs(rootGui:GetDescendants()) do
 				if obj:IsA("TextButton") then
-					pushCatchCandidate(candidates, obj, 130, "named_scan")
+					pushCatchCandidate(candidates, obj, 230, "named_scan")
 				end
 			end
 		end
@@ -860,23 +891,69 @@ local function findMushCatchButton()
 
 	for _, rootGui in ipairs(playerGui:GetChildren()) do
 		for _, path in ipairs(catchButtonPaths) do
-			pushCatchCandidate(candidates, getPath(rootGui, path), 125, "playergui_frame_path")
+			pushCatchCandidate(candidates, getPath(rootGui, path), 190, "playergui_frame_path")
 		end
 	end
 
-	return bestCatchCandidate(candidates)
+	if includeGlobal then
+		for _, obj in ipairs(playerGui:GetDescendants()) do
+			if obj:IsA("TextButton") then
+				pushCatchCandidate(candidates, obj, 0, "global_scan")
+			end
+		end
+	end
+
+	return sortAndDedupeCatchCandidates(candidates)
+end
+
+local function clickCatchButtonStrong(button)
+	if not button or not button.Parent or not isGuiVisible(button) then
+		return false
+	end
+
+	local x, y = getCenter(button)
+	local inset = GuiService:GetGuiInset()
+
+	setAutoMouseHidden(true)
+
+	pcall(function()
+		GuiService.SelectedObject = button
+	end)
+
+	for _ = 1, Miner.CatchClickRepeats do
+		fireButtonSignals(button)
+
+		task.wait(0.015)
+
+		touchTap(x, y)
+		mouseTapSingle(x, y)
+		mouseTap(x, y)
+		mouseTapSingle(x + inset.X, y + inset.Y)
+
+		pcall(function()
+			VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Return, false, game)
+			task.wait(0.025)
+			VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Return, false, game)
+		end)
+
+		pcall(function()
+			VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
+			task.wait(0.025)
+			VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
+		end)
+
+		task.wait(0.045)
+	end
+
+	return true
+end
+
+local function findMushCatchButton()
+	return bestCatchCandidate(collectCatchCandidates(false))
 end
 
 local function findComponentCatchButton()
-	local candidates = {}
-
-	for _, obj in ipairs(playerGui:GetDescendants()) do
-		if obj:IsA("TextButton") then
-			pushCatchCandidate(candidates, obj, 0, "global_scan")
-		end
-	end
-
-	return bestCatchCandidate(candidates)
+	return bestCatchCandidate(collectCatchCandidates(true))
 end
 
 local function findCatchButton()
@@ -888,25 +965,40 @@ local function clickCatchButton()
 		return false
 	end
 
-	if os.clock() - lastCatchClick < 0.14 then
+	if os.clock() - lastCatchClick < 0.08 then
 		return false
 	end
 
-	local button = findCatchButton()
-	if not button then
+	local candidates = collectCatchCandidates(true)
+	if #candidates == 0 then
 		return false
 	end
 
 	lastCatchClick = os.clock()
-	catchClicked = true
-	catchClickedAt = tick()
+	local clickedAny = false
+	local limit = math.min(#candidates, Miner.CatchCandidateClicks)
 
-	log("catch button", safeFullName(button), "text", getDeepText(button))
+	for index = 1, limit do
+		local candidate = candidates[index]
+		local button = candidate.button
 
-	clickGuiObject(button)
-	task.wait(0.25)
+		if button and button.Parent then
+			log("catch click", index, candidate.source, math.floor(candidate.score), safeFullName(button), "text", getDeepText(button))
 
-	return true
+			if clickCatchButtonStrong(button) then
+				clickedAny = true
+				task.wait(0.08)
+			end
+		end
+	end
+
+	if clickedAny then
+		catchClicked = true
+		catchClickedAt = tick()
+		task.wait(0.2)
+	end
+
+	return clickedAny
 end
 
 local function completeCurrentOreAfterCircles(reason)
@@ -918,8 +1010,8 @@ local function completeCurrentOreAfterCircles(reason)
 		return false
 	end
 
-	catchClicked = true
-	catchClickedAt = tick()
+	finishRemoteSent = true
+	lastRemoteFinishAt = tick()
 
 	log("complete ore after circles", reason or "direct", currentOre:GetFullName())
 
@@ -934,10 +1026,14 @@ local function resetMinigameState()
 	phase = "idle"
 	expectedClicks = nil
 	clickedCount = 0
+	lastCircleSeenAt = 0
+	lastCircleClickAt = 0
 	waitingCollected = false
 	finishing = false
 	catchClicked = false
 	catchClickedAt = 0
+	finishRemoteSent = false
+	lastRemoteFinishAt = 0
 	lastCatchClick = 0
 	table.clear(clickedButtons)
 end
@@ -968,6 +1064,57 @@ local function markCollected(reason)
 	end
 end
 
+local function beginWaitingCollect(reason)
+	if waitingCollected then
+		return
+	end
+
+	phase = "waiting_collect"
+	waitingCollected = true
+
+	log("waiting collect", reason or "unknown", "clicked", clickedCount, "expected", expectedClicks or "?")
+
+	task.spawn(function()
+		for _ = 1, 80 do
+			if not currentOre or not waitingCollected then
+				return
+			end
+
+			clickCatchButton()
+
+			if catchClicked then
+				task.wait(0.18)
+			else
+				task.wait(0.06)
+			end
+		end
+	end)
+
+	task.delay(0.6, function()
+		if currentOre and waitingCollected then
+			completeCurrentOreAfterCircles(reason or "waiting_collect")
+		end
+	end)
+
+	task.delay(1.4, function()
+		if currentOre and waitingCollected then
+			completeCurrentOreAfterCircles("retry_1")
+		end
+	end)
+
+	task.delay(2.6, function()
+		if currentOre and waitingCollected then
+			completeCurrentOreAfterCircles("retry_2")
+		end
+	end)
+
+	task.delay(9.5, function()
+		if currentOre and waitingCollected and catchClicked then
+			finishCurrentOre("catch_or_remote_timeout")
+		end
+	end)
+end
+
 local function solveCircleStep()
 	if phase ~= "circles" or not currentOre then
 		return false
@@ -976,6 +1123,11 @@ local function solveCircleStep()
 	local buttons = findPickaxeCircleButtons()
 
 	if #buttons == 0 then
+		if clickedCount > 0 and tick() - lastCircleClickAt > 0.22 then
+			beginWaitingCollect("circles_gone")
+			return true
+		end
+
 		if waitingCollected then
 			return false
 		end
@@ -983,10 +1135,13 @@ local function solveCircleStep()
 		return false
 	end
 
+	lastCircleSeenAt = tick()
+
 	for _, button in ipairs(buttons) do
 		if not clickedButtons[button] then
 			clickedButtons[button] = true
 			clickedCount += 1
+			lastCircleClickAt = tick()
 
 			task.wait(Miner.CircleClickDelay)
 			clickButton(button)
@@ -994,48 +1149,7 @@ local function solveCircleStep()
 			log("circle click", clickedCount, expectedClicks or "?")
 
 			if expectedClicks and clickedCount >= expectedClicks then
-				phase = "waiting_collect"
-				waitingCollected = true
-
-				task.spawn(function()
-					for _ = 1, 55 do
-						if not currentOre or not waitingCollected then
-							return
-						end
-
-						clickCatchButton()
-
-						if catchClicked then
-							task.wait(0.24)
-						else
-							task.wait(0.08)
-						end
-					end
-				end)
-
-				task.delay(0.35, function()
-					if currentOre and waitingCollected then
-						completeCurrentOreAfterCircles("expected_clicks")
-					end
-				end)
-
-				task.delay(1.15, function()
-					if currentOre and waitingCollected then
-						completeCurrentOreAfterCircles("retry_1")
-					end
-				end)
-
-				task.delay(2.25, function()
-					if currentOre and waitingCollected then
-						completeCurrentOreAfterCircles("retry_2")
-					end
-				end)
-
-				task.delay(8.5, function()
-					if currentOre and waitingCollected and catchClicked then
-						finishCurrentOre("catch_or_remote_timeout")
-					end
-				end)
+				beginWaitingCollect("expected_clicks")
 			end
 
 			return true
@@ -1101,6 +1215,8 @@ Remote.OnClientEvent:Connect(function(action, data)
 		if currentOre and currentOre.Parent then
 			phase = "circles"
 			circleStartedAt = tick()
+			lastCircleSeenAt = tick()
+			lastCircleClickAt = 0
 			expectedClicks = tonumber(data and data.Clicks) or expectedClicks
 			clickedCount = 0
 			waitingCollected = false
@@ -1133,12 +1249,14 @@ task.spawn(function()
 			elseif phase == "waiting_collect" then
 				clickCatchButton()
 
-				if Miner.RemoteFinishFallback and os.clock() - lastCatchClick > 0.65 then
+				if Miner.RemoteFinishFallback and tick() - lastRemoteFinishAt > 0.65 then
 					completeCurrentOreAfterCircles("waiting_collect")
 				end
 
 				if catchClicked and tick() - catchClickedAt > 5 then
 					finishCurrentOre("catch_or_remote_wait_timeout")
+				elseif finishRemoteSent and tick() - lastRemoteFinishAt > 10 then
+					finishCurrentOre("remote_finish_no_catch_button")
 				elseif tick() - circleStartedAt > Miner.CircleTimeout + 10 then
 					if catchClicked then
 						finishCurrentOre("collect_timeout")
