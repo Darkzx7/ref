@@ -16,6 +16,8 @@ Miner.Debug = Miner.Debug == true
 Miner.Teleport = Miner.Teleport ~= false
 Miner.TryMineRemote = Miner.TryMineRemote ~= false
 Miner.RemoteFinishFallback = Miner.RemoteFinishFallback == true
+Miner.HideMouseDuringClicks = Miner.HideMouseDuringClicks ~= false
+Miner.CatchAfterCircles = Miner.CatchAfterCircles ~= false
 Miner.SwingDelay = tonumber(Miner.SwingDelay) or 0.18
 Miner.TargetTimeout = tonumber(Miner.TargetTimeout) or 26
 Miner.CircleTimeout = tonumber(Miner.CircleTimeout) or 18
@@ -58,11 +60,37 @@ local expectedClicks = nil
 local clickedCount = 0
 local waitingCollected = false
 local finishing = false
+local originalMouseIconEnabled = nil
+local lastCatchClick = 0
 
 local function log(...)
 	if Miner.Debug then
 		print("[ref ore miner]", ...)
 	end
+end
+
+local function setAutoMouseHidden(hidden)
+	if not Miner.HideMouseDuringClicks then
+		return
+	end
+
+	if originalMouseIconEnabled == nil then
+		originalMouseIconEnabled = UserInputService.MouseIconEnabled
+	end
+
+	pcall(function()
+		UserInputService.MouseIconEnabled = not hidden
+	end)
+end
+
+local function restoreMouseIcon()
+	if originalMouseIconEnabled ~= nil then
+		pcall(function()
+			UserInputService.MouseIconEnabled = originalMouseIconEnabled
+		end)
+	end
+
+	originalMouseIconEnabled = nil
 end
 
 local function cleanName(value)
@@ -323,6 +351,25 @@ local function swingPickaxe()
 	end
 end
 
+local function getPickaxeGui()
+	return playerGui:FindFirstChild("Pickaxe")
+end
+
+local function getPickaxeFrame()
+	local pickaxeGui = getPickaxeGui()
+	if not pickaxeGui then
+		return nil
+	end
+
+	return pickaxeGui:FindFirstChild("Frame") or pickaxeGui
+end
+
+local function isInsidePickaxeGui(obj)
+	local pickaxeGui = getPickaxeGui()
+
+	return pickaxeGui and obj and obj:IsDescendantOf(pickaxeGui)
+end
+
 local function isGuiVisible(obj)
 	if not obj or not obj.Parent then return false end
 
@@ -385,8 +432,40 @@ local function touchTap(x, y)
 	end)
 end
 
+local function isPointOwnedByButton(button, x, y)
+	if not button or not isInsidePickaxeGui(button) then
+		return false
+	end
+
+	local ok, objects = pcall(function()
+		return playerGui:GetGuiObjectsAtPosition(x, y)
+	end)
+
+	if not ok or not objects or #objects == 0 then
+		return true
+	end
+
+	local top = objects[1]
+
+	if top and (top == button or top:IsDescendantOf(button)) then
+		return true
+	end
+
+	for _, obj in ipairs(objects) do
+		if obj == button or obj:IsDescendantOf(button) then
+			return true
+		end
+
+		if isInsidePickaxeGui(obj) then
+			break
+		end
+	end
+
+	return false
+end
+
 local function clickButton(button)
-	if not button or not button.Parent or not isGuiVisible(button) then
+	if not button or not button.Parent or not isGuiVisible(button) or not isInsidePickaxeGui(button) then
 		return false
 	end
 
@@ -401,6 +480,12 @@ local function clickButton(button)
 
 	local x, y = getCenter(target)
 	local inset = GuiService:GetGuiInset()
+
+	if not isPointOwnedByButton(button, x, y) then
+		return false
+	end
+
+	setAutoMouseHidden(true)
 
 	fireButtonSignals(button)
 
@@ -425,18 +510,18 @@ end
 
 local function findPickaxeCircleButtons()
 	local found = {}
-	local pickaxeGui = playerGui:FindFirstChild("Pickaxe")
-	local roots = {}
+	local pickaxeGui = getPickaxeGui()
+	local frame = getPickaxeFrame()
 
-	if pickaxeGui then
-		table.insert(roots, pickaxeGui)
-	else
-		table.insert(roots, playerGui)
+	if not pickaxeGui or not isGuiVisible(pickaxeGui) or not frame then
+		return found
 	end
+
+	local roots = { frame }
 
 	for _, root in ipairs(roots) do
 		for _, obj in ipairs(root:GetDescendants()) do
-			if obj:IsA("ImageButton") and isGuiVisible(obj) and hasCircleParts(obj) then
+			if obj:IsA("ImageButton") and isGuiVisible(obj) and isInsidePickaxeGui(obj) and hasCircleParts(obj) then
 				table.insert(found, obj)
 			end
 		end
@@ -456,12 +541,99 @@ local function findPickaxeCircleButtons()
 	return found
 end
 
+local function getTextLike(obj)
+	local pieces = { obj.Name or "" }
+
+	pcall(function()
+		if obj.Text then
+			table.insert(pieces, obj.Text)
+		end
+	end)
+
+	for _, child in ipairs(obj:GetDescendants()) do
+		if child:IsA("TextLabel") or child:IsA("TextButton") then
+			pcall(function()
+				table.insert(pieces, child.Text or "")
+			end)
+		end
+	end
+
+	return string.lower(table.concat(pieces, " "))
+end
+
+local function isCatchButton(obj)
+	if not obj or not obj.Parent then
+		return false
+	end
+
+	if not (obj:IsA("TextButton") or obj:IsA("ImageButton")) then
+		return false
+	end
+
+	if not isGuiVisible(obj) or not isInsidePickaxeGui(obj) then
+		return false
+	end
+
+	if hasCircleParts(obj) then
+		return false
+	end
+
+	local text = getTextLike(obj)
+
+	return text:find("catch", 1, true)
+		or text:find("captur", 1, true)
+		or text:find("collect", 1, true)
+		or text:find("colet", 1, true)
+		or text:find("claim", 1, true)
+		or text:find("take", 1, true)
+end
+
+local function findCatchButton()
+	local frame = getPickaxeFrame()
+	if not frame then
+		return nil
+	end
+
+	for _, obj in ipairs(frame:GetDescendants()) do
+		if isCatchButton(obj) then
+			return obj
+		end
+	end
+
+	if isCatchButton(frame) then
+		return frame
+	end
+
+	return nil
+end
+
+local function clickCatchButton()
+	if not Miner.CatchAfterCircles then
+		return false
+	end
+
+	if os.clock() - lastCatchClick < 0.18 then
+		return false
+	end
+
+	local button = findCatchButton()
+	if not button then
+		return false
+	end
+
+	lastCatchClick = os.clock()
+	log("catch button", button:GetFullName())
+
+	return clickButton(button)
+end
+
 local function resetMinigameState()
 	phase = "idle"
 	expectedClicks = nil
 	clickedCount = 0
 	waitingCollected = false
 	finishing = false
+	lastCatchClick = 0
 	table.clear(clickedButtons)
 end
 
@@ -480,6 +652,7 @@ local function finishCurrentOre(reason)
 		currentOreKey = nil
 		currentTool = nil
 		resetMinigameState()
+		restoreMouseIcon()
 		task.wait(Miner.NextOreDelay)
 	end)
 end
@@ -519,6 +692,20 @@ local function solveCircleStep()
 				phase = "waiting_collect"
 				waitingCollected = true
 
+				task.spawn(function()
+					for _ = 1, 18 do
+						if not currentOre or not waitingCollected then
+							return
+						end
+
+						if clickCatchButton() then
+							task.wait(0.22)
+						else
+							task.wait(0.12)
+						end
+					end
+				end)
+
 				task.delay(1.15, function()
 					if currentOre and waitingCollected and Miner.RemoteFinishFallback then
 						pcall(function()
@@ -551,12 +738,14 @@ local function startOre(ore)
 	targetStartedAt = tick()
 	resetMinigameState()
 	phase = "hitting"
+	setAutoMouseHidden(true)
 
 	if not equipPickaxe() then
 		log("pickaxe not found")
 		currentOre = nil
 		currentOreKey = nil
 		resetMinigameState()
+		restoreMouseIcon()
 		return false
 	end
 
@@ -564,6 +753,7 @@ local function startOre(ore)
 		currentOre = nil
 		currentOreKey = nil
 		resetMinigameState()
+		restoreMouseIcon()
 		return false
 	end
 
@@ -620,6 +810,8 @@ task.spawn(function()
 					finishCurrentOre("circle_timeout")
 				end
 			elseif phase == "waiting_collect" then
+				clickCatchButton()
+
 				if tick() - circleStartedAt > Miner.CircleTimeout + 6 then
 					finishCurrentOre("collect_timeout")
 				end
@@ -632,6 +824,7 @@ task.spawn(function()
 					currentOre = nil
 					currentOreKey = nil
 					resetMinigameState()
+					restoreMouseIcon()
 					task.wait(0.35)
 				end
 			end
@@ -659,6 +852,7 @@ task.spawn(function()
 	currentOreKey = nil
 	currentTool = nil
 	resetMinigameState()
+	restoreMouseIcon()
 
 	log("stopped")
 end)
