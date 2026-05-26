@@ -61,6 +61,8 @@ local expectedClicks = nil
 local clickedCount = 0
 local waitingCollected = false
 local finishing = false
+local catchClicked = false
+local catchClickedAt = 0
 local originalMouseIconEnabled = nil
 local lastCatchClick = 0
 
@@ -443,9 +445,19 @@ end
 local function mouseTap(x, y)
 	pcall(function()
 		VirtualInputManager:SendMouseMoveEvent(x, y, game)
-		task.wait(0.008)
+		task.wait(0.015)
 		VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 0)
-		task.wait(0.035)
+		task.wait(0.045)
+		VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 0)
+	end)
+end
+
+local function mouseTapSingle(x, y)
+	pcall(function()
+		VirtualInputManager:SendMouseMoveEvent(x, y, game)
+		task.wait(0.01)
+		VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 0)
+		task.wait(0.04)
 		VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 0)
 	end)
 end
@@ -453,9 +465,22 @@ end
 local function touchTap(x, y)
 	pcall(function()
 		VirtualInputManager:SendTouchEvent(TOUCH_ID, Enum.UserInputState.Begin, x, y)
-		task.wait(0.03)
+		task.wait(0.045)
 		VirtualInputManager:SendTouchEvent(TOUCH_ID, Enum.UserInputState.End, x, y)
 	end)
+
+	pcall(function()
+		VirtualInputManager:SendTouchEvent(TOUCH_ID, Vector2.new(x, y), true, game)
+		task.wait(0.045)
+		VirtualInputManager:SendTouchEvent(TOUCH_ID, Vector2.new(x, y), false, game)
+	end)
+end
+
+local function tapAt(x, y)
+	local inset = GuiService:GetGuiInset()
+	touchTap(x, y)
+	mouseTap(x, y)
+	mouseTap(x + inset.X, y + inset.Y)
 end
 
 local function isPointOwnedByButton(button, x, y)
@@ -496,16 +521,13 @@ local function clickGuiObject(obj)
 	end
 
 	local x, y = getCenter(obj)
-	local inset = GuiService:GetGuiInset()
 
 	setAutoMouseHidden(true)
 	fireButtonSignals(obj)
 
 	task.wait(0.02)
 
-	mouseTap(x, y)
-	mouseTap(x + inset.X, y + inset.Y)
-	touchTap(x, y)
+	tapAt(x, y)
 
 	return true
 end
@@ -537,9 +559,7 @@ local function clickButton(button)
 
 	task.wait(0.01)
 
-	mouseTap(x, y)
-	mouseTap(x + inset.X, y + inset.Y)
-	touchTap(x, y)
+	mouseTapSingle(x, y)
 
 	return true
 end
@@ -587,55 +607,91 @@ local function findPickaxeCircleButtons()
 	return found
 end
 
-local function getTextLike(obj)
-	local pieces = { obj.Name or "" }
+local function getButtonText(obj)
+	local txt = ""
 
 	pcall(function()
-		if obj.Text then
-			table.insert(pieces, obj.Text)
-		end
+		txt = tostring(obj.Text or "")
 	end)
 
-	for _, child in ipairs(obj:GetDescendants()) do
-		if child:IsA("TextLabel") or child:IsA("TextButton") or child:IsA("TextBox") then
-			pcall(function()
-				table.insert(pieces, child.Text or "")
-			end)
+	return txt
+end
+
+local function cleanButtonText(txt)
+	return tostring(txt or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
+end
+
+local function isCatchText(txt)
+	txt = cleanButtonText(txt)
+
+	return txt == "catch"
+		or txt == "capturar"
+		or txt == "captura"
+		or txt == "collect"
+		or txt == "coletar"
+		or txt == "claim"
+		or txt == "take"
+		or txt == "✓"
+end
+
+local function isReleaseText(txt)
+	txt = cleanButtonText(txt)
+
+	return txt == "release"
+		or txt == "soltar"
+		or txt == "liberar"
+		or txt == "descartar"
+end
+
+local function findMushCatchButton()
+	local catchIndicator = playerGui:FindFirstChild("CatchOrReleaseIndicator")
+
+	if catchIndicator then
+		local frame = catchIndicator:FindFirstChild("Frame")
+
+		if frame then
+			local innerFrame = frame:FindFirstChild("Frame")
+
+			if innerFrame then
+				local innerInnerFrame = innerFrame:FindFirstChild("Frame")
+
+				if innerInnerFrame then
+					local catchButton = innerInnerFrame:FindFirstChild("TextButton")
+
+					if catchButton and catchButton:IsA("TextButton") and isGuiVisible(catchButton) then
+						return catchButton
+					end
+				end
+			end
 		end
 	end
 
-	return string.lower(table.concat(pieces, " "))
-end
+	local catchRelease = playerGui:FindFirstChild("CatchOrRelease")
 
-local function getButtonText(obj)
-	local text = ""
+	if catchRelease then
+		local enabled = true
+		pcall(function()
+			enabled = catchRelease.Enabled
+		end)
 
-	pcall(function()
-		text = tostring(obj.Text or "")
-	end)
+		if enabled then
+			for _, obj in ipairs(catchRelease:GetDescendants()) do
+				if obj:IsA("TextButton") and isGuiVisible(obj) then
+					local txt = cleanButtonText(getButtonText(obj))
 
-	return text
-end
+					if txt:find("catch", 1, true)
+						or txt:find("captur", 1, true)
+						or txt == "✓"
+						or tostring(obj.Name or ""):lower():find("catch", 1, true)
+						or tostring(obj.Name or ""):lower():find("captur", 1, true) then
+						return obj
+					end
+				end
+			end
+		end
+	end
 
-local function isExactCatchText(text)
-	text = tostring(text or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
-
-	return text == "catch"
-		or text == "capturar"
-		or text == "captura"
-		or text == "coletar"
-		or text == "collect"
-		or text == "claim"
-		or text == "take"
-end
-
-local function isReleaseText(text)
-	text = tostring(text or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
-
-	return text == "release"
-		or text == "soltar"
-		or text == "liberar"
-		or text == "descartar"
+	return nil
 end
 
 local function hasReleaseSibling(button)
@@ -653,113 +709,48 @@ local function hasReleaseSibling(button)
 	return false
 end
 
-local function hasCatchComponentShape(button)
-	if not button or not button:IsA("TextButton") or not isGuiVisible(button) then
-		return false
-	end
-
-	if not isExactCatchText(getButtonText(button)) then
-		return false
-	end
-
-	local parent = button.Parent
-	if not parent or not parent:IsA("GuiObject") then
-		return false
-	end
-
-	-- The decompiled component creates a horizontal Frame with Catch and Release
-	-- TextButtons. Prefer that shape, but do not require the ScreenGui/root name.
-	if hasReleaseSibling(button) then
-		return true
-	end
-
-	local nameBlob = string.lower(safeFullName(parent))
-	if nameBlob:find("catch", 1, true) or nameBlob:find("release", 1, true) then
-		return true
-	end
-
-	-- Fallback: exact "Catch" text button around the lower middle area.
-	-- This avoids broad substring matching and only runs after the ore circles.
-	local camera = Workspace.CurrentCamera
-	local viewport = camera and camera.ViewportSize or Vector2.new(1280, 720)
-	local centerX, centerY = getCenter(button)
-	local lowerHalf = centerY >= viewport.Y * 0.50 and centerY <= viewport.Y * 0.95
-	local nearMiddle = centerX >= viewport.X * 0.15 and centerX <= viewport.X * 0.85
-
-	return lowerHalf and nearMiddle
-end
-
-local function scoreCatchButton(button)
-	local score = 0
-
-	if not hasCatchComponentShape(button) then
-		return -math.huge
-	end
-
-	score += 100
-
-	if hasReleaseSibling(button) then
-		score += 80
-	end
-
-	local parent = button.Parent
-	if parent then
-		local blob = string.lower(safeFullName(parent))
-
-		if blob:find("catchorrelease", 1, true) then
-			score += 70
-		elseif blob:find("catch", 1, true) or blob:find("release", 1, true) then
-			score += 35
-		end
-
-		for _, child in ipairs(parent:GetChildren()) do
-			if child:IsA("UIListLayout") then
-				score += 15
-			elseif child:IsA("UICorner") then
-				score += 4
-			end
-		end
-	end
-
-	local camera = Workspace.CurrentCamera
-	local viewport = camera and camera.ViewportSize or Vector2.new(1280, 720)
-	local centerX, centerY = getCenter(button)
-
-	local xBias = 1 - math.clamp(math.abs(centerX - viewport.X * 0.35) / math.max(viewport.X, 1), 0, 1)
-	local yBias = 1 - math.clamp(math.abs(centerY - viewport.Y * 0.81) / math.max(viewport.Y, 1), 0, 1)
-
-	score += xBias * 12
-	score += yBias * 12
-
-	return score
-end
-
-local function findCatchButton()
+local function findComponentCatchButton()
 	local candidates = {}
+	local camera = Workspace.CurrentCamera
+	local viewport = camera and camera.ViewportSize or Vector2.new(1280, 720)
 
-	-- Known roots first, if the game names the mounted component this way.
-	for _, rootName in ipairs({ "CatchOrReleaseIndicator", "CatchOrRelease" }) do
-		local root = playerGui:FindFirstChild(rootName)
+	for _, obj in ipairs(playerGui:GetDescendants()) do
+		if obj:IsA("TextButton") and isGuiVisible(obj) and isCatchText(getButtonText(obj)) then
+			local x, y = getCenter(obj)
+			local score = 100
 
-		if root then
-			for _, obj in ipairs(root:GetDescendants()) do
-				if obj:IsA("TextButton") and hasCatchComponentShape(obj) then
-					table.insert(candidates, {
-						button = obj,
-						score = scoreCatchButton(obj) + 120,
-					})
+			if hasReleaseSibling(obj) then
+				score += 100
+			end
+
+			local parent = obj.Parent
+			if parent then
+				local blob = string.lower(safeFullName(parent))
+
+				if blob:find("catchorrelease", 1, true) then
+					score += 80
+				elseif blob:find("catch", 1, true) or blob:find("release", 1, true) then
+					score += 40
+				end
+
+				for _, child in ipairs(parent:GetChildren()) do
+					if child:IsA("UIListLayout") then
+						score += 25
+					end
 				end
 			end
-		end
-	end
 
-	-- The component you sent is a generic returned Frame, so sometimes it is mounted
-	-- inside another ScreenGui. Find the exact visible TextButton "Catch" anywhere.
-	for _, obj in ipairs(playerGui:GetDescendants()) do
-		if obj:IsA("TextButton") and hasCatchComponentShape(obj) then
+			if y >= viewport.Y * 0.50 and y <= viewport.Y * 0.95 then
+				score += 25
+			end
+
+			if x >= viewport.X * 0.05 and x <= viewport.X * 0.55 then
+				score += 15
+			end
+
 			table.insert(candidates, {
 				button = obj,
-				score = scoreCatchButton(obj),
+				score = score,
 			})
 		end
 	end
@@ -769,6 +760,10 @@ local function findCatchButton()
 	end)
 
 	return candidates[1] and candidates[1].button or nil
+end
+
+local function findCatchButton()
+	return findMushCatchButton() or findComponentCatchButton()
 end
 
 local function clickCatchButton()
@@ -786,11 +781,15 @@ local function clickCatchButton()
 	end
 
 	lastCatchClick = os.clock()
-	log("catch button", button:GetFullName(), "text", getButtonText(button))
+	catchClicked = true
+	catchClickedAt = tick()
 
-	-- Catch is not inside Pickaxe, so use the generic click method, not the
-	-- circle-isolated one.
-	return clickGuiObject(button)
+	log("catch button", safeFullName(button), "text", getButtonText(button))
+
+	clickGuiObject(button)
+	task.wait(0.25)
+
+	return true
 end
 
 local function resetMinigameState()
@@ -799,6 +798,8 @@ local function resetMinigameState()
 	clickedCount = 0
 	waitingCollected = false
 	finishing = false
+	catchClicked = false
+	catchClickedAt = 0
 	lastCatchClick = 0
 	table.clear(clickedButtons)
 end
@@ -824,7 +825,7 @@ local function finishCurrentOre(reason)
 end
 
 local function markCollected(reason)
-	if currentOre and (phase == "circles" or phase == "waiting_collect") then
+	if currentOre and catchClicked and (phase == "circles" or phase == "waiting_collect") then
 		finishCurrentOre(reason)
 	end
 end
@@ -859,30 +860,30 @@ local function solveCircleStep()
 				waitingCollected = true
 
 				task.spawn(function()
-					for _ = 1, 18 do
+					for _ = 1, 45 do
 						if not currentOre or not waitingCollected then
 							return
 						end
 
 						if clickCatchButton() then
-							task.wait(0.22)
+							task.wait(0.28)
 						else
-							task.wait(0.12)
+							task.wait(0.10)
 						end
 					end
 				end)
 
 				task.delay(1.15, function()
-					if currentOre and waitingCollected and Miner.RemoteFinishFallback then
+					if currentOre and waitingCollected and Miner.RemoteFinishFallback and catchClicked then
 						pcall(function()
 							Remote:FireServer("MinigameCompleted", currentOre)
 						end)
 					end
 				end)
 
-				task.delay(4.5, function()
-					if currentOre and waitingCollected then
-						finishCurrentOre("circle_timeout_after_expected")
+				task.delay(8.5, function()
+					if currentOre and waitingCollected and catchClicked then
+						finishCurrentOre("catch_clicked_timeout")
 					end
 				end)
 			end
@@ -958,8 +959,12 @@ Remote.OnClientEvent:Connect(function(action, data)
 			log("MiningMinigame", data and data.Color, data and data.ShardName, "clicks", expectedClicks or "?")
 		end
 	elseif action == "OresChanged" or action == "MiningDataChanged" then
-		if waitingCollected or (phase == "circles" and clickedCount > 0) then
-			markCollected(action)
+		if catchClicked and currentOre and (phase == "waiting_collect" or phase == "circles") then
+			task.delay(0.2, function()
+				if currentOre and catchClicked then
+					finishCurrentOre(action .. "_after_catch")
+				end
+			end)
 		end
 	end
 end)
@@ -978,8 +983,15 @@ task.spawn(function()
 			elseif phase == "waiting_collect" then
 				clickCatchButton()
 
-				if tick() - circleStartedAt > Miner.CircleTimeout + 6 then
-					finishCurrentOre("collect_timeout")
+				if catchClicked and tick() - catchClickedAt > 5 then
+					finishCurrentOre("catch_clicked_wait_timeout")
+				elseif tick() - circleStartedAt > Miner.CircleTimeout + 10 then
+					-- Do not call StopHoldingOre before at least trying to press Catch.
+					if catchClicked then
+						finishCurrentOre("collect_timeout")
+					else
+						log("waiting catch button")
+					end
 				end
 			elseif phase == "hitting" then
 				if tick() - targetStartedAt > Miner.TargetTimeout then
