@@ -16,7 +16,7 @@ Miner.Enabled = Miner.Enabled ~= false
 Miner.Debug = Miner.Debug == true
 Miner.Teleport = Miner.Teleport ~= false
 Miner.TryMineRemote = Miner.TryMineRemote ~= false
-Miner.RemoteFinishFallback = Miner.RemoteFinishFallback == true
+Miner.RemoteFinishFallback = Miner.RemoteFinishFallback ~= false
 Miner.HideMouseDuringClicks = Miner.HideMouseDuringClicks ~= false
 Miner.CatchAfterCircles = Miner.CatchAfterCircles ~= false
 Miner.SwingDelay = tonumber(Miner.SwingDelay) or 0.18
@@ -431,6 +431,22 @@ local function fireSignal(signal)
 			firesignal(signal)
 		end
 	end)
+
+	pcall(function()
+		if getconnections and signal then
+			for _, connection in ipairs(getconnections(signal)) do
+				if connection.Fire then
+					pcall(function()
+						connection:Fire()
+					end)
+				end
+
+				if connection.Function then
+					pcall(connection.Function)
+				end
+			end
+		end
+	end)
 end
 
 local function fireButtonSignals(button)
@@ -523,11 +539,28 @@ local function clickGuiObject(obj)
 	local x, y = getCenter(obj)
 
 	setAutoMouseHidden(true)
+
+	pcall(function()
+		GuiService.SelectedObject = obj
+	end)
+
 	fireButtonSignals(obj)
 
 	task.wait(0.02)
 
 	tapAt(x, y)
+
+	pcall(function()
+		VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Return, false, game)
+		task.wait(0.035)
+		VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Return, false, game)
+	end)
+
+	pcall(function()
+		VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
+		task.wait(0.035)
+		VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
+	end)
 
 	return true
 end
@@ -792,6 +825,27 @@ local function clickCatchButton()
 	return true
 end
 
+local function completeCurrentOreAfterCircles(reason)
+	if not currentOre or not currentOre.Parent then
+		return false
+	end
+
+	if not Miner.RemoteFinishFallback then
+		return false
+	end
+
+	catchClicked = true
+	catchClickedAt = tick()
+
+	log("complete ore after circles", reason or "direct", currentOre:GetFullName())
+
+	pcall(function()
+		Remote:FireServer("MinigameCompleted", currentOre)
+	end)
+
+	return true
+end
+
 local function resetMinigameState()
 	phase = "idle"
 	expectedClicks = nil
@@ -860,30 +914,42 @@ local function solveCircleStep()
 				waitingCollected = true
 
 				task.spawn(function()
-					for _ = 1, 45 do
+					for _ = 1, 55 do
 						if not currentOre or not waitingCollected then
 							return
 						end
 
-						if clickCatchButton() then
-							task.wait(0.28)
+						clickCatchButton()
+
+						if catchClicked then
+							task.wait(0.24)
 						else
-							task.wait(0.10)
+							task.wait(0.08)
 						end
 					end
 				end)
 
+				task.delay(0.35, function()
+					if currentOre and waitingCollected then
+						completeCurrentOreAfterCircles("expected_clicks")
+					end
+				end)
+
 				task.delay(1.15, function()
-					if currentOre and waitingCollected and Miner.RemoteFinishFallback and catchClicked then
-						pcall(function()
-							Remote:FireServer("MinigameCompleted", currentOre)
-						end)
+					if currentOre and waitingCollected then
+						completeCurrentOreAfterCircles("retry_1")
+					end
+				end)
+
+				task.delay(2.25, function()
+					if currentOre and waitingCollected then
+						completeCurrentOreAfterCircles("retry_2")
 					end
 				end)
 
 				task.delay(8.5, function()
 					if currentOre and waitingCollected and catchClicked then
-						finishCurrentOre("catch_clicked_timeout")
+						finishCurrentOre("catch_or_remote_timeout")
 					end
 				end)
 			end
@@ -983,14 +1049,17 @@ task.spawn(function()
 			elseif phase == "waiting_collect" then
 				clickCatchButton()
 
+				if Miner.RemoteFinishFallback and os.clock() - lastCatchClick > 0.65 then
+					completeCurrentOreAfterCircles("waiting_collect")
+				end
+
 				if catchClicked and tick() - catchClickedAt > 5 then
-					finishCurrentOre("catch_clicked_wait_timeout")
+					finishCurrentOre("catch_or_remote_wait_timeout")
 				elseif tick() - circleStartedAt > Miner.CircleTimeout + 10 then
-					-- Do not call StopHoldingOre before at least trying to press Catch.
 					if catchClicked then
 						finishCurrentOre("collect_timeout")
 					else
-						log("waiting catch button")
+						log("waiting catch/direct complete")
 					end
 				end
 			elseif phase == "hitting" then
