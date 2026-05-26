@@ -115,6 +115,14 @@ local function cleanName(value)
 	return tostring(value or ""):lower():gsub("%s+", "")
 end
 
+local function safeFullName(obj)
+	local ok, value = pcall(function()
+		return obj:GetFullName()
+	end)
+
+	return ok and value or tostring(obj)
+end
+
 local function getCharacter()
 	return player.Character or player.CharacterAdded:Wait()
 end
@@ -599,85 +607,168 @@ local function getTextLike(obj)
 	return string.lower(table.concat(pieces, " "))
 end
 
-local function isCatchButtonText(obj)
-	local text = getTextLike(obj)
+local function getButtonText(obj)
+	local text = ""
 
-	return text:find("catch", 1, true)
-		or text:find("captur", 1, true)
-		or text:find("collect", 1, true)
-		or text:find("colet", 1, true)
-		or text:find("claim", 1, true)
-		or text:find("take", 1, true)
-		or text:find("✓", 1, true)
+	pcall(function()
+		text = tostring(obj.Text or "")
+	end)
+
+	return text
+end
+
+local function isExactCatchText(text)
+	text = tostring(text or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
+
+	return text == "catch"
+		or text == "capturar"
+		or text == "captura"
+		or text == "coletar"
+		or text == "collect"
+		or text == "claim"
+		or text == "take"
+end
+
+local function isReleaseText(text)
+	text = tostring(text or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
+
+	return text == "release"
+		or text == "soltar"
+		or text == "liberar"
+		or text == "descartar"
+end
+
+local function hasReleaseSibling(button)
+	local parent = button and button.Parent
+	if not parent then
+		return false
+	end
+
+	for _, sibling in ipairs(parent:GetChildren()) do
+		if sibling ~= button and sibling:IsA("TextButton") and isGuiVisible(sibling) and isReleaseText(getButtonText(sibling)) then
+			return true
+		end
+	end
+
+	return false
+end
+
+local function hasCatchComponentShape(button)
+	if not button or not button:IsA("TextButton") or not isGuiVisible(button) then
+		return false
+	end
+
+	if not isExactCatchText(getButtonText(button)) then
+		return false
+	end
+
+	local parent = button.Parent
+	if not parent or not parent:IsA("GuiObject") then
+		return false
+	end
+
+	-- The decompiled component creates a horizontal Frame with Catch and Release
+	-- TextButtons. Prefer that shape, but do not require the ScreenGui/root name.
+	if hasReleaseSibling(button) then
+		return true
+	end
+
+	local nameBlob = string.lower(safeFullName(parent))
+	if nameBlob:find("catch", 1, true) or nameBlob:find("release", 1, true) then
+		return true
+	end
+
+	-- Fallback: exact "Catch" text button around the lower middle area.
+	-- This avoids broad substring matching and only runs after the ore circles.
+	local camera = Workspace.CurrentCamera
+	local viewport = camera and camera.ViewportSize or Vector2.new(1280, 720)
+	local centerX, centerY = getCenter(button)
+	local lowerHalf = centerY >= viewport.Y * 0.50 and centerY <= viewport.Y * 0.95
+	local nearMiddle = centerX >= viewport.X * 0.15 and centerX <= viewport.X * 0.85
+
+	return lowerHalf and nearMiddle
+end
+
+local function scoreCatchButton(button)
+	local score = 0
+
+	if not hasCatchComponentShape(button) then
+		return -math.huge
+	end
+
+	score += 100
+
+	if hasReleaseSibling(button) then
+		score += 80
+	end
+
+	local parent = button.Parent
+	if parent then
+		local blob = string.lower(safeFullName(parent))
+
+		if blob:find("catchorrelease", 1, true) then
+			score += 70
+		elseif blob:find("catch", 1, true) or blob:find("release", 1, true) then
+			score += 35
+		end
+
+		for _, child in ipairs(parent:GetChildren()) do
+			if child:IsA("UIListLayout") then
+				score += 15
+			elseif child:IsA("UICorner") then
+				score += 4
+			end
+		end
+	end
+
+	local camera = Workspace.CurrentCamera
+	local viewport = camera and camera.ViewportSize or Vector2.new(1280, 720)
+	local centerX, centerY = getCenter(button)
+
+	local xBias = 1 - math.clamp(math.abs(centerX - viewport.X * 0.35) / math.max(viewport.X, 1), 0, 1)
+	local yBias = 1 - math.clamp(math.abs(centerY - viewport.Y * 0.81) / math.max(viewport.Y, 1), 0, 1)
+
+	score += xBias * 12
+	score += yBias * 12
+
+	return score
 end
 
 local function findCatchButton()
-	local catchIndicator = playerGui:FindFirstChild("CatchOrReleaseIndicator")
+	local candidates = {}
 
-	if catchIndicator then
-		local frame = catchIndicator:FindFirstChild("Frame")
-
-		if frame then
-			local innerFrame = frame:FindFirstChild("Frame")
-
-			if innerFrame then
-				local innerInnerFrame = innerFrame:FindFirstChild("Frame")
-
-				if innerInnerFrame then
-					local catchButton = innerInnerFrame:FindFirstChild("TextButton")
-
-					if catchButton and catchButton:IsA("TextButton") and isGuiVisible(catchButton) then
-						return catchButton
-					end
-				end
-			end
-		end
-	end
-
-	local catchRelease = playerGui:FindFirstChild("CatchOrRelease")
-
-	if catchRelease then
-		local enabled = true
-
-		pcall(function()
-			enabled = catchRelease.Enabled
-		end)
-
-		if enabled then
-			for _, obj in ipairs(catchRelease:GetDescendants()) do
-				if obj:IsA("TextButton") and isGuiVisible(obj) then
-					local txt = ""
-
-					pcall(function()
-						txt = tostring(obj.Text or ""):lower()
-					end)
-
-					if txt:find("catch", 1, true)
-						or txt:find("captur", 1, true)
-						or txt == "✓"
-						or tostring(obj.Name or ""):lower():find("catch", 1, true)
-						or tostring(obj.Name or ""):lower():find("captur", 1, true) then
-						return obj
-					end
-				end
-			end
-		end
-	end
-
-	-- Extra fallback for the mining version: keep it specific to catch/release roots.
+	-- Known roots first, if the game names the mounted component this way.
 	for _, rootName in ipairs({ "CatchOrReleaseIndicator", "CatchOrRelease" }) do
 		local root = playerGui:FindFirstChild(rootName)
 
 		if root then
 			for _, obj in ipairs(root:GetDescendants()) do
-				if (obj:IsA("TextButton") or obj:IsA("ImageButton")) and isGuiVisible(obj) and isCatchButtonText(obj) then
-					return obj
+				if obj:IsA("TextButton") and hasCatchComponentShape(obj) then
+					table.insert(candidates, {
+						button = obj,
+						score = scoreCatchButton(obj) + 120,
+					})
 				end
 			end
 		end
 	end
 
-	return nil
+	-- The component you sent is a generic returned Frame, so sometimes it is mounted
+	-- inside another ScreenGui. Find the exact visible TextButton "Catch" anywhere.
+	for _, obj in ipairs(playerGui:GetDescendants()) do
+		if obj:IsA("TextButton") and hasCatchComponentShape(obj) then
+			table.insert(candidates, {
+				button = obj,
+				score = scoreCatchButton(obj),
+			})
+		end
+	end
+
+	table.sort(candidates, function(a, b)
+		return a.score > b.score
+	end)
+
+	return candidates[1] and candidates[1].button or nil
 end
 
 local function clickCatchButton()
@@ -685,7 +776,7 @@ local function clickCatchButton()
 		return false
 	end
 
-	if os.clock() - lastCatchClick < 0.18 then
+	if os.clock() - lastCatchClick < 0.14 then
 		return false
 	end
 
@@ -695,8 +786,10 @@ local function clickCatchButton()
 	end
 
 	lastCatchClick = os.clock()
-	log("catch button", button:GetFullName())
+	log("catch button", button:GetFullName(), "text", getButtonText(button))
 
+	-- Catch is not inside Pickaxe, so use the generic click method, not the
+	-- circle-isolated one.
 	return clickGuiObject(button)
 end
 
