@@ -482,6 +482,26 @@ local function isPointOwnedByButton(button, x, y)
 	return false
 end
 
+local function clickGuiObject(obj)
+	if not obj or not obj.Parent or not isGuiVisible(obj) then
+		return false
+	end
+
+	local x, y = getCenter(obj)
+	local inset = GuiService:GetGuiInset()
+
+	setAutoMouseHidden(true)
+	fireButtonSignals(obj)
+
+	task.wait(0.02)
+
+	mouseTap(x, y)
+	mouseTap(x + inset.X, y + inset.Y)
+	touchTap(x, y)
+
+	return true
+end
+
 local function clickButton(button)
 	if not button or not button.Parent or not isGuiVisible(button) or not isInsidePickaxeGui(button) then
 		return false
@@ -569,7 +589,7 @@ local function getTextLike(obj)
 	end)
 
 	for _, child in ipairs(obj:GetDescendants()) do
-		if child:IsA("TextLabel") or child:IsA("TextButton") then
+		if child:IsA("TextLabel") or child:IsA("TextButton") or child:IsA("TextBox") then
 			pcall(function()
 				table.insert(pieces, child.Text or "")
 			end)
@@ -579,23 +599,7 @@ local function getTextLike(obj)
 	return string.lower(table.concat(pieces, " "))
 end
 
-local function isCatchButton(obj)
-	if not obj or not obj.Parent then
-		return false
-	end
-
-	if not (obj:IsA("TextButton") or obj:IsA("ImageButton")) then
-		return false
-	end
-
-	if not isGuiVisible(obj) or not isInsidePickaxeGui(obj) then
-		return false
-	end
-
-	if hasCircleParts(obj) then
-		return false
-	end
-
+local function isCatchButtonText(obj)
 	local text = getTextLike(obj)
 
 	return text:find("catch", 1, true)
@@ -604,22 +608,73 @@ local function isCatchButton(obj)
 		or text:find("colet", 1, true)
 		or text:find("claim", 1, true)
 		or text:find("take", 1, true)
+		or text:find("✓", 1, true)
 end
 
 local function findCatchButton()
-	local frame = getPickaxeFrame()
-	if not frame then
-		return nil
-	end
+	local catchIndicator = playerGui:FindFirstChild("CatchOrReleaseIndicator")
 
-	for _, obj in ipairs(frame:GetDescendants()) do
-		if isCatchButton(obj) then
-			return obj
+	if catchIndicator then
+		local frame = catchIndicator:FindFirstChild("Frame")
+
+		if frame then
+			local innerFrame = frame:FindFirstChild("Frame")
+
+			if innerFrame then
+				local innerInnerFrame = innerFrame:FindFirstChild("Frame")
+
+				if innerInnerFrame then
+					local catchButton = innerInnerFrame:FindFirstChild("TextButton")
+
+					if catchButton and catchButton:IsA("TextButton") and isGuiVisible(catchButton) then
+						return catchButton
+					end
+				end
+			end
 		end
 	end
 
-	if isCatchButton(frame) then
-		return frame
+	local catchRelease = playerGui:FindFirstChild("CatchOrRelease")
+
+	if catchRelease then
+		local enabled = true
+
+		pcall(function()
+			enabled = catchRelease.Enabled
+		end)
+
+		if enabled then
+			for _, obj in ipairs(catchRelease:GetDescendants()) do
+				if obj:IsA("TextButton") and isGuiVisible(obj) then
+					local txt = ""
+
+					pcall(function()
+						txt = tostring(obj.Text or ""):lower()
+					end)
+
+					if txt:find("catch", 1, true)
+						or txt:find("captur", 1, true)
+						or txt == "✓"
+						or tostring(obj.Name or ""):lower():find("catch", 1, true)
+						or tostring(obj.Name or ""):lower():find("captur", 1, true) then
+						return obj
+					end
+				end
+			end
+		end
+	end
+
+	-- Extra fallback for the mining version: keep it specific to catch/release roots.
+	for _, rootName in ipairs({ "CatchOrReleaseIndicator", "CatchOrRelease" }) do
+		local root = playerGui:FindFirstChild(rootName)
+
+		if root then
+			for _, obj in ipairs(root:GetDescendants()) do
+				if (obj:IsA("TextButton") or obj:IsA("ImageButton")) and isGuiVisible(obj) and isCatchButtonText(obj) then
+					return obj
+				end
+			end
+		end
 	end
 
 	return nil
@@ -642,7 +697,7 @@ local function clickCatchButton()
 	lastCatchClick = os.clock()
 	log("catch button", button:GetFullName())
 
-	return clickButton(button)
+	return clickGuiObject(button)
 end
 
 local function resetMinigameState()
