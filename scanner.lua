@@ -1390,13 +1390,24 @@ task.spawn(function()
 				end
 			end
 		else
-			local ore, distance = getNearestOre()
-
-			if ore then
-				log("nearest", ore:GetFullName(), math.floor(distance or 0))
-				startOre(ore)
+			if Miner.RequireCatchBeforeNextOre and hasVisibleCatchButton() then
+				phase = "waiting_collect"
+				waitingCollected = true
+				clickCatchButton()
+				task.wait(0.1)
+			elseif phase == "waiting_collect" or catchClickAttempted then
+				resetMinigameState()
+				restoreMouseIcon()
+				task.wait(Miner.NextOreDelay)
 			else
-				task.wait(0.65)
+				local ore, distance = getNearestOre()
+
+				if ore then
+					log("nearest", ore:GetFullName(), math.floor(distance or 0))
+					startOre(ore)
+				else
+					task.wait(0.65)
+				end
 			end
 		end
 
