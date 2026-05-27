@@ -1,6 +1,5 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Workspace = game:GetService("Workspace")
 local UserInputService = game:GetService("UserInputService")
 local GuiService = game:GetService("GuiService")
 local RunService = game:GetService("RunService")
@@ -19,6 +18,8 @@ local Scanner = {
 	Enabled = true,
 	StartedAt = os.date("!%Y-%m-%dT%H:%M:%SZ"),
 	FileBase = "ref_ore_miner_scan_" .. tostring(os.time()),
+	LatestTxt = "ref_ore_miner_scan_latest.txt",
+	LatestJson = "ref_ore_miner_scan_latest.json",
 	Logs = {},
 	Lines = {},
 	Connections = {},
@@ -56,9 +57,7 @@ local function childIndex(obj)
 	local parent = obj and obj.Parent
 	if not parent then return nil end
 
-	local children = parent:GetChildren()
-
-	for index, child in ipairs(children) do
+	for index, child in ipairs(parent:GetChildren()) do
 		if child == obj then
 			return index
 		end
@@ -183,6 +182,7 @@ local function simplify(value, depth)
 
 		for k, v in pairs(value) do
 			count += 1
+
 			if count > 30 then
 				out.__truncated = true
 				break
@@ -243,9 +243,6 @@ local function flush(reason)
 		logs = Scanner.Logs,
 	}
 
-	local jsonName = Scanner.FileBase .. ".json"
-	local txtName = Scanner.FileBase .. ".txt"
-
 	local okJson, encoded = pcall(function()
 		return HttpService:JSONEncode(payload)
 	end)
@@ -253,19 +250,26 @@ local function flush(reason)
 	if writefile then
 		if okJson then
 			pcall(function()
-				writefile(jsonName, encoded)
+				writefile(Scanner.FileBase .. ".json", encoded)
+			end)
+
+			pcall(function()
+				writefile(Scanner.LatestJson, encoded)
 			end)
 		end
 
+		local txt = table.concat(Scanner.Lines, "\n")
+
 		pcall(function()
-			writefile(txtName, table.concat(Scanner.Lines, "\n"))
+			writefile(Scanner.FileBase .. ".txt", txt)
 		end)
-	else
-		warn("[RefOreMinerScanner] writefile nao existe nesse executor")
+
+		pcall(function()
+			writefile(Scanner.LatestTxt, txt)
+		end)
 	end
 
 	Scanner.LastFlush = os.clock()
-	print("[RefOreMinerScanner] saved:", jsonName, txtName, "reason:", reason or "flush")
 end
 
 function Scanner.Flush(reason)
@@ -282,7 +286,6 @@ function Scanner.Stop(reason)
 	end
 
 	flush(reason or "stop")
-	print("[RefOreMinerScanner] stopped")
 end
 
 local function connect(signal, callback)
@@ -327,12 +330,11 @@ local function scanCatchCandidates(reason)
 
 	for _, obj in ipairs(playerGui:GetDescendants()) do
 		if obj:IsA("TextButton") or obj:IsA("ImageButton") then
-			local blob = lowerBlob(obj.Name, safeText(obj), safeFullName(obj))
 			local parentBlob = obj.Parent and lowerBlob(obj.Parent.Name, safeFullName(obj.Parent)) or ""
 
 			if isCatchRelated(obj)
 				or parentBlob:find("catchorrelease", 1, true)
-				or parentBlob:find("frame.frame", 1, true) then
+				or parentBlob:find("pickaxe", 1, true) then
 				table.insert(candidates, instanceInfo(obj))
 			end
 		end
@@ -346,12 +348,13 @@ local function scanCatchCandidates(reason)
 end
 
 local function logGuiAtPosition(x, y, label)
-	local positions = {}
-
 	local inset = GuiService:GetGuiInset()
-	table.insert(positions, { label = label .. "_raw", x = x, y = y })
-	table.insert(positions, { label = label .. "_minus_inset", x = x - inset.X, y = y - inset.Y })
-	table.insert(positions, { label = label .. "_plus_inset", x = x + inset.X, y = y + inset.Y })
+
+	local positions = {
+		{ label = label .. "_raw", x = x, y = y },
+		{ label = label .. "_minus_inset", x = x - inset.X, y = y - inset.Y },
+		{ label = label .. "_plus_inset", x = x + inset.X, y = y + inset.Y },
+	}
 
 	for _, pos in ipairs(positions) do
 		local ok, objects = pcall(function()
@@ -398,14 +401,6 @@ local function snapshot(reason)
 	scanCatchCandidates(reason)
 end
 
-local function logRemoteIncoming(action, data)
-	log("remote_in", {
-		remote = "Modules.Events.RemoteEvent",
-		action = simplify(action),
-		data = simplify(data),
-	})
-end
-
 local remote
 pcall(function()
 	remote = ReplicatedStorage:WaitForChild("Modules", 10)
@@ -415,10 +410,18 @@ end)
 
 if remote and remote:IsA("RemoteEvent") then
 	connect(remote.OnClientEvent, function(action, data)
-		logRemoteIncoming(action, data)
+		log("remote_in", {
+			remote = "Modules.Events.RemoteEvent",
+			action = simplify(action),
+			data = simplify(data),
+		})
 
-		if tostring(action):lower():find("mining", 1, true)
-			or tostring(action):lower():find("ore", 1, true) then
+		local actionText = tostring(action):lower()
+
+		if actionText:find("mining", 1, true)
+			or actionText:find("ore", 1, true)
+			or actionText:find("catch", 1, true)
+			or actionText:find("collect", 1, true) then
 			task.defer(function()
 				snapshot("after_remote_" .. tostring(action))
 			end)
@@ -453,7 +456,8 @@ if hookmetamethod and getnamecallmethod then
 					or blob:find("remoteevent", 1, true)
 					or blob:find("mine", 1, true)
 					or blob:find("ore", 1, true)
-					or blob:find("pickaxe", 1, true) then
+					or blob:find("pickaxe", 1, true)
+					or blob:find("catch", 1, true) then
 					log("remote_out", {
 						method = method,
 						remote = full,
@@ -579,8 +583,3 @@ end)
 
 snapshot("start")
 flush("start")
-
-print("[RefOreMinerScanner] rodando.")
-print("[RefOreMinerScanner] minera e clica manualmente no Catch/Capturar.")
-print("[RefOreMinerScanner] depois execute: getgenv().RefOreMinerScanner.Stop('manual stop')")
-print("[RefOreMinerScanner] arquivos:", Scanner.FileBase .. ".txt", Scanner.FileBase .. ".json")
