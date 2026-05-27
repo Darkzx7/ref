@@ -2,126 +2,36 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
 local UserInputService = game:GetService("UserInputService")
-local VirtualInputManager = game:GetService("VirtualInputManager")
 local GuiService = game:GetService("GuiService")
+local RunService = game:GetService("RunService")
+local HttpService = game:GetService("HttpService")
 
-local player = Players.LocalPlayer
-local playerGui = player:WaitForChild("PlayerGui")
-local Remote = ReplicatedStorage:WaitForChild("Modules"):WaitForChild("Events"):WaitForChild("RemoteEvent")
-
-getgenv().RefOreMiner = getgenv().RefOreMiner or {}
-
-local Miner = getgenv().RefOreMiner
-Miner.Enabled = Miner.Enabled ~= false
-Miner.Debug = Miner.Debug == true
-Miner.Teleport = Miner.Teleport ~= false
-Miner.TryMineRemote = Miner.TryMineRemote ~= false
-Miner.RemoteFinishFallback = Miner.RemoteFinishFallback == true
-Miner.RequireCatchBeforeNextOre = Miner.RequireCatchBeforeNextOre ~= false
-Miner.HideMouseDuringClicks = Miner.HideMouseDuringClicks ~= false
-Miner.CatchAfterCircles = Miner.CatchAfterCircles ~= false
-Miner.SwingDelay = tonumber(Miner.SwingDelay) or 0.18
-Miner.TargetTimeout = tonumber(Miner.TargetTimeout) or 26
-Miner.CircleTimeout = tonumber(Miner.CircleTimeout) or 18
-Miner.CircleClickDelay = tonumber(Miner.CircleClickDelay) or 0.045
-Miner.NextOreDelay = tonumber(Miner.NextOreDelay) or 0.75
-Miner.CatchClickRepeats = tonumber(Miner.CatchClickRepeats) or 3
-Miner.CatchCandidateClicks = tonumber(Miner.CatchCandidateClicks) or 12
-Miner.TeleportOffset = Miner.TeleportOffset or Vector3.new(0, 2.35, 4.25)
-Miner.Allowed = Miner.Allowed or {
-	Blue = true,
-	Pink = true,
-	Orange = true,
-	Red = true,
-	Green = true,
-}
-
-local oreAliases = {
-	blue = true,
-	pink = true,
-	orange = true,
-	red = true,
-	green = true,
-	greenish = true,
-	poisonous = true,
-	terracota = true,
-	terracotta = true,
-	destroyed = true,
-	burning = true,
-	cracked = true,
-}
-
-local TOUCH_ID = 1
-local seenRoots = {}
-local clickedButtons = {}
-local currentOre = nil
-local currentOreKey = nil
-local currentTool = nil
-local phase = "idle"
-local targetStartedAt = 0
-local circleStartedAt = 0
-local lastCircleSeenAt = 0
-local lastCircleClickAt = 0
-local expectedClicks = nil
-local clickedCount = 0
-local waitingCollected = false
-local finishing = false
-local catchClicked = false
-local catchClickedAt = 0
-local finishRemoteSent = false
-local lastRemoteFinishAt = 0
-local originalMouseIconEnabled = nil
-local lastCatchClick = 0
-
-local function log(...)
-	if Miner.Debug then
-		print("[ref ore miner]", ...)
-	end
-end
-
-local function setAutoMouseHidden(hidden)
-	if not Miner.HideMouseDuringClicks then
-		return
-	end
-
-	if not UserInputService then
-		return
-	end
-
-	if originalMouseIconEnabled == nil then
-		local ok, value = pcall(function()
-			return UserInputService.MouseIconEnabled
-		end)
-
-		if ok then
-			originalMouseIconEnabled = value
-		else
-			originalMouseIconEnabled = true
-		end
-	end
-
+if getgenv().RefOreMinerScanner and getgenv().RefOreMinerScanner.Stop then
 	pcall(function()
-		UserInputService.MouseIconEnabled = not hidden
+		getgenv().RefOreMinerScanner.Stop("restart")
 	end)
 end
 
-local function restoreMouseIcon()
-	if not UserInputService then
-		originalMouseIconEnabled = nil
-		return
-	end
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
 
-	if originalMouseIconEnabled ~= nil then
-		pcall(function()
-			UserInputService.MouseIconEnabled = originalMouseIconEnabled
-		end)
-	end
+local Scanner = {
+	Enabled = true,
+	StartedAt = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+	FileBase = "ref_ore_miner_scan_" .. tostring(os.time()),
+	Logs = {},
+	Lines = {},
+	Connections = {},
+	MaxLogs = 9000,
+	LastFlush = 0,
+	LastSnapshot = 0,
+	LastCandidateDump = 0,
+}
 
-	originalMouseIconEnabled = nil
-end
+getgenv().RefOreMinerScanner = Scanner
 
-local function cleanName(value)
-	return tostring(value or ""):lower():gsub("%s+", "")
+local function now()
+	return string.format("%.3f", os.clock())
 end
 
 local function safeFullName(obj)
@@ -132,297 +42,65 @@ local function safeFullName(obj)
 	return ok and value or tostring(obj)
 end
 
-local function getCharacter()
-	return player.Character or player.CharacterAdded:Wait()
-end
+local function safeText(obj)
+	local value = ""
 
-local function getHumanoid()
-	local character = getCharacter()
-	return character and character:FindFirstChildOfClass("Humanoid")
-end
-
-local function getRoot()
-	local character = getCharacter()
-	return character and (character:FindFirstChild("HumanoidRootPart") or character.PrimaryPart)
-end
-
-local function getObjectKey(obj)
-	if not obj then return "nil" end
-
-	local ok, id = pcall(function()
-		return obj:GetDebugId()
+	pcall(function()
+		value = tostring(obj.Text or "")
 	end)
 
-	if ok then
-		return obj.Name .. ":" .. tostring(id)
-	end
-
-	return obj:GetFullName()
+	return value
 end
 
-local function isPlayerCharacterDescendant(obj)
-	local node = obj
+local function childIndex(obj)
+	local parent = obj and obj.Parent
+	if not parent then return nil end
 
-	while node and node ~= Workspace do
-		if node:IsA("Model") and node:FindFirstChildOfClass("Humanoid") and Players:GetPlayerFromCharacter(node) then
-			return true
-		end
+	local children = parent:GetChildren()
 
-		node = node.Parent
-	end
-
-	return false
-end
-
-local function isOreLikeName(name)
-	return oreAliases[cleanName(name)] == true
-end
-
-local function isAllowedOreName(name)
-	local cleaned = cleanName(name)
-
-	for color, enabled in pairs(Miner.Allowed) do
-		local colorName = cleanName(color)
-
-		if enabled and (cleaned == colorName or cleaned:find(colorName, 1, true)) then
-			return true
-		end
-	end
-
-	if cleaned == "greenish" or cleaned == "poisonous" then
-		return Miner.Allowed.Green == true
-	end
-
-	if cleaned == "terracota" or cleaned == "terracotta" then
-		return Miner.Allowed.Orange == true
-	end
-
-	if cleaned == "destroyed" or cleaned == "cracked" then
-		return Miner.Allowed.Blue == true
-	end
-
-	if cleaned == "burning" then
-		return Miner.Allowed.Red == true
-	end
-
-	return false
-end
-
-local function getOreRoot(obj)
-	if not obj or not obj.Parent then
-		return nil
-	end
-
-	local root = obj
-
-	while root and root.Parent and root.Parent ~= Workspace do
-		if isOreLikeName(root.Parent.Name) or isAllowedOreName(root.Parent.Name) then
-			root = root.Parent
-		else
-			break
-		end
-	end
-
-	return root
-end
-
-local function getPivotPosition(obj)
-	if not obj or not obj.Parent then
-		return nil
-	end
-
-	if obj:IsA("BasePart") then
-		return obj.Position
-	end
-
-	if obj:IsA("Model") then
-		local ok, pivot = pcall(function()
-			return obj:GetPivot()
-		end)
-
-		if ok and pivot then
-			return pivot.Position
-		end
-
-		local primary = obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart", true)
-		return primary and primary.Position or nil
-	end
-
-	local part = obj:FindFirstChildWhichIsA("BasePart", true)
-	return part and part.Position or nil
-end
-
-local function scanOres()
-	table.clear(seenRoots)
-
-	for _, obj in ipairs(Workspace:GetDescendants()) do
-		if obj.Parent and not isPlayerCharacterDescendant(obj) and isAllowedOreName(obj.Name) then
-			local root = getOreRoot(obj)
-
-			if root and root.Parent and not seenRoots[root] then
-				local pos = getPivotPosition(root)
-
-				if pos then
-					seenRoots[root] = pos
-				end
-			end
-		end
-	end
-
-	for color, enabled in pairs(Miner.Allowed) do
-		if enabled then
-			local direct = Workspace:FindFirstChild(color)
-
-			if direct and direct.Parent and not seenRoots[direct] then
-				local pos = getPivotPosition(direct)
-
-				if pos then
-					seenRoots[direct] = pos
-				end
-			end
-		end
-	end
-end
-
-local function getNearestOre()
-	local root = getRoot()
-	if not root then return nil end
-
-	scanOres()
-
-	local nearest = nil
-	local nearestDistance = math.huge
-
-	for ore, pos in pairs(seenRoots) do
-		if ore and ore.Parent and pos then
-			local distance = (pos - root.Position).Magnitude
-
-			if distance < nearestDistance then
-				nearest = ore
-				nearestDistance = distance
-			end
-		end
-	end
-
-	return nearest, nearestDistance
-end
-
-local function equipPickaxe()
-	local character = getCharacter()
-	local humanoid = getHumanoid()
-
-	if not character or not humanoid then
-		return nil
-	end
-
-	for _, tool in ipairs(character:GetChildren()) do
-		if tool:IsA("Tool") and cleanName(tool.Name):find("pickaxe", 1, true) then
-			currentTool = tool
-			return tool
-		end
-	end
-
-	local backpack = player:FindFirstChildOfClass("Backpack")
-	if not backpack then
-		return nil
-	end
-
-	for _, tool in ipairs(backpack:GetChildren()) do
-		if tool:IsA("Tool") and cleanName(tool.Name):find("pickaxe", 1, true) then
-			pcall(function()
-				humanoid:EquipTool(tool)
-			end)
-
-			task.wait(0.12)
-
-			currentTool = tool
-			return tool
+	for index, child in ipairs(children) do
+		if child == obj then
+			return index
 		end
 	end
 
 	return nil
 end
 
-local function teleportOnceToOre(ore)
-	if not Miner.Teleport then return true end
+local function indexedPathFromPlayerGui(obj)
+	if not obj then return "nil" end
 
-	local root = getRoot()
-	local pos = getPivotPosition(ore)
+	local chain = {}
+	local node = obj
 
-	if not root or not pos then
+	while node and node ~= playerGui do
+		local index = childIndex(node) or 0
+		table.insert(chain, 1, string.format(":GetChildren()[%d](%s)", index, node.Name))
+		node = node.Parent
+	end
+
+	if node == playerGui then
+		return "PlayerGui" .. table.concat(chain, "")
+	end
+
+	return safeFullName(obj)
+end
+
+local function visibleChain(obj)
+	if not obj or not obj.Parent then
 		return false
 	end
 
-	local destination = pos + Miner.TeleportOffset
+	local node = obj
 
-	root.AssemblyLinearVelocity = Vector3.zero
-	root.AssemblyAngularVelocity = Vector3.zero
-	root.CFrame = CFrame.lookAt(destination, pos)
-
-	task.wait(0.2)
-	return true
-end
-
-local function swingPickaxe()
-	local tool = equipPickaxe() or currentTool
-
-	if tool and tool.Parent then
-		pcall(function()
-			tool:Activate()
-		end)
-	end
-
-	local camera = Workspace.CurrentCamera
-	if camera then
-		local center = camera.ViewportSize / 2
-
-		pcall(function()
-			VirtualInputManager:SendMouseMoveEvent(center.X, center.Y, game)
-			task.wait(0.008)
-			VirtualInputManager:SendMouseButtonEvent(center.X, center.Y, 0, true, game, 0)
-			task.wait(0.035)
-			VirtualInputManager:SendMouseButtonEvent(center.X, center.Y, 0, false, game, 0)
-		end)
-	end
-end
-
-local function getPickaxeGui()
-	return playerGui:FindFirstChild("Pickaxe")
-end
-
-local function getPickaxeFrame()
-	local pickaxeGui = getPickaxeGui()
-	if not pickaxeGui then
-		return nil
-	end
-
-	return pickaxeGui:FindFirstChild("Frame") or pickaxeGui
-end
-
-local function isInsidePickaxeGui(obj)
-	local pickaxeGui = getPickaxeGui()
-
-	return pickaxeGui and obj and obj:IsDescendantOf(pickaxeGui)
-end
-
-local function isGuiVisible(obj)
-	if not obj or not obj.Parent then return false end
-
-	if obj:IsA("GuiObject") then
-		if not obj.Visible then return false end
-		if obj.AbsoluteSize.X <= 2 or obj.AbsoluteSize.Y <= 2 then return false end
-	end
-
-	local parent = obj.Parent
-
-	while parent and parent ~= playerGui do
-		if parent:IsA("GuiObject") and not parent.Visible then
+	while node and node ~= playerGui do
+		if node:IsA("GuiObject") and not node.Visible then
 			return false
 		end
 
-		if parent:IsA("LayerCollector") then
+		if node:IsA("LayerCollector") then
 			local ok, enabled = pcall(function()
-				return parent.Enabled
+				return node.Enabled
 			end)
 
 			if ok and enabled == false then
@@ -430,902 +108,479 @@ local function isGuiVisible(obj)
 			end
 		end
 
-		parent = parent.Parent
+		node = node.Parent
 	end
 
 	return true
 end
 
-local function getCenter(gui)
-	local pos = gui.AbsolutePosition
-	local size = gui.AbsoluteSize
-	return pos.X + size.X / 2, pos.Y + size.Y / 2
-end
+local function instanceInfo(obj)
+	local data = {
+		class = obj and obj.ClassName or "nil",
+		name = obj and obj.Name or "nil",
+		fullName = obj and safeFullName(obj) or "nil",
+		indexedPath = obj and indexedPathFromPlayerGui(obj) or "nil",
+	}
 
-local function fireSignal(signal)
-	pcall(function()
-		if firesignal and signal then
-			firesignal(signal)
-		end
-	end)
-
-	pcall(function()
-		if getconnections and signal then
-			for _, connection in ipairs(getconnections(signal)) do
-				if connection.Fire then
-					pcall(function()
-						connection:Fire()
-					end)
-				end
-
-				if connection.Function then
-					pcall(connection.Function)
-				end
-			end
-		end
-	end)
-end
-
-local function fireButtonSignals(button)
-	if not button then return end
-
-	fireSignal(button.Activated)
-	fireSignal(button.MouseButton1Click)
-	fireSignal(button.MouseButton1Down)
-	fireSignal(button.MouseButton1Up)
-end
-
-local function mouseTap(x, y)
-	pcall(function()
-		VirtualInputManager:SendMouseMoveEvent(x, y, game)
-		task.wait(0.015)
-		VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 0)
-		task.wait(0.045)
-		VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 0)
-	end)
-end
-
-local function mouseTapSingle(x, y)
-	pcall(function()
-		VirtualInputManager:SendMouseMoveEvent(x, y, game)
-		task.wait(0.01)
-		VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 0)
-		task.wait(0.04)
-		VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 0)
-	end)
-end
-
-local function touchTap(x, y)
-	pcall(function()
-		VirtualInputManager:SendTouchEvent(TOUCH_ID, Enum.UserInputState.Begin, x, y)
-		task.wait(0.045)
-		VirtualInputManager:SendTouchEvent(TOUCH_ID, Enum.UserInputState.End, x, y)
-	end)
-
-	pcall(function()
-		VirtualInputManager:SendTouchEvent(TOUCH_ID, Vector2.new(x, y), true, game)
-		task.wait(0.045)
-		VirtualInputManager:SendTouchEvent(TOUCH_ID, Vector2.new(x, y), false, game)
-	end)
-end
-
-local function tapAt(x, y)
-	local inset = GuiService:GetGuiInset()
-	touchTap(x, y)
-	mouseTap(x, y)
-	mouseTap(x + inset.X, y + inset.Y)
-end
-
-local function isPointOwnedByButton(button, x, y)
-	if not button or not isInsidePickaxeGui(button) then
-		return false
+	if obj and obj:IsA("GuiObject") then
+		data.visible = obj.Visible
+		data.visibleChain = visibleChain(obj)
+		data.active = obj.Active
+		data.selectable = obj.Selectable
+		data.zIndex = obj.ZIndex
+		data.layoutOrder = obj.LayoutOrder
+		data.text = safeText(obj)
+		data.absolutePosition = {
+			x = math.floor(obj.AbsolutePosition.X),
+			y = math.floor(obj.AbsolutePosition.Y),
+		}
+		data.absoluteSize = {
+			x = math.floor(obj.AbsoluteSize.X),
+			y = math.floor(obj.AbsoluteSize.Y),
+		}
 	end
 
-	local ok, objects = pcall(function()
-		return playerGui:GetGuiObjectsAtPosition(x, y)
-	end)
-
-	if not ok or not objects or #objects == 0 then
-		return true
-	end
-
-	local top = objects[1]
-
-	if top and (top == button or top:IsDescendantOf(button)) then
-		return true
-	end
-
-	for _, obj in ipairs(objects) do
-		if obj == button or obj:IsDescendantOf(button) then
-			return true
-		end
-
-		if isInsidePickaxeGui(obj) then
-			break
-		end
-	end
-
-	return false
-end
-
-local function clickGuiObject(obj)
-	if not obj or not obj.Parent or not isGuiVisible(obj) then
-		return false
-	end
-
-	local x, y = getCenter(obj)
-
-	setAutoMouseHidden(true)
-
-	pcall(function()
-		GuiService.SelectedObject = obj
-	end)
-
-	fireButtonSignals(obj)
-
-	task.wait(0.02)
-
-	tapAt(x, y)
-
-	pcall(function()
-		VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Return, false, game)
-		task.wait(0.035)
-		VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Return, false, game)
-	end)
-
-	pcall(function()
-		VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
-		task.wait(0.035)
-		VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
-	end)
-
-	return true
-end
-
-local function clickButton(button)
-	if not button or not button.Parent or not isGuiVisible(button) or not isInsidePickaxeGui(button) then
-		return false
-	end
-
-	local target = button:FindFirstChild("MiddleCircle", true)
-		or button:FindFirstChild("InnerCircle", true)
-		or button:FindFirstChild("AnimatedWhiteCircle", true)
-		or button
-
-	if not target or not target:IsA("GuiObject") or not isGuiVisible(target) then
-		target = button
-	end
-
-	local x, y = getCenter(target)
-
-	if not isPointOwnedByButton(button, x, y) then
-		return false
-	end
-
-	setAutoMouseHidden(true)
-
-	fireButtonSignals(button)
-
-	task.wait(0.01)
-
-	mouseTapSingle(x, y)
-
-	return true
-end
-
-local function hasCircleParts(button)
-	if not button or not button.Parent then
-		return false
-	end
-
-	return button:FindFirstChild("AnimatedWhiteCircle", true)
-		or button:FindFirstChild("MiddleCircle", true)
-		or button:FindFirstChild("InnerCircle", true)
-end
-
-local function findPickaxeCircleButtons()
-	local found = {}
-	local pickaxeGui = getPickaxeGui()
-	local frame = getPickaxeFrame()
-
-	if not pickaxeGui or not isGuiVisible(pickaxeGui) or not frame then
-		return found
-	end
-
-	local roots = { frame }
-
-	for _, root in ipairs(roots) do
-		for _, obj in ipairs(root:GetDescendants()) do
-			if obj:IsA("ImageButton") and isGuiVisible(obj) and isInsidePickaxeGui(obj) and hasCircleParts(obj) then
-				table.insert(found, obj)
-			end
-		end
-	end
-
-	table.sort(found, function(a, b)
-		local ap = a.AbsolutePosition
-		local bp = b.AbsolutePosition
-
-		if math.abs(ap.Y - bp.Y) > 8 then
-			return ap.Y < bp.Y
-		end
-
-		return ap.X < bp.X
-	end)
-
-	return found
-end
-
-local function getButtonText(obj)
-	local txt = ""
-
-	pcall(function()
-		txt = tostring(obj.Text or "")
-	end)
-
-	return txt
-end
-
-local function cleanButtonText(txt)
-	return tostring(txt or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
-end
-
-local function isCheckMarkText(txt)
-	return txt == (utf8 and utf8.char and utf8.char(10003) or "check")
-		or txt == "âœ“"
-end
-
-local function isCatchText(txt)
-	txt = cleanButtonText(txt)
-
-	return txt == "catch"
-		or txt == "capturar"
-		or txt == "captura"
-		or txt == "collect"
-		or txt == "coletar"
-		or txt == "claim"
-		or txt == "take"
-		or txt == "✓"
-end
-
-local function isReleaseText(txt)
-	txt = cleanButtonText(txt)
-
-	return txt == "release"
-		or txt == "soltar"
-		or txt == "liberar"
-		or txt == "descartar"
-end
-
-local catchButtonPaths = {
-	{ "Frame", "Frame", "TextButton" },
-	{ "Frame", "Frame", "Frame", "TextButton" },
-	{ "Frame", "TextButton" },
-	{ "TextButton" },
-}
-
-local function getPath(root, path)
-	local node = root
-
-	for _, name in ipairs(path) do
-		if not node then
-			return nil
-		end
-
-		node = node:FindFirstChild(name)
-	end
-
-	return node
-end
-
-local function getDeepText(obj)
-	local parts = {}
-
-	local function addText(target)
+	if obj and obj:IsA("LayerCollector") then
 		pcall(function()
-			local value = tostring(target.Text or "")
-
-			if value ~= "" then
-				table.insert(parts, value)
-			end
+			data.enabled = obj.Enabled
+			data.displayOrder = obj.DisplayOrder
+			data.resetOnSpawn = obj.ResetOnSpawn
 		end)
 	end
 
-	if obj:IsA("TextButton") or obj:IsA("TextLabel") or obj:IsA("TextBox") then
-		addText(obj)
-	end
-
-	for _, desc in ipairs(obj:GetDescendants()) do
-		if desc:IsA("TextButton") or desc:IsA("TextLabel") or desc:IsA("TextBox") then
-			addText(desc)
-		end
-	end
-
-	return table.concat(parts, " ")
+	return data
 end
 
-local function getNearbyText(button)
-	local parts = { getDeepText(button) }
-	local parent = button and button.Parent
+local function simplify(value, depth)
+	depth = depth or 0
 
-	if parent then
-		for _, child in ipairs(parent:GetChildren()) do
-			if child ~= button and (child:IsA("TextButton") or child:IsA("TextLabel") or child:IsA("TextBox")) then
-				table.insert(parts, getDeepText(child))
+	if depth > 3 then
+		return tostring(value)
+	end
+
+	local t = typeof(value)
+
+	if t == "Instance" then
+		return {
+			type = "Instance",
+			class = value.ClassName,
+			name = value.Name,
+			fullName = safeFullName(value),
+			indexedPath = value:IsDescendantOf(playerGui) and indexedPathFromPlayerGui(value) or nil,
+		}
+	elseif t == "Vector2" then
+		return { type = "Vector2", x = value.X, y = value.Y }
+	elseif t == "Vector3" then
+		return { type = "Vector3", x = value.X, y = value.Y, z = value.Z }
+	elseif t == "CFrame" then
+		local p = value.Position
+		return { type = "CFrame", x = p.X, y = p.Y, z = p.Z }
+	elseif t == "EnumItem" then
+		return tostring(value)
+	elseif type(value) == "table" then
+		local out = {}
+		local count = 0
+
+		for k, v in pairs(value) do
+			count += 1
+			if count > 30 then
+				out.__truncated = true
+				break
+			end
+
+			out[tostring(k)] = simplify(v, depth + 1)
+		end
+
+		return out
+	end
+
+	return value
+end
+
+local function lineFromData(event, data)
+	local parts = { "[" .. now() .. "]", event }
+
+	if data then
+		if data.action then table.insert(parts, "action=" .. tostring(data.action)) end
+		if data.reason then table.insert(parts, "reason=" .. tostring(data.reason)) end
+		if data.path then table.insert(parts, "path=" .. tostring(data.path)) end
+		if data.text then table.insert(parts, "text=" .. tostring(data.text)) end
+		if data.class then table.insert(parts, "class=" .. tostring(data.class)) end
+		if data.name then table.insert(parts, "name=" .. tostring(data.name)) end
+	end
+
+	return table.concat(parts, " | ")
+end
+
+local function log(event, data)
+	if not Scanner.Enabled then return end
+
+	data = data or {}
+	data.t = now()
+	data.event = event
+
+	table.insert(Scanner.Logs, data)
+	table.insert(Scanner.Lines, lineFromData(event, data))
+
+	if #Scanner.Logs > Scanner.MaxLogs then
+		table.remove(Scanner.Logs, 1)
+	end
+
+	if #Scanner.Lines > Scanner.MaxLogs then
+		table.remove(Scanner.Lines, 1)
+	end
+end
+
+local function flush(reason)
+	local payload = {
+		reason = reason or "flush",
+		startedAt = Scanner.StartedAt,
+		flushedAt = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+		placeId = game.PlaceId,
+		jobId = game.JobId,
+		player = player.Name,
+		logCount = #Scanner.Logs,
+		logs = Scanner.Logs,
+	}
+
+	local jsonName = Scanner.FileBase .. ".json"
+	local txtName = Scanner.FileBase .. ".txt"
+
+	local okJson, encoded = pcall(function()
+		return HttpService:JSONEncode(payload)
+	end)
+
+	if writefile then
+		if okJson then
+			pcall(function()
+				writefile(jsonName, encoded)
+			end)
+		end
+
+		pcall(function()
+			writefile(txtName, table.concat(Scanner.Lines, "\n"))
+		end)
+	else
+		warn("[RefOreMinerScanner] writefile nao existe nesse executor")
+	end
+
+	Scanner.LastFlush = os.clock()
+	print("[RefOreMinerScanner] saved:", jsonName, txtName, "reason:", reason or "flush")
+end
+
+function Scanner.Flush(reason)
+	flush(reason or "manual flush")
+end
+
+function Scanner.Stop(reason)
+	Scanner.Enabled = false
+
+	for _, connection in ipairs(Scanner.Connections) do
+		pcall(function()
+			connection:Disconnect()
+		end)
+	end
+
+	flush(reason or "stop")
+	print("[RefOreMinerScanner] stopped")
+end
+
+local function connect(signal, callback)
+	local connection = signal:Connect(callback)
+	table.insert(Scanner.Connections, connection)
+	return connection
+end
+
+local function lowerBlob(...)
+	local parts = {}
+
+	for _, value in ipairs({ ... }) do
+		table.insert(parts, tostring(value or ""))
+	end
+
+	return table.concat(parts, " "):lower()
+end
+
+local function isCatchRelated(obj)
+	if not obj then return false end
+
+	local blob = lowerBlob(
+		obj.Name,
+		obj.ClassName,
+		safeFullName(obj),
+		safeText(obj),
+		obj.Parent and obj.Parent.Name or ""
+	)
+
+	return blob:find("catch", 1, true)
+		or blob:find("captur", 1, true)
+		or blob:find("collect", 1, true)
+		or blob:find("colet", 1, true)
+		or blob:find("claim", 1, true)
+		or blob:find("release", 1, true)
+		or blob:find("soltar", 1, true)
+		or blob:find("pickaxe", 1, true)
+end
+
+local function scanCatchCandidates(reason)
+	local candidates = {}
+
+	for _, obj in ipairs(playerGui:GetDescendants()) do
+		if obj:IsA("TextButton") or obj:IsA("ImageButton") then
+			local blob = lowerBlob(obj.Name, safeText(obj), safeFullName(obj))
+			local parentBlob = obj.Parent and lowerBlob(obj.Parent.Name, safeFullName(obj.Parent)) or ""
+
+			if isCatchRelated(obj)
+				or parentBlob:find("catchorrelease", 1, true)
+				or parentBlob:find("frame.frame", 1, true) then
+				table.insert(candidates, instanceInfo(obj))
 			end
 		end
 	end
 
-	return table.concat(parts, " ")
+	log("catch_candidates", {
+		reason = reason,
+		count = #candidates,
+		candidates = candidates,
+	})
 end
 
-local function isReleaseBlob(blob)
-	return blob:find("release", 1, true)
-		or blob:find("soltar", 1, true)
-		or blob:find("liberar", 1, true)
-		or blob:find("descartar", 1, true)
-end
+local function logGuiAtPosition(x, y, label)
+	local positions = {}
 
-local function hasReleaseSibling(button)
-	local parent = button and button.Parent
-	if not parent then
-		return false
-	end
+	local inset = GuiService:GetGuiInset()
+	table.insert(positions, { label = label .. "_raw", x = x, y = y })
+	table.insert(positions, { label = label .. "_minus_inset", x = x - inset.X, y = y - inset.Y })
+	table.insert(positions, { label = label .. "_plus_inset", x = x + inset.X, y = y + inset.Y })
 
-	for _, sibling in ipairs(parent:GetChildren()) do
-		if sibling ~= button and sibling:IsA("TextButton") and isGuiVisible(sibling) and isReleaseText(getButtonText(sibling)) then
-			return true
+	for _, pos in ipairs(positions) do
+		local ok, objects = pcall(function()
+			return playerGui:GetGuiObjectsAtPosition(pos.x, pos.y)
+		end)
+
+		local list = {}
+
+		if ok and objects then
+			for index, obj in ipairs(objects) do
+				if index > 20 then break end
+				table.insert(list, instanceInfo(obj))
+			end
 		end
-	end
 
-	return false
-end
-
-local function scoreCatchButton(button, boost)
-	if not button or not button:IsA("TextButton") or not isGuiVisible(button) then
-		return nil
-	end
-
-	local buttonBlob = cleanButtonText(getDeepText(button) .. " " .. tostring(button.Name or ""))
-
-	if isReleaseBlob(buttonBlob) then
-		return nil
-	end
-
-	local fullBlob = cleanButtonText(safeFullName(button))
-	local nearbyBlob = cleanButtonText(getNearbyText(button))
-	local blob = buttonBlob .. " " .. nearbyBlob .. " " .. fullBlob
-	local score = boost or 0
-
-	if isCatchText(buttonBlob) then score += 260 end
-	if blob:find("catch", 1, true) then score += 180 end
-	if blob:find("captur", 1, true) then score += 170 end
-	if blob:find("collect", 1, true) or blob:find("colet", 1, true) then score += 95 end
-	if blob:find("claim", 1, true) or blob:find("take", 1, true) then score += 65 end
-
-	if hasReleaseSibling(button) then
-		score += 85
-	end
-
-	if fullBlob:find("catchorreleaseindicator", 1, true) then
-		score += 180
-	elseif fullBlob:find("catchorrelease", 1, true) then
-		score += 140
-	end
-
-	local camera = Workspace.CurrentCamera
-	local viewport = camera and camera.ViewportSize or Vector2.new(1280, 720)
-	local x, y = getCenter(button)
-
-	if y >= viewport.Y * 0.45 and y <= viewport.Y * 0.98 then score += 25 end
-	if x >= viewport.X * 0.02 and x <= viewport.X * 0.70 then score += 15 end
-
-	return score >= 120 and score or nil
-end
-
-local function pushCatchCandidate(candidates, button, boost, source)
-	local score = scoreCatchButton(button, boost)
-
-	if score then
-		table.insert(candidates, {
-			button = button,
-			score = score,
-			source = source,
+		log("gui_at_position", {
+			label = pos.label,
+			x = math.floor(pos.x),
+			y = math.floor(pos.y),
+			count = #list,
+			objects = list,
 		})
 	end
 end
 
-local function bestCatchCandidate(candidates)
-	table.sort(candidates, function(a, b)
-		return a.score > b.score
-	end)
+local function snapshot(reason)
+	local top = {}
 
-	local best = candidates[1]
-
-	if best then
-		log("catch candidate", best.source, math.floor(best.score), safeFullName(best.button), getDeepText(best.button))
-		return best.button
-	end
-
-	return nil
-end
-
-local function sortAndDedupeCatchCandidates(candidates)
-	table.sort(candidates, function(a, b)
-		return a.score > b.score
-	end)
-
-	local deduped = {}
-	local seen = {}
-
-	for _, candidate in ipairs(candidates) do
-		local button = candidate.button
-
-		if button and button.Parent and not seen[button] then
-			seen[button] = true
-			table.insert(deduped, candidate)
+	for index, child in ipairs(playerGui:GetChildren()) do
+		if child:IsA("LayerCollector") then
+			local info = instanceInfo(child)
+			info.childIndex = index
+			info.descendantCount = #child:GetDescendants()
+			table.insert(top, info)
 		end
 	end
 
-	return deduped
+	log("playergui_snapshot", {
+		reason = reason,
+		topLevelCount = #top,
+		topLevel = top,
+	})
+
+	scanCatchCandidates(reason)
 end
 
-local function collectCatchCandidates(includeGlobal)
-	local candidates = {}
+local function logRemoteIncoming(action, data)
+	log("remote_in", {
+		remote = "Modules.Events.RemoteEvent",
+		action = simplify(action),
+		data = simplify(data),
+	})
+end
 
-	for _, rootGui in ipairs({
-		playerGui:FindFirstChild("CatchOrReleaseIndicator"),
-		playerGui:FindFirstChild("CatchOrRelease"),
-	}) do
-		if rootGui then
-			for _, path in ipairs(catchButtonPaths) do
-				pushCatchCandidate(candidates, getPath(rootGui, path), 360, "named_path")
-			end
+local remote
+pcall(function()
+	remote = ReplicatedStorage:WaitForChild("Modules", 10)
+		:WaitForChild("Events", 10)
+		:WaitForChild("RemoteEvent", 10)
+end)
 
-			for _, obj in ipairs(rootGui:GetDescendants()) do
-				if obj:IsA("TextButton") then
-					pushCatchCandidate(candidates, obj, 230, "named_scan")
+if remote and remote:IsA("RemoteEvent") then
+	connect(remote.OnClientEvent, function(action, data)
+		logRemoteIncoming(action, data)
+
+		if tostring(action):lower():find("mining", 1, true)
+			or tostring(action):lower():find("ore", 1, true) then
+			task.defer(function()
+				snapshot("after_remote_" .. tostring(action))
+			end)
+		end
+	end)
+
+	log("remote_connected", {
+		path = safeFullName(remote),
+	})
+else
+	log("remote_missing", {
+		path = "ReplicatedStorage.Modules.Events.RemoteEvent",
+	})
+end
+
+if hookmetamethod and getnamecallmethod then
+	local oldNamecall
+	local wrapper = newcclosure or function(fn) return fn end
+
+	local ok, err = pcall(function()
+		oldNamecall = hookmetamethod(game, "__namecall", wrapper(function(self, ...)
+			local method = getnamecallmethod()
+			local args = { ... }
+
+			if (method == "FireServer" or method == "InvokeServer")
+				and typeof(self) == "Instance"
+				and (self:IsA("RemoteEvent") or self:IsA("RemoteFunction")) then
+				local full = safeFullName(self)
+				local blob = full:lower()
+
+				if blob:find("modules.events", 1, true)
+					or blob:find("remoteevent", 1, true)
+					or blob:find("mine", 1, true)
+					or blob:find("ore", 1, true)
+					or blob:find("pickaxe", 1, true) then
+					log("remote_out", {
+						method = method,
+						remote = full,
+						args = simplify(args),
+					})
 				end
 			end
-		end
-	end
 
-	for _, rootGui in ipairs(playerGui:GetChildren()) do
-		for _, path in ipairs(catchButtonPaths) do
-			pushCatchCandidate(candidates, getPath(rootGui, path), 190, "playergui_frame_path")
-		end
-	end
-
-	if includeGlobal then
-		for _, obj in ipairs(playerGui:GetDescendants()) do
-			if obj:IsA("TextButton") then
-				pushCatchCandidate(candidates, obj, 0, "global_scan")
-			end
-		end
-	end
-
-	return sortAndDedupeCatchCandidates(candidates)
-end
-
-local function clickCatchButtonStrong(button)
-	if not button or not button.Parent or not isGuiVisible(button) then
-		return false
-	end
-
-	local x, y = getCenter(button)
-	local inset = GuiService:GetGuiInset()
-
-	setAutoMouseHidden(true)
-
-	pcall(function()
-		GuiService.SelectedObject = button
+			return oldNamecall(self, ...)
+		end))
 	end)
 
-	for _ = 1, Miner.CatchClickRepeats do
-		pcall(function()
-			button:Activate()
-		end)
-
-		fireButtonSignals(button)
-
-		task.wait(0.015)
-
-		touchTap(x, y)
-		mouseTapSingle(x, y)
-		mouseTap(x, y)
-		mouseTapSingle(x + inset.X, y + inset.Y)
-
-		pcall(function()
-			VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Return, false, game)
-			task.wait(0.025)
-			VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Return, false, game)
-		end)
-
-		pcall(function()
-			VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
-			task.wait(0.025)
-			VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
-		end)
-
-		task.wait(0.045)
-	end
-
-	return true
+	log("namecall_hook", {
+		success = ok,
+		error = err,
+	})
+else
+	log("namecall_hook_missing", {
+		hookmetamethod = hookmetamethod ~= nil,
+		getnamecallmethod = getnamecallmethod ~= nil,
+	})
 end
 
-local function findMushCatchButton()
-	return bestCatchCandidate(collectCatchCandidates(false))
-end
+connect(UserInputService.InputBegan, function(input, gameProcessed)
+	if input.UserInputType == Enum.UserInputType.MouseButton1
+		or input.UserInputType == Enum.UserInputType.Touch then
+		local pos = input.Position
 
-local function findComponentCatchButton()
-	return bestCatchCandidate(collectCatchCandidates(true))
-end
-
-local function findCatchButton()
-	return findMushCatchButton() or findComponentCatchButton()
-end
-
-local function clickCatchButton()
-	if not Miner.CatchAfterCircles then
-		return false
-	end
-
-	if os.clock() - lastCatchClick < 0.08 then
-		return false
-	end
-
-	local candidates = collectCatchCandidates(true)
-	if #candidates == 0 then
-		return false
-	end
-
-	lastCatchClick = os.clock()
-	local clickedAny = false
-	local limit = math.min(#candidates, Miner.CatchCandidateClicks)
-
-	for index = 1, limit do
-		local candidate = candidates[index]
-		local button = candidate.button
-
-		if button and button.Parent then
-			log("catch click", index, candidate.source, math.floor(candidate.score), safeFullName(button), "text", getDeepText(button))
-
-			if clickCatchButtonStrong(button) then
-				clickedAny = true
-				task.wait(0.08)
-			end
-		end
-	end
-
-	if clickedAny then
-		catchClicked = true
-		catchClickedAt = tick()
-		task.wait(0.2)
-	end
-
-	return clickedAny
-end
-
-local function completeCurrentOreAfterCircles(reason)
-	if not currentOre or not currentOre.Parent then
-		return false
-	end
-
-	if not Miner.RemoteFinishFallback then
-		return false
-	end
-
-	if Miner.RequireCatchBeforeNextOre and not catchClicked then
-		return false
-	end
-
-	finishRemoteSent = true
-	lastRemoteFinishAt = tick()
-
-	log("complete ore after circles", reason or "direct", currentOre:GetFullName())
-
-	pcall(function()
-		Remote:FireServer("MinigameCompleted", currentOre)
-	end)
-
-	return true
-end
-
-local function resetMinigameState()
-	phase = "idle"
-	expectedClicks = nil
-	clickedCount = 0
-	lastCircleSeenAt = 0
-	lastCircleClickAt = 0
-	waitingCollected = false
-	finishing = false
-	catchClicked = false
-	catchClickedAt = 0
-	finishRemoteSent = false
-	lastRemoteFinishAt = 0
-	lastCatchClick = 0
-	table.clear(clickedButtons)
-end
-
-local function finishCurrentOre(reason)
-	if finishing then return end
-
-	if Miner.RequireCatchBeforeNextOre
-		and currentOre
-		and currentOre.Parent
-		and phase == "waiting_collect"
-		and not catchClicked then
-		log("blocked finish before catch", reason or "unknown")
-		return
-	end
-
-	finishing = true
-	log("finish", reason or "unknown", "clicked", clickedCount, "expected", expectedClicks or "?")
-
-	task.defer(function()
-		pcall(function()
-			Remote:FireServer("StopHoldingOre")
-		end)
-
-		currentOre = nil
-		currentOreKey = nil
-		currentTool = nil
-		resetMinigameState()
-		restoreMouseIcon()
-		task.wait(Miner.NextOreDelay)
-	end)
-end
-
-local function markCollected(reason)
-	if currentOre and catchClicked and (phase == "circles" or phase == "waiting_collect") then
-		finishCurrentOre(reason)
-	end
-end
-
-local function beginWaitingCollect(reason)
-	if waitingCollected then
-		return
-	end
-
-	phase = "waiting_collect"
-	waitingCollected = true
-
-	log("waiting collect", reason or "unknown", "clicked", clickedCount, "expected", expectedClicks or "?")
-
-	task.spawn(function()
-		for _ = 1, 80 do
-			if not currentOre or not waitingCollected then
-				return
-			end
-
-			clickCatchButton()
-
-			if catchClicked then
-				task.wait(0.18)
-			else
-				task.wait(0.06)
-			end
-		end
-	end)
-
-	task.delay(0.6, function()
-		if currentOre and waitingCollected then
-			completeCurrentOreAfterCircles(reason or "waiting_collect")
-		end
-	end)
-
-	task.delay(1.4, function()
-		if currentOre and waitingCollected then
-			completeCurrentOreAfterCircles("retry_1")
-		end
-	end)
-
-	task.delay(2.6, function()
-		if currentOre and waitingCollected then
-			completeCurrentOreAfterCircles("retry_2")
-		end
-	end)
-
-	task.delay(9.5, function()
-		if currentOre and waitingCollected and catchClicked and not Miner.RequireCatchBeforeNextOre then
-			finishCurrentOre("catch_or_remote_timeout")
-		end
-	end)
-end
-
-local function solveCircleStep()
-	if phase ~= "circles" or not currentOre then
-		return false
-	end
-
-	local buttons = findPickaxeCircleButtons()
-
-	if #buttons == 0 then
-		if clickedCount > 0 and tick() - lastCircleClickAt > 0.22 then
-			beginWaitingCollect("circles_gone")
-			return true
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+			pos = UserInputService:GetMouseLocation()
 		end
 
-		if waitingCollected then
-			return false
+		log("input_began", {
+			inputType = tostring(input.UserInputType),
+			keyCode = tostring(input.KeyCode),
+			gameProcessed = gameProcessed,
+			x = math.floor(pos.X),
+			y = math.floor(pos.Y),
+		})
+
+		logGuiAtPosition(pos.X, pos.Y, "input_began")
+		scanCatchCandidates("input_began")
+	end
+end)
+
+connect(UserInputService.InputEnded, function(input, gameProcessed)
+	if input.UserInputType == Enum.UserInputType.MouseButton1
+		or input.UserInputType == Enum.UserInputType.Touch then
+		local pos = input.Position
+
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+			pos = UserInputService:GetMouseLocation()
 		end
 
-		return false
+		log("input_ended", {
+			inputType = tostring(input.UserInputType),
+			keyCode = tostring(input.KeyCode),
+			gameProcessed = gameProcessed,
+			x = math.floor(pos.X),
+			y = math.floor(pos.Y),
+		})
+
+		logGuiAtPosition(pos.X, pos.Y, "input_ended")
 	end
+end)
 
-	lastCircleSeenAt = tick()
+connect(playerGui.ChildAdded, function(child)
+	log("playergui_child_added", instanceInfo(child))
 
-	for _, button in ipairs(buttons) do
-		if not clickedButtons[button] then
-			clickedButtons[button] = true
-			clickedCount += 1
-			lastCircleClickAt = tick()
-
-			task.wait(Miner.CircleClickDelay)
-			clickButton(button)
-
-			log("circle click", clickedCount, expectedClicks or "?")
-
-			if expectedClicks and clickedCount >= expectedClicks then
-				beginWaitingCollect("expected_clicks")
-			end
-
-			return true
-		end
-	end
-
-	return false
-end
-
-local function startOre(ore)
-	if not ore or not ore.Parent then
-		return false
-	end
-
-	currentOre = ore
-	currentOreKey = getObjectKey(ore)
-	targetStartedAt = tick()
-	resetMinigameState()
-	phase = "hitting"
-	setAutoMouseHidden(true)
-
-	if not equipPickaxe() then
-		log("pickaxe not found")
-		currentOre = nil
-		currentOreKey = nil
-		resetMinigameState()
-		restoreMouseIcon()
-		return false
-	end
-
-	if not teleportOnceToOre(ore) then
-		currentOre = nil
-		currentOreKey = nil
-		resetMinigameState()
-		restoreMouseIcon()
-		return false
-	end
-
-	if Miner.TryMineRemote then
-		pcall(function()
-			Remote:FireServer("TryMine", ore)
+	if isCatchRelated(child) then
+		task.delay(0.1, function()
+			snapshot("child_added_related")
 		end)
 	end
+end)
 
-	log("target", ore:GetFullName())
+connect(playerGui.DescendantAdded, function(obj)
+	if obj:IsA("TextButton") or obj:IsA("ImageButton") or isCatchRelated(obj) then
+		log("gui_descendant_added", instanceInfo(obj))
 
-	task.spawn(function()
-		while Miner.Enabled
-			and currentOre == ore
-			and ore.Parent
-			and phase == "hitting"
-			and tick() - targetStartedAt < Miner.TargetTimeout do
-			swingPickaxe()
-			task.wait(Miner.SwingDelay)
-		end
-	end)
-
-	return true
-end
-
-Remote.OnClientEvent:Connect(function(action, data)
-	if action == "MiningMinigame" then
-		if currentOre and currentOre.Parent then
-			phase = "circles"
-			circleStartedAt = tick()
-			lastCircleSeenAt = tick()
-			lastCircleClickAt = 0
-			expectedClicks = tonumber(data and data.Clicks) or expectedClicks
-			clickedCount = 0
-			waitingCollected = false
-			table.clear(clickedButtons)
-
-			log("MiningMinigame", data and data.Color, data and data.ShardName, "clicks", expectedClicks or "?")
-		end
-	elseif action == "OresChanged" or action == "MiningDataChanged" then
-		if catchClicked and currentOre and (phase == "waiting_collect" or phase == "circles") then
-			task.delay(0.2, function()
-				if currentOre and catchClicked then
-					finishCurrentOre(action .. "_after_catch")
-				end
+		if isCatchRelated(obj) then
+			task.delay(0.05, function()
+				scanCatchCandidates("descendant_added_related")
 			end)
 		end
 	end
 end)
 
-task.spawn(function()
-	log("loaded")
-
-	while Miner.Enabled do
-		if currentOre and currentOre.Parent then
-			if phase == "circles" then
-				solveCircleStep()
-
-				if tick() - circleStartedAt > Miner.CircleTimeout then
-					if clickedCount > 0 then
-						beginWaitingCollect("circle_timeout")
-					elseif not Miner.RequireCatchBeforeNextOre then
-						finishCurrentOre("circle_timeout")
-					end
-				end
-			elseif phase == "waiting_collect" then
-				clickCatchButton()
-
-				if Miner.RemoteFinishFallback and catchClicked and tick() - lastRemoteFinishAt > 0.65 then
-					completeCurrentOreAfterCircles("waiting_collect")
-				end
-
-				if catchClicked and tick() - catchClickedAt > 5 and not Miner.RequireCatchBeforeNextOre then
-					finishCurrentOre("catch_or_remote_wait_timeout")
-				elseif finishRemoteSent and tick() - lastRemoteFinishAt > 10 and not Miner.RequireCatchBeforeNextOre then
-					finishCurrentOre("remote_finish_no_catch_button")
-				elseif tick() - circleStartedAt > Miner.CircleTimeout + 10 then
-					if catchClicked and not Miner.RequireCatchBeforeNextOre then
-						finishCurrentOre("collect_timeout")
-					else
-						log("still waiting catch/collect")
-					end
-				end
-			elseif phase == "hitting" then
-				if tick() - targetStartedAt > Miner.TargetTimeout then
-					log("hit timeout", currentOre.Name)
-					pcall(function()
-						Remote:FireServer("StopHoldingOre")
-					end)
-					currentOre = nil
-					currentOreKey = nil
-					resetMinigameState()
-					restoreMouseIcon()
-					task.wait(0.35)
-				end
-			end
-		else
-			local ore, distance = getNearestOre()
-
-			if ore then
-				log("nearest", ore:GetFullName(), math.floor(distance or 0))
-				startOre(ore)
-			else
-				task.wait(0.65)
-			end
-		end
-
-		task.wait(0.025)
+connect(playerGui.DescendantRemoving, function(obj)
+	if obj:IsA("TextButton") or obj:IsA("ImageButton") or isCatchRelated(obj) then
+		log("gui_descendant_removing", instanceInfo(obj))
 	end
-
-	if currentOre then
-		pcall(function()
-			Remote:FireServer("StopHoldingOre")
-		end)
-	end
-
-	currentOre = nil
-	currentOreKey = nil
-	currentTool = nil
-	resetMinigameState()
-	restoreMouseIcon()
-
-	log("stopped")
 end)
 
-print("[ref ore miner] Pickaxe circle minigame loaded")
+connect(RunService.Heartbeat, function()
+	if not Scanner.Enabled then return end
+
+	if os.clock() - Scanner.LastSnapshot > 1.25 then
+		Scanner.LastSnapshot = os.clock()
+
+		local pickaxe = playerGui:FindFirstChild("Pickaxe")
+		local catchIndicator = playerGui:FindFirstChild("CatchOrReleaseIndicator")
+		local catchRelease = playerGui:FindFirstChild("CatchOrRelease")
+
+		if pickaxe or catchIndicator or catchRelease then
+			log("important_gui_state", {
+				pickaxe = pickaxe and instanceInfo(pickaxe) or nil,
+				catchIndicator = catchIndicator and instanceInfo(catchIndicator) or nil,
+				catchRelease = catchRelease and instanceInfo(catchRelease) or nil,
+			})
+		end
+	end
+
+	if os.clock() - Scanner.LastCandidateDump > 2.5 then
+		Scanner.LastCandidateDump = os.clock()
+		scanCatchCandidates("periodic")
+	end
+
+	if os.clock() - Scanner.LastFlush > 3 then
+		flush("auto")
+	end
+end)
+
+snapshot("start")
+flush("start")
+
+print("[RefOreMinerScanner] rodando.")
+print("[RefOreMinerScanner] minera e clica manualmente no Catch/Capturar.")
+print("[RefOreMinerScanner] depois execute: getgenv().RefOreMinerScanner.Stop('manual stop')")
+print("[RefOreMinerScanner] arquivos:", Scanner.FileBase .. ".txt", Scanner.FileBase .. ".json")
