@@ -68,6 +68,10 @@ local waitingCollected = false
 local finishing = false
 local catchClicked = false
 local catchClickedAt = 0
+local catchClickAttempted = false
+local catchClickAttemptedAt = 0
+local catchConfirmed = false
+local catchConfirmedAt = 0
 local finishRemoteSent = false
 local lastRemoteFinishAt = 0
 local originalMouseIconEnabled = nil
@@ -964,7 +968,6 @@ local function clickCatchButtonStrong(button)
 	end
 
 	local x, y = getCenter(button)
-	local inset = GuiService:GetGuiInset()
 
 	setAutoMouseHidden(true)
 
@@ -973,32 +976,11 @@ local function clickCatchButtonStrong(button)
 	end)
 
 	for _ = 1, Miner.CatchClickRepeats do
-		pcall(function()
-			button:Activate()
-		end)
-
+		-- Same click path used by Mush fishing: signals first, then TapAt.
 		fireButtonSignals(button)
-
-		task.wait(0.015)
-
-		touchTap(x, y)
-		mouseTapSingle(x, y)
-		mouseTap(x, y)
-		mouseTapSingle(x + inset.X, y + inset.Y)
-
-		pcall(function()
-			VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Return, false, game)
-			task.wait(0.025)
-			VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Return, false, game)
-		end)
-
-		pcall(function()
-			VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
-			task.wait(0.025)
-			VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
-		end)
-
-		task.wait(0.045)
+		task.wait(0.02)
+		tapAt(x, y)
+		task.wait(0.08)
 	end
 
 	return true
@@ -1032,8 +1014,8 @@ local function clickCatchButton()
 		log("exact catch click", safeFullName(exactButton), "text", getDeepText(exactButton))
 
 		if clickCatchButtonStrong(exactButton) then
-			catchClicked = true
-			catchClickedAt = tick()
+			catchClickAttempted = true
+			catchClickAttemptedAt = tick()
 			task.wait(0.2)
 			return true
 		end
@@ -1062,8 +1044,8 @@ local function clickCatchButton()
 	end
 
 	if clickedAny then
-		catchClicked = true
-		catchClickedAt = tick()
+		catchClickAttempted = true
+		catchClickAttemptedAt = tick()
 		task.wait(0.2)
 	end
 
@@ -1079,7 +1061,7 @@ local function completeCurrentOreAfterCircles(reason)
 		return false
 	end
 
-	if Miner.RequireCatchBeforeNextOre and not catchClicked then
+	if Miner.RequireCatchBeforeNextOre and not catchConfirmed then
 		return false
 	end
 
@@ -1105,6 +1087,10 @@ local function resetMinigameState()
 	finishing = false
 	catchClicked = false
 	catchClickedAt = 0
+	catchClickAttempted = false
+	catchClickAttemptedAt = 0
+	catchConfirmed = false
+	catchConfirmedAt = 0
 	finishRemoteSent = false
 	lastRemoteFinishAt = 0
 	lastCatchClick = 0
@@ -1118,7 +1104,7 @@ local function finishCurrentOre(reason)
 		and currentOre
 		and currentOre.Parent
 		and phase == "waiting_collect"
-		and not catchClicked then
+		and not catchConfirmed then
 		log("blocked finish before catch", reason or "unknown")
 		return
 	end
@@ -1141,9 +1127,37 @@ local function finishCurrentOre(reason)
 end
 
 local function markCollected(reason)
-	if currentOre and catchClicked and (phase == "circles" or phase == "waiting_collect") then
+	if currentOre and catchConfirmed and (phase == "circles" or phase == "waiting_collect") then
 		finishCurrentOre(reason)
 	end
+end
+
+local function confirmCatch(reason)
+	if not currentOre or not currentOre.Parent then
+		return
+	end
+
+	catchConfirmed = true
+	catchConfirmedAt = tick()
+	catchClicked = true
+	catchClickedAt = catchConfirmedAt
+
+	log("catch confirmed", reason or "unknown")
+	finishCurrentOre(reason or "catch_confirmed")
+end
+
+local function hasVisibleCatchButton()
+	if findExactScannerCatchButton() then
+		return true
+	end
+
+	for _, candidate in ipairs(collectCatchCandidates(false)) do
+		if candidate.button and candidate.button.Parent and isCatchButtonText(candidate.button) then
+			return true
+		end
+	end
+
+	return false
 end
 
 local function beginWaitingCollect(reason)
@@ -1164,7 +1178,7 @@ local function beginWaitingCollect(reason)
 
 			clickCatchButton()
 
-			if catchClicked then
+			if catchClickAttempted then
 				task.wait(0.18)
 			else
 				task.wait(0.06)
@@ -1191,7 +1205,7 @@ local function beginWaitingCollect(reason)
 	end)
 
 	task.delay(9.5, function()
-		if currentOre and waitingCollected and catchClicked and not Miner.RequireCatchBeforeNextOre then
+		if currentOre and waitingCollected and catchConfirmed and not Miner.RequireCatchBeforeNextOre then
 			finishCurrentOre("catch_or_remote_timeout")
 		end
 	end)
@@ -1306,11 +1320,23 @@ Remote.OnClientEvent:Connect(function(action, data)
 
 			log("MiningMinigame", data and data.Color, data and data.ShardName, "clicks", expectedClicks or "?")
 		end
-	elseif action == "OresChanged" or action == "MiningDataChanged" then
-		if catchClicked and currentOre and (phase == "waiting_collect" or phase == "circles") then
+	elseif action == "OresChanged" then
+		if catchClickAttempted and currentOre and (phase == "waiting_collect" or phase == "circles") then
+			task.delay(0.35, function()
+				if currentOre and catchClickAttempted then
+					if hasVisibleCatchButton() then
+						log("catch still visible after OresChanged")
+					else
+						confirmCatch(action .. "_after_catch")
+					end
+				end
+			end)
+		end
+	elseif action == "MiningDataChanged" then
+		if catchConfirmed and currentOre and (phase == "waiting_collect" or phase == "circles") then
 			task.delay(0.2, function()
-				if currentOre and catchClicked then
-					finishCurrentOre(action .. "_after_catch")
+				if currentOre and catchConfirmed then
+					finishCurrentOre(action .. "_after_confirmed_catch")
 				end
 			end)
 		end
@@ -1335,16 +1361,16 @@ task.spawn(function()
 			elseif phase == "waiting_collect" then
 				clickCatchButton()
 
-				if Miner.RemoteFinishFallback and catchClicked and tick() - lastRemoteFinishAt > 0.65 then
+				if Miner.RemoteFinishFallback and catchConfirmed and tick() - lastRemoteFinishAt > 0.65 then
 					completeCurrentOreAfterCircles("waiting_collect")
 				end
 
-				if catchClicked and tick() - catchClickedAt > 5 and not Miner.RequireCatchBeforeNextOre then
+				if catchConfirmed and tick() - catchConfirmedAt > 5 and not Miner.RequireCatchBeforeNextOre then
 					finishCurrentOre("catch_or_remote_wait_timeout")
 				elseif finishRemoteSent and tick() - lastRemoteFinishAt > 10 and not Miner.RequireCatchBeforeNextOre then
 					finishCurrentOre("remote_finish_no_catch_button")
 				elseif tick() - circleStartedAt > Miner.CircleTimeout + 10 then
-					if catchClicked and not Miner.RequireCatchBeforeNextOre then
+					if catchConfirmed and not Miner.RequireCatchBeforeNextOre then
 						finishCurrentOre("collect_timeout")
 					else
 						log("still waiting catch/collect")
