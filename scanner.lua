@@ -879,8 +879,6 @@ local function fireGunAtPosition(hitPos)
     local hitCF = CFrame.new(hitPos)
     if not shotCF then return false end
     _shootCd = true
-    local camCF = safeLookAt(cam.CFrame.Position, hitPos)
-    if camCF then cam.CFrame = camCF end
     local ok = false
     if remote then
         ok = pcall(function() remote:FireServer(shotCF, hitCF) end)
@@ -934,22 +932,64 @@ end
 task.defer(installHook)
 
 
-local function knifeAt(targetChar)
+local function getKnifeStabRemote(knifeTool)
+    if not knifeTool then return nil end
+    local events = knifeTool:FindFirstChild("Events")
+    local r = events and events:FindFirstChild("KnifeStabbed")
+    if r and r:IsA("RemoteEvent") then return r end
+    for _, d in ipairs(knifeTool:GetDescendants()) do
+        if d.Name == "KnifeStabbed" and d:IsA("RemoteEvent") then return d end
+    end
+end
+
+local function ensureKnifeEquipped()
+    local knife = getKnifeTool()
+    local chr = player.Character
+    if knife and chr and chr:FindFirstChild(knife.Name) then return knife end
+    if knife then equipTool(knife); task.wait(0.05); return getKnifeTool() end
+    local bp = player:FindFirstChild("Backpack")
+    if bp then
+        for name in pairs(KNIFE_NAMES) do
+            local t = bp:FindFirstChild(name)
+            if t then equipTool(t); task.wait(0.05); return getKnifeTool() end
+        end
+    end
+end
+
+local function swingKnifeOnce(knife)
+    if not knife then return false end
+    local ok = false
+    pcall(function() knife:Activate(); ok = true end)
+    local r = getKnifeStabRemote(knife)
+    if r then pcall(function() r:FireServer(); ok = true end) end
+    return ok
+end
+
+local function knifeAt(targetChar, blinkAssist)
     if not targetChar then return false end
     local hrp  = myHRP(); if not hrp then return false end
     local tHRP = targetChar:FindFirstChild("HumanoidRootPart") or targetChar:FindFirstChild("Head")
     if not tHRP then return false end
-    local knife = getKnifeTool()
-    if not knife then
-        local bp = player:FindFirstChild("Backpack"); if bp then
-            for name in pairs(KNIFE_NAMES) do
-                local t = bp:FindFirstChild(name); if t then equipTool(t); knife = getKnifeTool(); break end
-            end
-        end
-    end
+    local knife = ensureKnifeEquipped()
     if not knife then return false end
-    hrp.CFrame = CFrame.lookAt(hrp.Position, tHRP.Position); task.wait(0.03)
-    pcall(function() knife:Activate() end); return true
+    local oldCF = hrp.CFrame
+    local dist = (hrp.Position - tHRP.Position).Magnitude
+    if blinkAssist and dist > 5.5 then
+        local dir = hrp.Position - tHRP.Position
+        if dir.Magnitude < 0.1 then dir = -tHRP.CFrame.LookVector else dir = dir.Unit end
+        hrp.CFrame = CFrame.lookAt(tHRP.Position + dir * 3.2, tHRP.Position)
+        task.wait(0.05)
+    else
+        hrp.CFrame = CFrame.lookAt(hrp.Position, tHRP.Position)
+        task.wait(0.02)
+    end
+    local ok = swingKnifeOnce(knife)
+    if blinkAssist and dist > 5.5 then
+        task.wait(0.08)
+        local cur = myHRP()
+        if cur then cur.CFrame = oldCF end
+    end
+    return ok
 end
 
 
@@ -958,50 +998,40 @@ local hitboxSize    = 12
 local hitboxVisible = false
 local hitboxCache   = {}
 
-local _myPartsCache      = nil
-local _myPartsCacheTime  = -1
-local function getMyParts()
-    if _myPartsCache and (tick() - _myPartsCacheTime) < 0.1 then return _myPartsCache end
-    local chr = player.Character
-    if not chr then _myPartsCache = {}; _myPartsCacheTime = tick(); return {} end
-    local parts = {}
-    for _, p in ipairs(chr:GetDescendants()) do if p:IsA("BasePart") then table.insert(parts, p) end end
-    _myPartsCache = parts; _myPartsCacheTime = tick()
-    return parts
+local function getHitboxRoot(chr)
+    if not chr then return nil end
+    return chr:FindFirstChild("HumanoidRootPart") or chr:FindFirstChild("Torso") or chr:FindFirstChild("UpperTorso")
 end
-player.CharacterAdded:Connect(function() _myPartsCache = nil end)
 
 local function applyHitboxToChar(p)
     if not p or p == player then return end
     local chr = p.Character; if not chr then return end
     if hitboxCache[p] then return end
-    local myParts = getMyParts(); local saved = {}
-    for _, part in ipairs(chr:GetDescendants()) do
-        if not part:IsA("BasePart") then continue end
-        if part.Parent:IsA("Accessory") or part.Parent:IsA("Tool") then continue end
-        local os = part.Size; local ot = part.Transparency
-        local maxD = math.max(os.X, os.Y, os.Z, 0.1); local sc = hitboxSize / maxD; local cons = {}
-        if sc > 1 then pcall(function() part.Size = os * sc end) end
-        if hitboxVisible then pcall(function() part.Transparency = 0.5 end) end
-        for _, mp in ipairs(myParts) do pcall(function()
-            local nc = Instance.new("NoCollisionConstraint")
-            nc.Part0 = part; nc.Part1 = mp; nc.Parent = part; table.insert(cons, nc)
-        end) end
-        table.insert(saved, {part=part, size=os, transp=ot, constraints=cons})
-    end
-    hitboxCache[p] = saved
+    local root = getHitboxRoot(chr); if not root then return end
+    local hb = Instance.new("Part")
+    hb.Name = "RefInvisibleHitbox"
+    hb.Size = Vector3.new(hitboxSize, hitboxSize, hitboxSize)
+    hb.CFrame = root.CFrame
+    hb.Transparency = hitboxVisible and 0.55 or 1
+    hb.Color = Color3.fromRGB(220, 70, 90)
+    hb.Material = Enum.Material.ForceField
+    hb.CanCollide = false
+    hb.CanQuery = false
+    hb.CanTouch = true
+    hb.Massless = true
+    hb.Anchored = false
+    hb.Parent = chr
+    local weld = Instance.new("WeldConstraint")
+    weld.Part0 = hb
+    weld.Part1 = root
+    weld.Parent = hb
+    hitboxCache[p] = {hitbox=hb,weld=weld,root=root}
 end
 
 local function restoreHitbox(p)
-    local saved = hitboxCache[p]; if not saved then return end
-    for _, d in ipairs(saved) do
-        if d.part and d.part.Parent then
-            pcall(function() d.part.Size = d.size; d.part.Transparency = d.transp end)
-        end
-        for _, nc in ipairs(d.constraints) do
-            pcall(function() if nc and nc.Parent then nc:Destroy() end end)
-        end
-    end
+    local d = hitboxCache[p]
+    if not d then return end
+    pcall(function() if d.hitbox and d.hitbox.Parent then d.hitbox:Destroy() end end)
     hitboxCache[p] = nil
 end
 
@@ -1012,29 +1042,40 @@ local function restoreAllHitboxes()
     hitboxCache = {}
 end
 
+local function rebuildHitboxes()
+    if not hitboxOn then return end
+    restoreAllHitboxes()
+    for _, p in ipairs(Players:GetPlayers()) do applyHitboxToChar(p) end
+end
+
 local function applyHBVis(v)
-    for _, saved in pairs(hitboxCache) do
-        for _, d in ipairs(saved) do
-            if d.part and d.part.Parent then
-                pcall(function() d.part.Transparency = v and 0.5 or d.transp end)
-            end
+    for _, d in pairs(hitboxCache) do
+        if d.hitbox and d.hitbox.Parent then
+            pcall(function() d.hitbox.Transparency = v and 0.55 or 1 end)
         end
     end
 end
 
 player.CharacterAdded:Connect(function()
-    if not hitboxOn then return end; task.wait(1)
-    for p in pairs(hitboxCache) do hitboxCache[p] = nil end
-    for _, p in ipairs(Players:GetPlayers()) do applyHitboxToChar(p) end
+    if not hitboxOn then return end
+    task.wait(1)
+    rebuildHitboxes()
 end)
-Players.PlayerRemoving:Connect(function(p) hitboxCache[p] = nil end)
-Players.PlayerAdded:Connect(function(p) p.CharacterAdded:Connect(function()
-    hitboxCache[p] = nil; if hitboxOn then task.wait(1); applyHitboxToChar(p) end
-end) end)
-for _, p in ipairs(Players:GetPlayers()) do if p ~= player then p.CharacterAdded:Connect(function()
-    hitboxCache[p] = nil; if hitboxOn then task.wait(1); applyHitboxToChar(p) end
-end) end end
-
+Players.PlayerRemoving:Connect(function(p) restoreHitbox(p) end)
+Players.PlayerAdded:Connect(function(p)
+    p.CharacterAdded:Connect(function()
+        restoreHitbox(p)
+        if hitboxOn then task.wait(1); applyHitboxToChar(p) end
+    end)
+end)
+for _, p in ipairs(Players:GetPlayers()) do
+    if p ~= player then
+        p.CharacterAdded:Connect(function()
+            restoreHitbox(p)
+            if hitboxOn then task.wait(1); applyHitboxToChar(p) end
+        end)
+    end
+end
 
 local espOn  = false
 local espMax = 300
@@ -1525,9 +1566,9 @@ secSheriff:Button("DUMP gun (equipa e atira 1x)", function()
 end)
 
 secSheriff:Divider("silent aim")
-local t_sa = secSheriff:Toggle("silent aim (trava mira no murder)", false, function(v)
+local t_sa = secSheriff:Toggle("silent aim (sem mover camera)", false, function(v)
     silentAimOn=v
-    ui:Toast("","[Silent Aim]", v and "ativo — clique pra atirar" or "desativado", v and ROLE_COLOR.sheriff or ROLE_COLOR.unknown)
+    ui:Toast("","[Silent Aim]", v and "ativo — sem travar camera" or "desativado", v and ROLE_COLOR.sheriff or ROLE_COLOR.unknown)
 end)
 ui:CfgRegister("mm2_silentaim", function() return silentAimOn end, function(v) t_sa.Set(v) end)
 local s_pred = secSheriff:Slider("prediction (x0.01s)", 0, 40, 17, function(v) SA_PRED=v/100 end)
@@ -1538,16 +1579,16 @@ local t_hb = secSheriff:Toggle("hitbox expander", false, function(v)
     hitboxOn=v
     if v then
         for _, p in ipairs(Players:GetPlayers()) do applyHitboxToChar(p) end
-        ui:Toast("","[Hitbox]","ativo — "..hitboxSize.."x",ROLE_COLOR.sheriff)
+        ui:Toast("","[Hitbox]","ativo invisivel — "..hitboxSize.." studs",ROLE_COLOR.sheriff)
     else restoreAllHitboxes(); ui:Toast("","[Hitbox]","desativado",ROLE_COLOR.unknown) end
 end)
 ui:CfgRegister("mm2_hitbox", function() return hitboxOn end, function(v) t_hb.Set(v) end)
-local s_hbsize = secSheriff:Slider("tamanho hitbox (studs)", 4, 40, 12, function(v) hitboxSize=v end)
+local s_hbsize = secSheriff:Slider("tamanho hitbox (studs)", 4, 40, 12, function(v) hitboxSize=v; rebuildHitboxes() end)
 ui:CfgRegister("mm2_hitboxsize", function() return hitboxSize end, function(v) s_hbsize.Set(v) end)
 local t_hbvis = secSheriff:Toggle("mostrar hitbox (debug)", false, function(v) hitboxVisible=v; applyHBVis(v) end)
 ui:CfgRegister("mm2_hitboxvis", function() return hitboxVisible end, function(v) t_hbvis.Set(v) end)
 
-secSheriff:Divider("shoot button (usa silent aim)")
+secSheriff:Divider("shoot button (silent aim)")
 local shootBtnGui=nil; local shootBtnOn=false
 local function destroyShootBtn()
     if shootBtnGui and shootBtnGui.Parent then pcall(function() shootBtnGui:Destroy() end) end; shootBtnGui=nil
@@ -1577,8 +1618,6 @@ local function buildShootBtn()
         local target=getSilentTarget()
         if not target then set("SEM ALVO",T.warn); task.delay(1.2,function() set("ATIRAR",ROLE_COLOR.sheriff) end); return end
         busy=true; set("...",Color3.fromRGB(80,80,80))
-        local hitPos=getPredictedPos(target)
-        if hitPos then cam.CFrame=CFrame.lookAt(cam.CFrame.Position,hitPos) end
         local ok=fireWithSilentAim()
         task.wait(0.15); set(ok and "FIRED!" or "MISS", ok and T.ok or T.err)
         task.wait(0.8); set("ATIRAR",ROLE_COLOR.sheriff); busy=false
@@ -1665,16 +1704,10 @@ end)
 
 local secMurd=tabCombat:Section("murderer")
 secMurd:Divider("knife aura (auto swing)")
-local knifeAura=false; local knifeRange=12; local knifeCd=0.35; local _kConn=nil
+local knifeAura=false; local knifeRange=12; local knifeCd=0.35; local knifeBlinkAssist=true; local _kConn=nil
 
 local function equipKnifeForAura()
-    local chr=player.Character; if not chr then return end
-    local hum=chr:FindFirstChildOfClass("Humanoid"); if not hum then return end
-    local bp=player:FindFirstChild("Backpack"); if not bp then return end
-    for name in pairs(KNIFE_NAMES) do
-        local t=bp:FindFirstChild(name)
-        if t then pcall(function() hum:EquipTool(t) end); task.wait(0.15); return end
-    end
+    return ensureKnifeEquipped()
 end
 
 local function knifeAuraLoop()
@@ -1701,9 +1734,8 @@ local function knifeAuraLoop()
             local d=(hp-ph.Position).Magnitude; if d<bestD then best=ph; bestD=d end
         end
         if best then
-            local lCF=CFrame.lookAt(hp,best.Position)
-            if math.abs(hrp.CFrame.LookVector:Dot(lCF.LookVector)-1)>0.01 then hrp.CFrame=lCF end
-            pcall(function() knife:Activate() end)
+            local targetChar = best.Parent
+            if targetChar then knifeAt(targetChar, knifeBlinkAssist) end
         end
     end)
 end
@@ -1716,10 +1748,12 @@ end)
 ui:CfgRegister("mm2_knifeaura", function() return knifeAura end, function(v) t_ka.Set(v) end)
 local s_kr=secMurd:Slider("range aura (studs)", 4, 60, 12, function(v) knifeRange=v end)
 ui:CfgRegister("mm2_kniferange", function() return knifeRange end, function(v) s_kr.Set(v) end)
+local t_kblink=secMurd:Toggle("aura tp assist", true, function(v) knifeBlinkAssist=v end)
+ui:CfgRegister("mm2_knifeblink", function() return knifeBlinkAssist end, function(v) t_kblink.Set(v) end)
 secMurd:Button("matar sheriff (1x)", function()
     if getRole()~="murderer" then ui:Toast("","[Knife]","voce nao e murderer",ROLE_COLOR.unknown); return end
     local s=findByRole("sheriff"); if not s then ui:Toast("","[Knife]","sheriff nao detectado",ROLE_COLOR.unknown); return end
-    knifeAt(s.Character); ui:Toast("","[Knife]","-> "..s.DisplayName,ROLE_COLOR.murderer)
+    knifeAt(s.Character, true); ui:Toast("","[Knife]","-> "..s.DisplayName,ROLE_COLOR.murderer)
 end)
 secMurd:Button("matar mais proximo", function()
     if getRole()~="murderer" then ui:Toast("","[Knife]","voce nao e murderer",ROLE_COLOR.unknown); return end
@@ -1729,7 +1763,7 @@ secMurd:Button("matar mais proximo", function()
         if ph and isAlive(p) then local d=(hrp.Position-ph.Position).Magnitude; if d<bestD then best=p; bestD=d end end
     end end
     if not best then ui:Toast("","[Knife]","nenhum alvo",ROLE_COLOR.unknown); return end
-    knifeAt(best.Character); ui:Toast("","[Knife]","-> "..best.DisplayName,ROLE_COLOR.murderer)
+    knifeAt(best.Character, true); ui:Toast("","[Knife]","-> "..best.DisplayName,ROLE_COLOR.murderer)
 end)
 secMurd:Button("tp para sheriff", function()
     local s=findByRole("sheriff"); if not s then ui:Toast("","tp","sheriff nao detectado",ROLE_COLOR.unknown); return end
