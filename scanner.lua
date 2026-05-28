@@ -1,8 +1,3 @@
--- ══════════════════════════════════════════════════════════════════════════════
--- REFLIB SUBSTITUTA (temporária — embutida sem HttpGet)
--- Implementa a mesma interface da RefLib original
--- ══════════════════════════════════════════════════════════════════════════════
-
 local RefLib = {}
 RefLib.__index = RefLib
 
@@ -12,7 +7,6 @@ local UserInputService = game:GetService("UserInputService")
 local lp               = Players.LocalPlayer
 local pg               = lp:WaitForChild("PlayerGui")
 
--- ── Cores base ──────────────────────────────────────────────────────────────
 local C = {
     bg      = Color3.fromRGB(18, 14, 30),
     panel   = Color3.fromRGB(28, 22, 45),
@@ -46,7 +40,6 @@ local function mkLabel(parent, text, size, color, bold, xa)
     return l
 end
 
--- ── Toast ────────────────────────────────────────────────────────────────────
 local toastGui
 local function ensureToastGui()
     if toastGui and toastGui.Parent then return end
@@ -104,7 +97,6 @@ local function showNextToast()
     msg.TextXAlignment = Enum.TextXAlignment.Left
     msg.Parent = card
 
-    -- Slide in
     TweenService:Create(card, TweenInfo.new(0.25, Enum.EasingStyle.Quart, Enum.EasingDirection.Out),
         {Position = UDim2.new(1, -290, 1, -80)}):Play()
 
@@ -118,12 +110,8 @@ local function showNextToast()
     end)
 end
 
--- ── Config store (simples, só em memória) ───────────────────────────────────
 local cfgStore = {}
 
--- ══════════════════════════════════════════════════════════════════════════════
--- RefLib.new — cria a UI principal
--- ══════════════════════════════════════════════════════════════════════════════
 function RefLib.new(title, icon, key)
     local self = setmetatable({}, RefLib)
     self._key     = key
@@ -132,7 +120,6 @@ function RefLib.new(title, icon, key)
     self._tabBtns = {}
     self._curTab  = nil
 
-    -- ScreenGui principal
     local sg = Instance.new("ScreenGui")
     sg.Name = "RefLib_"..key
     sg.ResetOnSpawn = false
@@ -142,7 +129,6 @@ function RefLib.new(title, icon, key)
     sg.Parent = pg
     self._sg = sg
 
-    -- Janela
     local win = Instance.new("Frame")
     win.Name = "Window"
     win.Size = UDim2.new(0, 340, 0, 480)
@@ -155,13 +141,11 @@ function RefLib.new(title, icon, key)
     mkCorner(win, 10)
     self._win = win
 
-    -- Stroke
     local stroke = Instance.new("UIStroke")
     stroke.Color = C.div
     stroke.Thickness = 1
     stroke.Parent = win
 
-    -- Header
     local header = Instance.new("Frame")
     header.Size = UDim2.new(1, 0, 0, 36)
     header.BackgroundColor3 = C.panel
@@ -169,7 +153,6 @@ function RefLib.new(title, icon, key)
     header.Parent = win
     mkCorner(header, 10)
 
-    -- Cobre só a metade inferior do header para não arredondar em baixo
     local headerFill = Instance.new("Frame")
     headerFill.Size = UDim2.new(1,0,0,10)
     headerFill.Position = UDim2.new(0,0,1,-10)
@@ -181,7 +164,6 @@ function RefLib.new(title, icon, key)
     titleLbl.Position = UDim2.new(0,0,0,0)
     titleLbl.TextSize = 13
 
-    -- Botão fechar
     local closeBtn = Instance.new("TextButton")
     closeBtn.Size = UDim2.new(0,28,0,28)
     closeBtn.Position = UDim2.new(1,-32,0,4)
@@ -197,7 +179,6 @@ function RefLib.new(title, icon, key)
         win.Visible = not win.Visible
     end)
 
-    -- Barra de tabs
     local tabBar = Instance.new("Frame")
     tabBar.Size = UDim2.new(1,-8,0,28)
     tabBar.Position = UDim2.new(0,4,0,38)
@@ -206,7 +187,6 @@ function RefLib.new(title, icon, key)
     self._tabBar = tabBar
     mkList(tabBar, 4, Enum.FillDirection.Horizontal)
 
-    -- Container de conteúdo (scroll)
     local scroll = Instance.new("ScrollingFrame")
     scroll.Size = UDim2.new(1,-8,1,-76)
     scroll.Position = UDim2.new(0,4,0,70)
@@ -224,7 +204,6 @@ function RefLib.new(title, icon, key)
     return self
 end
 
--- ── Tab ──────────────────────────────────────────────────────────────────────
 function RefLib:Tab(name)
     local tabFrame = Instance.new("Frame")
     tabFrame.Size = UDim2.new(1,0,0,0)
@@ -234,7 +213,6 @@ function RefLib:Tab(name)
     tabFrame.Parent = self._scroll
     mkList(tabFrame, 6)
 
-    -- Botão na tabBar
     local btn = Instance.new("TextButton")
     btn.Size = UDim2.new(0, 60, 1, 0)
     btn.BackgroundColor3 = C.tab
@@ -249,7 +227,6 @@ function RefLib:Tab(name)
     local tabObj = {_frame=tabFrame, _btn=btn, _ui=self}
 
     local function selectTab()
-        -- Esconde todos
         for _, t in ipairs(self._tabs) do
             t._frame.Visible = false
             t._btn.BackgroundColor3 = C.tab
@@ -264,7 +241,6 @@ function RefLib:Tab(name)
     btn.MouseButton1Click:Connect(selectTab)
     table.insert(self._tabs, tabObj)
 
-    -- Seleciona a primeira tab automaticamente
     if #self._tabs == 1 then
         tabFrame.Visible = true
         btn.BackgroundColor3 = C.tabSel
@@ -272,13 +248,11 @@ function RefLib:Tab(name)
         self._curTab = tabObj
     end
 
-    -- Ajusta tamanho dos botões dinamicamente
     local count = #self._tabs
     for _, t in ipairs(self._tabs) do
         t._btn.Size = UDim2.new(1/count, -4, 1, 0)
     end
 
-    -- Métodos da tab
     function tabObj:Section(sname)
         local sec = Instance.new("Frame")
         sec.Size = UDim2.new(1,0,0,0)
@@ -296,7 +270,6 @@ function RefLib:Tab(name)
         inner.Parent = sec
         local lay = mkList(inner, 4)
 
-        -- Título da section
         local stitle = mkLabel(inner, sname:upper(), UDim2.new(1,0,0,14), C.sub, true)
         stitle.TextSize = 10
         stitle.LayoutOrder = 0
@@ -304,7 +277,6 @@ function RefLib:Tab(name)
         local order = 1
         local secObj = {}
 
-        -- ── Button ──────────────────────────────────────────────────────────
         function secObj:Button(label, cb)
             order = order + 1
             local btn2 = Instance.new("TextButton")
@@ -323,7 +295,6 @@ function RefLib:Tab(name)
             btn2.MouseLeave:Connect(function() btn2.BackgroundColor3 = C.btn end)
         end
 
-        -- ── Toggle ──────────────────────────────────────────────────────────
         function secObj:Toggle(label, default, cb)
             order = order + 1
             local state = default or false
@@ -372,7 +343,6 @@ function RefLib:Tab(name)
             return { Set = function(v) setState(v) end }
         end
 
-        -- ── Slider ──────────────────────────────────────────────────────────
         function secObj:Slider(label, min, max, default, cb)
             order = order + 1
             local val = default or min
@@ -425,34 +395,36 @@ function RefLib:Tab(name)
                 setVal(min + rel * (max - min))
             end
 
-            clickBtn.MouseButton1Down:Connect(function(x,y)
+            local activeInput = nil
+
+            local function isSliderInput(input)
+                return input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch
+            end
+
+            clickBtn.InputBegan:Connect(function(input)
+                if not isSliderInput(input) then return end
                 dragging = true
-                calcFromInput({Position=Vector2.new(x,y)})
+                activeInput = input
+                calcFromInput(input)
             end)
+
             UserInputService.InputChanged:Connect(function(input)
-                if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+                if not dragging then return end
+                if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
                     calcFromInput(input)
                 end
             end)
-            UserInputService.InputEnded:Connect(function(input)
-                if input.UserInputType == Enum.UserInputType.MouseButton1 then
-                    dragging = false
-                end
-            end)
 
-            -- Touch support
-            clickBtn.TouchLongPress:Connect(function() dragging = true end)
-            clickBtn.TouchPan:Connect(function(_, positions)
-                if #positions > 0 then
-                    calcFromInput({Position=positions[1]})
-                end
+            UserInputService.InputEnded:Connect(function(input)
+                if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then return end
+                if activeInput and input ~= activeInput and input.UserInputType ~= activeInput.UserInputType then return end
+                dragging = false
+                activeInput = nil
             end)
-            clickBtn.TouchEnded:Connect(function() dragging = false end)
 
             return { Set = function(v) setVal(v) end }
         end
 
-        -- ── Divider ─────────────────────────────────────────────────────────
         function secObj:Divider(label)
             order = order + 1
             local row2 = Instance.new("Frame")
@@ -486,25 +458,22 @@ function RefLib:Tab(name)
     return tabObj
 end
 
--- ── Toast ─────────────────────────────────────────────────────────────────────
 function RefLib:Toast(icon, title, msg, color)
     table.insert(toastQueue, {icon=icon, title=title, msg=msg, color=color})
     showNextToast()
 end
 
--- ── CfgRegister (guarda getter/setter em memória) ────────────────────────────
 function RefLib:CfgRegister(key, getter, setter)
     self._cfg[key] = {get=getter, set=setter}
 end
 
--- ── BuildConfigTab (botão salvar/carregar simples) ───────────────────────────
 function RefLib:BuildConfigTab(tab, key)
     local sec = tab:Section("config (memória)")
     sec:Button("salvar config", function()
         for k, c in pairs(self._cfg) do
             cfgStore[k] = c.get()
         end
-        self:Toast("", "Config", "salvo ("..tostring(#(function() local n=0; for _ in pairs(self._cfg) do n=n+1 end; return n end)()).." chaves)", Color3.fromRGB(80,200,120))
+        self:Toast("", "Config", "salvo ("..tostring((function() local n=0; for _ in pairs(self._cfg) do n=n+1 end; return n end)()).." chaves)", Color3.fromRGB(80,200,120))
     end)
     sec:Button("carregar config", function()
         for k, v in pairs(cfgStore) do
@@ -518,9 +487,6 @@ function RefLib:BuildConfigTab(tab, key)
     end)
 end
 
--- ══════════════════════════════════════════════════════════════════════════════
--- FIM DA REFLIB SUBSTITUTA
--- ══════════════════════════════════════════════════════════════════════════════
 
 if not RefLib then error("[mm2] ERRO: RefLib nao carregou.") end
 
@@ -536,9 +502,6 @@ local cam    = workspace.CurrentCamera
 
 local ui = RefLib.new("mm v20", "rbxassetid://131165537896572", "ref_mmv20")
 
--- ══════════════════════════════════════════════════════════════════════════════
--- REMOTES
--- ══════════════════════════════════════════════════════════════════════════════
 
 local GetCoinEvent
 pcall(function() GetCoinEvent = ReplicatedStorage.Remotes.Gameplay.GetCoin end)
@@ -554,9 +517,6 @@ end)
 local RoleSelectEvent
 pcall(function() RoleSelectEvent = ReplicatedStorage.Remotes.Gameplay.RoleSelect end)
 
--- ══════════════════════════════════════════════════════════════════════════════
--- CONSTANTES
--- ══════════════════════════════════════════════════════════════════════════════
 
 local KNIFE_NAMES   = { Knife = true }
 local GUN_NAMES     = { Gun = true, ["Sheriff's Gun"] = true, Revolver = true, SheriffGun = true, GunDrop = true }
@@ -573,9 +533,6 @@ local ROLE_LABEL = {
     murderer="Murderer", sheriff="Sheriff", hero="Hero", innocent="Innocent", unknown="?"
 }
 
--- ══════════════════════════════════════════════════════════════════════════════
--- CACHE
--- ══════════════════════════════════════════════════════════════════════════════
 
 local playerDataCache = {}
 local roleCache       = {}
@@ -712,9 +669,6 @@ task.defer(function()
     end
 end)
 
--- ══════════════════════════════════════════════════════════════════════════════
--- HELPERS
--- ══════════════════════════════════════════════════════════════════════════════
 
 local function isAlive(p)
     local d = playerDataCache[p.Name]; if d then return d.Dead ~= true end
@@ -785,9 +739,6 @@ local function isRoundActive()
     return r and #r:GetChildren() > 0
 end
 
--- ══════════════════════════════════════════════════════════════════════════════
--- TOOL HELPERS
--- ══════════════════════════════════════════════════════════════════════════════
 
 local function getGunTool()
     local bp, chr = player:FindFirstChild("Backpack"), player.Character
@@ -812,9 +763,6 @@ local function equipTool(tool)
     return chr:FindFirstChild(tool.Name) ~= nil
 end
 
--- ══════════════════════════════════════════════════════════════════════════════
--- SILENT AIM
--- ══════════════════════════════════════════════════════════════════════════════
 
 local silentAimOn = false
 local SA_PRED     = 0.165
@@ -884,9 +832,6 @@ local function fireWithSilentAim()
     return true
 end
 
--- ══════════════════════════════════════════════════════════════════════════════
--- DUMP
--- ══════════════════════════════════════════════════════════════════════════════
 
 local dumpActive   = false
 local dumpCallback = nil
@@ -922,9 +867,6 @@ local function installHook()
 end
 task.defer(installHook)
 
--- ══════════════════════════════════════════════════════════════════════════════
--- KNIFE
--- ══════════════════════════════════════════════════════════════════════════════
 
 local function knifeAt(targetChar)
     if not targetChar then return false end
@@ -944,9 +886,6 @@ local function knifeAt(targetChar)
     pcall(function() knife:Activate() end); return true
 end
 
--- ══════════════════════════════════════════════════════════════════════════════
--- HITBOX EXPANDER
--- ══════════════════════════════════════════════════════════════════════════════
 
 local hitboxOn      = false
 local hitboxSize    = 12
@@ -1030,9 +969,6 @@ for _, p in ipairs(Players:GetPlayers()) do if p ~= player then p.CharacterAdded
     hitboxCache[p] = nil; if hitboxOn then task.wait(1); applyHitboxToChar(p) end
 end) end end
 
--- ══════════════════════════════════════════════════════════════════════════════
--- SKELETON ESP
--- ══════════════════════════════════════════════════════════════════════════════
 
 local espOn  = false
 local espMax = 300
@@ -1141,9 +1077,6 @@ RunService.RenderStepped:Connect(function()
     end
 end)
 
--- ══════════════════════════════════════════════════════════════════════════════
--- FINDERS
--- ══════════════════════════════════════════════════════════════════════════════
 
 local function findDroppedGuns()
     local found = {}
@@ -1166,9 +1099,6 @@ local function findAllCoinServers()
     return coins
 end
 
--- ══════════════════════════════════════════════════════════════════════════════
--- COIN FARM
--- ══════════════════════════════════════════════════════════════════════════════
 
 local FARM_FLY_SPEED   = 16
 local farmPauseBetween = 0.8
@@ -1211,9 +1141,6 @@ local function collectCoin(c)
     task.wait(farmPauseBetween)
 end
 
--- ══════════════════════════════════════════════════════════════════════════════
--- TEMA
--- ══════════════════════════════════════════════════════════════════════════════
 
 local T = {
     panel = Color3.fromRGB(36, 26, 56),
@@ -1223,9 +1150,6 @@ local T = {
     warn  = Color3.fromRGB(195, 160, 38),
 }
 
--- ══════════════════════════════════════════════════════════════════════════════
--- TABS
--- ══════════════════════════════════════════════════════════════════════════════
 
 local tabMain   = ui:Tab("main")
 local tabESP    = ui:Tab("esp")
@@ -1233,9 +1157,6 @@ local tabCombat = ui:Tab("combat")
 local tabFarm   = ui:Tab("farm")
 local tabCfg    = ui:Tab("config")
 
--- ══════════════════════════════════════════════════════════════════════════════
--- TAB: MAIN
--- ══════════════════════════════════════════════════════════════════════════════
 do
 
 local secInfo = tabMain:Section("round info")
@@ -1358,11 +1279,8 @@ local t_nc = secMove:Toggle("noclip", false, function(v)
 end)
 ui:CfgRegister("mm2_noclip", function() return noclipOn end, function(v) t_nc.Set(v) end)
 
-end -- MAIN
+end
 
--- ══════════════════════════════════════════════════════════════════════════════
--- TAB: ESP
--- ══════════════════════════════════════════════════════════════════════════════
 do
 
 local secESP = tabESP:Section("skeleton esp (wall)")
@@ -1428,11 +1346,8 @@ secItemEsp:Button("tp to gun", function()
     else ui:Toast("","tp gun","nenhuma gun dropada",ROLE_COLOR.unknown) end
 end)
 
-end -- ESP
+end
 
--- ══════════════════════════════════════════════════════════════════════════════
--- TAB: COMBAT
--- ══════════════════════════════════════════════════════════════════════════════
 do
 
 local secSheriff = tabCombat:Section("sheriff")
@@ -1705,11 +1620,8 @@ secCI:Button("quem e o murderer / sheriff", function()
         "vivos: "..alive, ROLE_COLOR.unknown)
 end)
 
-end -- COMBAT
+end
 
--- ══════════════════════════════════════════════════════════════════════════════
--- TAB: FARM
--- ══════════════════════════════════════════════════════════════════════════════
 do
 
 local secFarm=tabFarm:Section("coin farm")
@@ -1830,11 +1742,8 @@ local t_afk=secAfk:Toggle("anti-afk", false, function(v)
 end)
 ui:CfgRegister("mm2_afk", function() return afkOn end, function(v) t_afk.Set(v) end)
 
-end -- FARM
+end
 
--- ══════════════════════════════════════════════════════════════════════════════
--- CONFIG
--- ══════════════════════════════════════════════════════════════════════════════
 ui:BuildConfigTab(tabCfg, "ref_mm2v20")
 
 task.delay(0.9, function()
