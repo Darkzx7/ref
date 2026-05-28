@@ -1,4 +1,4 @@
-local RefLib = loadstring(game:HttpGet("https://raw.githubusercontent.com/Darkzx7/BigodHub/refs/heads/main/reflib.lua?token=GHSAT0AAAAAAD2MGZI764JIJYXD26Z2PCI42QYUPFA", true))()
+local RefLib = loadstring(game:HttpGet", true))()
 if not RefLib then error("[mm2] ERRO: RefLib nao carregou.") end
 
 local Players           = game:GetService("Players")
