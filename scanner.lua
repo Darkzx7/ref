@@ -1,4 +1,527 @@
-local RefLib = loadstring(game:HttpGet("https://raw.githubusercontent.com/Darkzx7/BigodHub/refs/heads/main/reflib.lua", true))()
+-- ══════════════════════════════════════════════════════════════════════════════
+-- REFLIB SUBSTITUTA (temporária — embutida sem HttpGet)
+-- Implementa a mesma interface da RefLib original
+-- ══════════════════════════════════════════════════════════════════════════════
+
+local RefLib = {}
+RefLib.__index = RefLib
+
+local Players          = game:GetService("Players")
+local TweenService     = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local lp               = Players.LocalPlayer
+local pg               = lp:WaitForChild("PlayerGui")
+
+-- ── Cores base ──────────────────────────────────────────────────────────────
+local C = {
+    bg      = Color3.fromRGB(18, 14, 30),
+    panel   = Color3.fromRGB(28, 22, 45),
+    section = Color3.fromRGB(36, 28, 58),
+    btn     = Color3.fromRGB(50, 38, 80),
+    btnHov  = Color3.fromRGB(68, 52, 108),
+    toggle  = Color3.fromRGB(40, 160, 100),
+    toggleOff = Color3.fromRGB(80, 60, 100),
+    slider  = Color3.fromRGB(80, 120, 220),
+    tab     = Color3.fromRGB(44, 34, 70),
+    tabSel  = Color3.fromRGB(80, 60, 130),
+    text    = Color3.fromRGB(220, 210, 240),
+    sub     = Color3.fromRGB(150, 135, 180),
+    div     = Color3.fromRGB(60, 48, 90),
+}
+
+local function mkCorner(p, r) local c=Instance.new("UICorner"); c.CornerRadius=UDim.new(0,r or 6); c.Parent=p end
+local function mkPad(p,t,b,l,r) local c=Instance.new("UIPadding"); c.PaddingTop=UDim.new(0,t); c.PaddingBottom=UDim.new(0,b); c.PaddingLeft=UDim.new(0,l); c.PaddingRight=UDim.new(0,r); c.Parent=p end
+local function mkList(p,pad,dir) local c=Instance.new("UIListLayout"); c.Padding=UDim.new(0,pad or 4); c.FillDirection=dir or Enum.FillDirection.Vertical; c.SortOrder=Enum.SortOrder.LayoutOrder; c.Parent=p; return c end
+local function mkLabel(parent, text, size, color, bold, xa)
+    local l = Instance.new("TextLabel")
+    l.BackgroundTransparency = 1
+    l.Size = size or UDim2.new(1,0,0,16)
+    l.Text = text
+    l.TextColor3 = color or C.text
+    l.Font = bold and Enum.Font.GothamBold or Enum.Font.Gotham
+    l.TextSize = 12
+    l.TextXAlignment = xa or Enum.TextXAlignment.Left
+    l.TextStrokeTransparency = 0.7
+    l.Parent = parent
+    return l
+end
+
+-- ── Toast ────────────────────────────────────────────────────────────────────
+local toastGui
+local function ensureToastGui()
+    if toastGui and toastGui.Parent then return end
+    toastGui = Instance.new("ScreenGui")
+    toastGui.Name = "RefLibToast"
+    toastGui.ResetOnSpawn = false
+    toastGui.DisplayOrder = 200
+    toastGui.IgnoreGuiInset = true
+    toastGui.Parent = pg
+end
+
+local toastQueue = {}
+local toastBusy  = false
+
+local function showNextToast()
+    if toastBusy or #toastQueue == 0 then return end
+    toastBusy = true
+    ensureToastGui()
+    local t = table.remove(toastQueue, 1)
+
+    local card = Instance.new("Frame")
+    card.Size = UDim2.new(0, 280, 0, 52)
+    card.Position = UDim2.new(1, 10, 1, -80)
+    card.BackgroundColor3 = C.panel
+    card.BorderSizePixel = 0
+    card.Parent = toastGui
+    mkCorner(card, 8)
+
+    local accent = Instance.new("Frame")
+    accent.Size = UDim2.new(0, 3, 1, 0)
+    accent.BackgroundColor3 = t.color or C.toggle
+    accent.BorderSizePixel = 0
+    accent.Parent = card
+    mkCorner(accent, 3)
+
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(1,-16,0,18)
+    title.Position = UDim2.new(0,12,0,6)
+    title.BackgroundTransparency = 1
+    title.Text = t.title or ""
+    title.TextColor3 = t.color or C.text
+    title.Font = Enum.Font.GothamBold
+    title.TextSize = 12
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Parent = card
+
+    local msg = Instance.new("TextLabel")
+    msg.Size = UDim2.new(1,-16,0,14)
+    msg.Position = UDim2.new(0,12,0,26)
+    msg.BackgroundTransparency = 1
+    msg.Text = t.msg or ""
+    msg.TextColor3 = C.sub
+    msg.Font = Enum.Font.Gotham
+    msg.TextSize = 11
+    msg.TextXAlignment = Enum.TextXAlignment.Left
+    msg.Parent = card
+
+    -- Slide in
+    TweenService:Create(card, TweenInfo.new(0.25, Enum.EasingStyle.Quart, Enum.EasingDirection.Out),
+        {Position = UDim2.new(1, -290, 1, -80)}):Play()
+
+    task.delay(2.2, function()
+        TweenService:Create(card, TweenInfo.new(0.2, Enum.EasingStyle.Quart, Enum.EasingDirection.In),
+            {Position = UDim2.new(1, 10, 1, -80)}):Play()
+        task.wait(0.22)
+        pcall(function() card:Destroy() end)
+        toastBusy = false
+        showNextToast()
+    end)
+end
+
+-- ── Config store (simples, só em memória) ───────────────────────────────────
+local cfgStore = {}
+
+-- ══════════════════════════════════════════════════════════════════════════════
+-- RefLib.new — cria a UI principal
+-- ══════════════════════════════════════════════════════════════════════════════
+function RefLib.new(title, icon, key)
+    local self = setmetatable({}, RefLib)
+    self._key     = key
+    self._tabs    = {}
+    self._cfg     = {}
+    self._tabBtns = {}
+    self._curTab  = nil
+
+    -- ScreenGui principal
+    local sg = Instance.new("ScreenGui")
+    sg.Name = "RefLib_"..key
+    sg.ResetOnSpawn = false
+    sg.DisplayOrder = 100
+    sg.IgnoreGuiInset = true
+    sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    sg.Parent = pg
+    self._sg = sg
+
+    -- Janela
+    local win = Instance.new("Frame")
+    win.Name = "Window"
+    win.Size = UDim2.new(0, 340, 0, 480)
+    win.Position = UDim2.new(0.5, -170, 0.5, -240)
+    win.BackgroundColor3 = C.bg
+    win.BorderSizePixel = 0
+    win.Active = true
+    win.Draggable = true
+    win.Parent = sg
+    mkCorner(win, 10)
+    self._win = win
+
+    -- Stroke
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = C.div
+    stroke.Thickness = 1
+    stroke.Parent = win
+
+    -- Header
+    local header = Instance.new("Frame")
+    header.Size = UDim2.new(1, 0, 0, 36)
+    header.BackgroundColor3 = C.panel
+    header.BorderSizePixel = 0
+    header.Parent = win
+    mkCorner(header, 10)
+
+    -- Cobre só a metade inferior do header para não arredondar em baixo
+    local headerFill = Instance.new("Frame")
+    headerFill.Size = UDim2.new(1,0,0,10)
+    headerFill.Position = UDim2.new(0,0,1,-10)
+    headerFill.BackgroundColor3 = C.panel
+    headerFill.BorderSizePixel = 0
+    headerFill.Parent = header
+
+    local titleLbl = mkLabel(header, title, UDim2.new(1,-50,1,0), C.text, true, Enum.TextXAlignment.Center)
+    titleLbl.Position = UDim2.new(0,0,0,0)
+    titleLbl.TextSize = 13
+
+    -- Botão fechar
+    local closeBtn = Instance.new("TextButton")
+    closeBtn.Size = UDim2.new(0,28,0,28)
+    closeBtn.Position = UDim2.new(1,-32,0,4)
+    closeBtn.BackgroundColor3 = Color3.fromRGB(180,60,60)
+    closeBtn.BorderSizePixel = 0
+    closeBtn.Text = "✕"
+    closeBtn.TextColor3 = Color3.new(1,1,1)
+    closeBtn.Font = Enum.Font.GothamBold
+    closeBtn.TextSize = 12
+    closeBtn.Parent = header
+    mkCorner(closeBtn, 6)
+    closeBtn.MouseButton1Click:Connect(function()
+        win.Visible = not win.Visible
+    end)
+
+    -- Barra de tabs
+    local tabBar = Instance.new("Frame")
+    tabBar.Size = UDim2.new(1,-8,0,28)
+    tabBar.Position = UDim2.new(0,4,0,38)
+    tabBar.BackgroundTransparency = 1
+    tabBar.Parent = win
+    self._tabBar = tabBar
+    mkList(tabBar, 4, Enum.FillDirection.Horizontal)
+
+    -- Container de conteúdo (scroll)
+    local scroll = Instance.new("ScrollingFrame")
+    scroll.Size = UDim2.new(1,-8,1,-76)
+    scroll.Position = UDim2.new(0,4,0,70)
+    scroll.BackgroundTransparency = 1
+    scroll.BorderSizePixel = 0
+    scroll.ScrollBarThickness = 3
+    scroll.ScrollBarImageColor3 = C.div
+    scroll.CanvasSize = UDim2.new(0,0,0,0)
+    scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    scroll.Parent = win
+    self._scroll = scroll
+    mkList(scroll, 6)
+    mkPad(scroll, 4, 4, 0, 0)
+
+    return self
+end
+
+-- ── Tab ──────────────────────────────────────────────────────────────────────
+function RefLib:Tab(name)
+    local tabFrame = Instance.new("Frame")
+    tabFrame.Size = UDim2.new(1,0,0,0)
+    tabFrame.BackgroundTransparency = 1
+    tabFrame.AutomaticSize = Enum.AutomaticSize.Y
+    tabFrame.Visible = false
+    tabFrame.Parent = self._scroll
+    mkList(tabFrame, 6)
+
+    -- Botão na tabBar
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(0, 60, 1, 0)
+    btn.BackgroundColor3 = C.tab
+    btn.BorderSizePixel = 0
+    btn.Text = name
+    btn.TextColor3 = C.sub
+    btn.Font = Enum.Font.GothamSemibold
+    btn.TextSize = 11
+    btn.Parent = self._tabBar
+    mkCorner(btn, 6)
+
+    local tabObj = {_frame=tabFrame, _btn=btn, _ui=self}
+
+    local function selectTab()
+        -- Esconde todos
+        for _, t in ipairs(self._tabs) do
+            t._frame.Visible = false
+            t._btn.BackgroundColor3 = C.tab
+            t._btn.TextColor3 = C.sub
+        end
+        tabFrame.Visible = true
+        btn.BackgroundColor3 = C.tabSel
+        btn.TextColor3 = C.text
+        self._curTab = tabObj
+    end
+
+    btn.MouseButton1Click:Connect(selectTab)
+    table.insert(self._tabs, tabObj)
+
+    -- Seleciona a primeira tab automaticamente
+    if #self._tabs == 1 then
+        tabFrame.Visible = true
+        btn.BackgroundColor3 = C.tabSel
+        btn.TextColor3 = C.text
+        self._curTab = tabObj
+    end
+
+    -- Ajusta tamanho dos botões dinamicamente
+    local count = #self._tabs
+    for _, t in ipairs(self._tabs) do
+        t._btn.Size = UDim2.new(1/count, -4, 1, 0)
+    end
+
+    -- Métodos da tab
+    function tabObj:Section(sname)
+        local sec = Instance.new("Frame")
+        sec.Size = UDim2.new(1,0,0,0)
+        sec.AutomaticSize = Enum.AutomaticSize.Y
+        sec.BackgroundColor3 = C.section
+        sec.BorderSizePixel = 0
+        sec.Parent = tabFrame
+        mkCorner(sec, 8)
+        mkPad(sec, 6, 6, 8, 8)
+
+        local inner = Instance.new("Frame")
+        inner.Size = UDim2.new(1,0,0,0)
+        inner.AutomaticSize = Enum.AutomaticSize.Y
+        inner.BackgroundTransparency = 1
+        inner.Parent = sec
+        local lay = mkList(inner, 4)
+
+        -- Título da section
+        local stitle = mkLabel(inner, sname:upper(), UDim2.new(1,0,0,14), C.sub, true)
+        stitle.TextSize = 10
+        stitle.LayoutOrder = 0
+
+        local order = 1
+        local secObj = {}
+
+        -- ── Button ──────────────────────────────────────────────────────────
+        function secObj:Button(label, cb)
+            order = order + 1
+            local btn2 = Instance.new("TextButton")
+            btn2.Size = UDim2.new(1,0,0,28)
+            btn2.BackgroundColor3 = C.btn
+            btn2.BorderSizePixel = 0
+            btn2.Text = label
+            btn2.TextColor3 = C.text
+            btn2.Font = Enum.Font.Gotham
+            btn2.TextSize = 12
+            btn2.LayoutOrder = order
+            btn2.Parent = inner
+            mkCorner(btn2, 6)
+            btn2.MouseButton1Click:Connect(function() pcall(cb) end)
+            btn2.MouseEnter:Connect(function() btn2.BackgroundColor3 = C.btnHov end)
+            btn2.MouseLeave:Connect(function() btn2.BackgroundColor3 = C.btn end)
+        end
+
+        -- ── Toggle ──────────────────────────────────────────────────────────
+        function secObj:Toggle(label, default, cb)
+            order = order + 1
+            local state = default or false
+
+            local row = Instance.new("Frame")
+            row.Size = UDim2.new(1,0,0,28)
+            row.BackgroundColor3 = C.btn
+            row.BorderSizePixel = 0
+            row.LayoutOrder = order
+            row.Parent = inner
+            mkCorner(row, 6)
+
+            local lbl2 = mkLabel(row, label, UDim2.new(1,-48,1,0), C.text, false)
+            lbl2.Position = UDim2.new(0,8,0,0)
+
+            local pill = Instance.new("Frame")
+            pill.Size = UDim2.new(0,36,0,18)
+            pill.Position = UDim2.new(1,-44,0.5,-9)
+            pill.BackgroundColor3 = state and C.toggle or C.toggleOff
+            pill.BorderSizePixel = 0
+            pill.Parent = row
+            mkCorner(pill, 9)
+
+            local knob = Instance.new("Frame")
+            knob.Size = UDim2.new(0,14,0,14)
+            knob.Position = state and UDim2.new(1,-16,0.5,-7) or UDim2.new(0,2,0.5,-7)
+            knob.BackgroundColor3 = Color3.new(1,1,1)
+            knob.BorderSizePixel = 0
+            knob.Parent = pill
+            mkCorner(knob, 7)
+
+            local function setState(v)
+                state = v
+                pill.BackgroundColor3 = state and C.toggle or C.toggleOff
+                knob.Position = state and UDim2.new(1,-16,0.5,-7) or UDim2.new(0,2,0.5,-7)
+                pcall(cb, state)
+            end
+
+            local clickArea = Instance.new("TextButton")
+            clickArea.Size = UDim2.new(1,0,1,0)
+            clickArea.BackgroundTransparency = 1
+            clickArea.Text = ""
+            clickArea.Parent = row
+            clickArea.MouseButton1Click:Connect(function() setState(not state) end)
+
+            return { Set = function(v) setState(v) end }
+        end
+
+        -- ── Slider ──────────────────────────────────────────────────────────
+        function secObj:Slider(label, min, max, default, cb)
+            order = order + 1
+            local val = default or min
+
+            local wrap = Instance.new("Frame")
+            wrap.Size = UDim2.new(1,0,0,42)
+            wrap.BackgroundColor3 = C.btn
+            wrap.BorderSizePixel = 0
+            wrap.LayoutOrder = order
+            wrap.Parent = inner
+            mkCorner(wrap, 6)
+
+            local lbl2 = mkLabel(wrap, label.." ["..val.."]", UDim2.new(1,-8,0,16), C.text, false)
+            lbl2.Position = UDim2.new(0,8,0,4)
+
+            local track = Instance.new("Frame")
+            track.Size = UDim2.new(1,-16,0,6)
+            track.Position = UDim2.new(0,8,0,26)
+            track.BackgroundColor3 = C.div
+            track.BorderSizePixel = 0
+            track.Parent = wrap
+            mkCorner(track, 3)
+
+            local fill = Instance.new("Frame")
+            fill.Size = UDim2.new((val-min)/(max-min),0,1,0)
+            fill.BackgroundColor3 = C.slider
+            fill.BorderSizePixel = 0
+            fill.Parent = track
+            mkCorner(fill, 3)
+
+            local function setVal(v)
+                v = math.clamp(math.floor(v), min, max)
+                val = v
+                fill.Size = UDim2.new((val-min)/(max-min), 0, 1, 0)
+                lbl2.Text = label.." ["..val.."]"
+                pcall(cb, val)
+            end
+
+            local dragging = false
+            local clickBtn = Instance.new("TextButton")
+            clickBtn.Size = UDim2.new(1,0,1,0)
+            clickBtn.BackgroundTransparency = 1
+            clickBtn.Text = ""
+            clickBtn.Parent = track
+
+            local function calcFromInput(input)
+                local trackPos = track.AbsolutePosition.X
+                local trackW   = track.AbsoluteSize.X
+                local rel = math.clamp((input.Position.X - trackPos) / trackW, 0, 1)
+                setVal(min + rel * (max - min))
+            end
+
+            clickBtn.MouseButton1Down:Connect(function(x,y)
+                dragging = true
+                calcFromInput({Position=Vector2.new(x,y)})
+            end)
+            UserInputService.InputChanged:Connect(function(input)
+                if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+                    calcFromInput(input)
+                end
+            end)
+            UserInputService.InputEnded:Connect(function(input)
+                if input.UserInputType == Enum.UserInputType.MouseButton1 then
+                    dragging = false
+                end
+            end)
+
+            -- Touch support
+            clickBtn.TouchLongPress:Connect(function() dragging = true end)
+            clickBtn.TouchPan:Connect(function(_, positions)
+                if #positions > 0 then
+                    calcFromInput({Position=positions[1]})
+                end
+            end)
+            clickBtn.TouchEnded:Connect(function() dragging = false end)
+
+            return { Set = function(v) setVal(v) end }
+        end
+
+        -- ── Divider ─────────────────────────────────────────────────────────
+        function secObj:Divider(label)
+            order = order + 1
+            local row2 = Instance.new("Frame")
+            row2.Size = UDim2.new(1,0,0,18)
+            row2.BackgroundTransparency = 1
+            row2.LayoutOrder = order
+            row2.Parent = inner
+
+            local line = Instance.new("Frame")
+            line.Size = UDim2.new(0.3,0,0,1)
+            line.Position = UDim2.new(0,0,0.5,0)
+            line.BackgroundColor3 = C.div
+            line.BorderSizePixel = 0
+            line.Parent = row2
+
+            local line2 = Instance.new("Frame")
+            line2.Size = UDim2.new(0.3,0,0,1)
+            line2.Position = UDim2.new(0.7,0,0.5,0)
+            line2.BackgroundColor3 = C.div
+            line2.BorderSizePixel = 0
+            line2.Parent = row2
+
+            local dlbl = mkLabel(row2, label, UDim2.new(0.4,0,1,0), C.sub, false, Enum.TextXAlignment.Center)
+            dlbl.Position = UDim2.new(0.3,0,0,0)
+            dlbl.TextSize = 10
+        end
+
+        return secObj
+    end
+
+    return tabObj
+end
+
+-- ── Toast ─────────────────────────────────────────────────────────────────────
+function RefLib:Toast(icon, title, msg, color)
+    table.insert(toastQueue, {icon=icon, title=title, msg=msg, color=color})
+    showNextToast()
+end
+
+-- ── CfgRegister (guarda getter/setter em memória) ────────────────────────────
+function RefLib:CfgRegister(key, getter, setter)
+    self._cfg[key] = {get=getter, set=setter}
+end
+
+-- ── BuildConfigTab (botão salvar/carregar simples) ───────────────────────────
+function RefLib:BuildConfigTab(tab, key)
+    local sec = tab:Section("config (memória)")
+    sec:Button("salvar config", function()
+        for k, c in pairs(self._cfg) do
+            cfgStore[k] = c.get()
+        end
+        self:Toast("", "Config", "salvo ("..tostring(#(function() local n=0; for _ in pairs(self._cfg) do n=n+1 end; return n end)()).." chaves)", Color3.fromRGB(80,200,120))
+    end)
+    sec:Button("carregar config", function()
+        for k, v in pairs(cfgStore) do
+            if self._cfg[k] then pcall(self._cfg[k].set, v) end
+        end
+        self:Toast("", "Config", "carregado", Color3.fromRGB(80,180,220))
+    end)
+    sec:Button("resetar config", function()
+        cfgStore = {}
+        self:Toast("", "Config", "resetado", Color3.fromRGB(220,100,80))
+    end)
+end
+
+-- ══════════════════════════════════════════════════════════════════════════════
+-- FIM DA REFLIB SUBSTITUTA
+-- ══════════════════════════════════════════════════════════════════════════════
+
 if not RefLib then error("[mm2] ERRO: RefLib nao carregou.") end
 
 local Players           = game:GetService("Players")
@@ -38,14 +561,6 @@ pcall(function() RoleSelectEvent = ReplicatedStorage.Remotes.Gameplay.RoleSelect
 local KNIFE_NAMES   = { Knife = true }
 local GUN_NAMES     = { Gun = true, ["Sheriff's Gun"] = true, Revolver = true, SheriffGun = true, GunDrop = true }
 local GUNDROP_NAMES = { GunDrop = true }
-
-local CHARACTER_HIT_PARTS = {
-    "HumanoidRootPart","UpperTorso","LowerTorso","Head",
-    "RightUpperArm","LeftUpperArm","RightUpperLeg","LeftUpperLeg",
-    "RightLowerArm","LeftLowerArm","RightLowerLeg","LeftLowerLeg",
-    "RightHand","LeftHand","RightFoot","LeftFoot",
-    "Torso","Right Arm","Left Arm","Right Leg","Left Leg",
-}
 
 local ROLE_COLOR = {
     murderer = Color3.fromRGB(220, 55, 55),
@@ -167,7 +682,6 @@ end
 local function watchPlayerFull(p)
     watchPlayerBackpack(p)
     p.CharacterAdded:Connect(function()
-        -- FIX #10: aumentado de 0.3 para 1.2s para dar tempo ao servidor atribuir o papel
         roleCache[p] = nil; task.wait(1.2); watchPlayerBackpack(p)
     end)
 end
@@ -300,13 +814,10 @@ end
 
 -- ══════════════════════════════════════════════════════════════════════════════
 -- SILENT AIM
--- FIX #7: removido o RenderStepped que travava a câmera continuamente.
--- A câmera agora só é direcionada no momento exato do disparo.
 -- ══════════════════════════════════════════════════════════════════════════════
 
 local silentAimOn = false
 local SA_PRED     = 0.165
-local SA_FOV      = 9999
 local _prevPos    = {}
 local _prevTime   = {}
 
@@ -348,11 +859,9 @@ local function getSilentTarget()
     end
 end
 
--- FIX #7: atualiza predição no RenderStepped sem travar câmera
 RunService.RenderStepped:Connect(function()
     if not silentAimOn then return end
     local target = getSilentTarget(); if not target then return end
-    -- apenas atualiza o cache de posição para predição ser mais precisa
     getPredictedPos(target)
 end)
 
@@ -369,7 +878,6 @@ local function fireWithSilentAim()
         gunTool = getGunTool(); if not gunTool then return false end
     end
     _shootCd = true
-    -- FIX #7: câmera só é virada no momento do disparo, não continuamente
     cam.CFrame = CFrame.lookAt(cam.CFrame.Position, hitPos)
     pcall(function() gunTool:Activate() end)
     task.delay(0.65, function() _shootCd = false end)
@@ -377,52 +885,39 @@ local function fireWithSilentAim()
 end
 
 -- ══════════════════════════════════════════════════════════════════════════════
--- DUMP — FIX #2 e #3: variáveis declaradas + hook implementado no FireServer
+-- DUMP
 -- ══════════════════════════════════════════════════════════════════════════════
 
-local dumpActive   = false  -- FIX #2: declarado corretamente
-local dumpCallback = nil    -- FIX #2: declarado corretamente
+local dumpActive   = false
+local dumpCallback = nil
 
--- FIX #3: hook real no FireServer para capturar argumentos
 local function installHook()
-    local mt = getrawmetatable(game)
+    local mt = getrawmetatable and getrawmetatable(game)
     if not mt then return end
-    local oldIndex = mt.__index
     local oldNamecall = mt.__namecall
     if not oldNamecall then return end
-    local ok = pcall(setreadonly, mt, false)
-    if not ok then return end
-    mt.__namecall = newcclosure(function(self, ...)
-        local method = getnamecallmethod()
+    pcall(setreadonly, mt, false)
+    mt.__namecall = newcclosure and newcclosure(function(self, ...)
+        local method = getnamecallmethod and getnamecallmethod()
         if dumpActive and method == "FireServer" then
             local args = {...}
-            -- Verifica se é a gun do player
             local gunTool = getGunTool()
             if gunTool and self == gunTool then
                 dumpActive = false
                 local desc = {}
                 for i, v in ipairs(args) do
                     local t = typeof(v)
-                    local rep = ""
-                    if t == "CFrame" then
-                        rep = string.format("CFrame(%.2f, %.2f, %.2f)", v.X, v.Y, v.Z)
-                    elseif t == "Vector3" then
-                        rep = string.format("Vector3(%.2f, %.2f, %.2f)", v.X, v.Y, v.Z)
-                    elseif t == "Instance" then
-                        rep = "Instance: "..v.ClassName.." ["..v.Name.."]"
-                    else
-                        rep = tostring(v)
-                    end
+                    local rep = t=="CFrame" and string.format("CFrame(%.2f,%.2f,%.2f)",v.X,v.Y,v.Z)
+                        or t=="Vector3" and string.format("Vector3(%.2f,%.2f,%.2f)",v.X,v.Y,v.Z)
+                        or t=="Instance" and ("Instance:"..v.ClassName.."["..v.Name.."]")
+                        or tostring(v)
                     table.insert(desc, string.format("[%d] (%s) = %s", i, t, rep))
                 end
-                if dumpCallback then
-                    task.spawn(dumpCallback, desc)
-                    dumpCallback = nil
-                end
+                if dumpCallback then task.spawn(dumpCallback, desc); dumpCallback = nil end
             end
         end
         return oldNamecall(self, ...)
-    end)
+    end) or oldNamecall
     pcall(setreadonly, mt, true)
 end
 task.defer(installHook)
@@ -451,7 +946,6 @@ end
 
 -- ══════════════════════════════════════════════════════════════════════════════
 -- HITBOX EXPANDER
--- FIX #9: getMyParts agora tem cache por frame (invalidado no Heartbeat)
 -- ══════════════════════════════════════════════════════════════════════════════
 
 local hitboxOn      = false
@@ -459,23 +953,17 @@ local hitboxSize    = 12
 local hitboxVisible = false
 local hitboxCache   = {}
 
-local _myPartsCache = nil
-local _myPartsCacheFrame = -1
+local _myPartsCache      = nil
+local _myPartsCacheTime  = -1
 local function getMyParts()
-    local frame = workspace:GetServerTimeNow and workspace:GetServerTimeNow() or tick()
-    if _myPartsCache and (tick() - _myPartsCacheFrame) < 0.1 then
-        return _myPartsCache
-    end
+    if _myPartsCache and (tick() - _myPartsCacheTime) < 0.1 then return _myPartsCache end
     local chr = player.Character
-    if not chr then _myPartsCache = {}; _myPartsCacheFrame = tick(); return {} end
+    if not chr then _myPartsCache = {}; _myPartsCacheTime = tick(); return {} end
     local parts = {}
     for _, p in ipairs(chr:GetDescendants()) do if p:IsA("BasePart") then table.insert(parts, p) end end
-    _myPartsCache = parts
-    _myPartsCacheFrame = tick()
+    _myPartsCache = parts; _myPartsCacheTime = tick()
     return parts
 end
-
--- Invalida cache quando o character muda
 player.CharacterAdded:Connect(function() _myPartsCache = nil end)
 
 local function applyHitboxToChar(p)
@@ -575,32 +1063,24 @@ local function allocForPlayer(p)
     local hum = chr:FindFirstChildOfClass("Humanoid"); if not hum then return end
     local isR15 = hum.RigType == Enum.HumanoidRigType.R15
     local conns = isR15 and CONN_R15 or CONN_R6
-
     local lines = {}
     for i = 1, #conns do
         local l = Drawing.new("Line")
-        l.Thickness    = 2
-        l.Visible      = false
-        l.Transparency = 1
+        l.Thickness = 2; l.Visible = false; l.Transparency = 1
         lines[i] = l
     end
-
     local bb = Instance.new("BillboardGui")
     bb.Size=UDim2.new(0,120,0,32); bb.StudsOffset=Vector3.new(0,3.2,0)
     bb.AlwaysOnTop=true; bb.ResetOnSpawn=false; bb.Adornee=hrp; bb.Parent=hrp
-
     local nm = Instance.new("TextLabel")
     nm.BackgroundTransparency=1; nm.Size=UDim2.new(1,0,0,18)
     nm.Font=Enum.Font.GothamBold; nm.TextSize=12; nm.TextColor3=getESPColor(p)
     nm.TextStrokeTransparency=0.05; nm.TextXAlignment=Enum.TextXAlignment.Center
     nm.Text=p.DisplayName; nm.Parent=bb
-
     local dl = Instance.new("TextLabel")
     dl.BackgroundTransparency=1; dl.Size=UDim2.new(1,0,0,12); dl.Position=UDim2.new(0,0,0,19)
-    dl.Font=Enum.Font.Gotham; dl.TextSize=10
-    dl.TextColor3=Color3.fromRGB(210,210,230)
+    dl.Font=Enum.Font.Gotham; dl.TextSize=10; dl.TextColor3=Color3.fromRGB(210,210,230)
     dl.TextXAlignment=Enum.TextXAlignment.Center; dl.Parent=bb
-
     espData[p] = { lines=lines, conns=conns, isR15=isR15, bb=bb, nm=nm, dl=dl }
 end
 
@@ -622,10 +1102,7 @@ for _, p in ipairs(Players:GetPlayers()) do
 end
 Players.PlayerAdded:Connect(function(p)
     if p == player then return end
-    p.CharacterAdded:Connect(function()
-        freePlayer(p)
-        task.wait(1.5); allocForPlayer(p)
-    end)
+    p.CharacterAdded:Connect(function() freePlayer(p); task.wait(1.5); allocForPlayer(p) end)
 end)
 Players.PlayerRemoving:Connect(freePlayer)
 for _, p in ipairs(Players:GetPlayers()) do if p ~= player then p.CharacterAdded:Connect(function()
@@ -636,49 +1113,30 @@ RunService.RenderStepped:Connect(function()
     for _, p in ipairs(Players:GetPlayers()) do
         if p == player then continue end
         local d = espData[p]
-
-        if not espOn then
-            if d then hidePlayer(p) end
-            continue
-        end
-
+        if not espOn then if d then hidePlayer(p) end; continue end
         local chr = p.Character
         local hrp = chr and chr:FindFirstChild("HumanoidRootPart")
-        if not chr or not hrp or not isAlive(p) then
-            if d then hidePlayer(p) end; continue
-        end
-
+        if not chr or not hrp or not isAlive(p) then if d then hidePlayer(p) end; continue end
         local dist = (cam.CFrame.Position - hrp.Position).Magnitude
-        if dist > espMax then
-            if d then hidePlayer(p) end; continue
-        end
-
+        if dist > espMax then if d then hidePlayer(p) end; continue end
         if not d then continue end
-
         if d.bb then d.bb.Enabled = true end
         local col = getESPColor(p)
-        if d.nm then d.nm.TextColor3 = col; d.nm.Text = p.DisplayName end
-        if d.dl then d.dl.Text = math.floor(dist).."m  ["..(isRoundActive() and ROLE_LABEL[getRole(p)] or "Lobby").."]" end
-
+        if d.nm then d.nm.TextColor3=col; d.nm.Text=p.DisplayName end
+        if d.dl then d.dl.Text=math.floor(dist).."m  ["..(isRoundActive() and ROLE_LABEL[getRole(p)] or "Lobby").."]" end
         local function getPart(name)
             if d.isR15 then return chr:FindFirstChild(name) end
             return chr:FindFirstChild(R6_NAME[name] or name)
         end
-
         for i, conn in ipairs(d.conns) do
             local line = d.lines[i]; if not line then continue end
-            local jA = getPart(conn[1])
-            local jB = getPart(conn[2])
+            local jA = getPart(conn[1]); local jB = getPart(conn[2])
             if jA and jB then
                 local pA = cam:WorldToViewportPoint(jA.Position)
                 local pB = cam:WorldToViewportPoint(jB.Position)
-                line.Color   = col
-                line.From    = Vector2.new(pA.X, pA.Y)
-                line.To      = Vector2.new(pB.X, pB.Y)
-                line.Visible = (pA.Z > 0 or pB.Z > 0)
-            else
-                line.Visible = false
-            end
+                line.Color=col; line.From=Vector2.new(pA.X,pA.Y); line.To=Vector2.new(pB.X,pB.Y)
+                line.Visible=(pA.Z>0 or pB.Z>0)
+            else line.Visible=false end
         end
     end
 end)
@@ -699,10 +1157,10 @@ end
 
 local function findAllCoinServers()
     local coins = {}; local seen = {}
-    local CN = {Coin_Server=true, Coin=true, CoinPart=true, MainCoin=true, CoinValue=true}
+    local CN = {Coin_Server=true,Coin=true,CoinPart=true,MainCoin=true,CoinValue=true}
     for _, o in ipairs(workspace:GetDescendants()) do
         if CN[o.Name] and o:IsA("BasePart") and not seen[o] and isValidPos(o.Position) then
-            seen[o] = true; table.insert(coins, o)
+            seen[o]=true; table.insert(coins, o)
         end
     end
     return coins
@@ -710,8 +1168,6 @@ end
 
 -- ══════════════════════════════════════════════════════════════════════════════
 -- COIN FARM
--- FIX #5: flyTo agora restaura CanCollide ao terminar
--- FIX #8: myHRP() chamado apenas uma vez por uso
 -- ══════════════════════════════════════════════════════════════════════════════
 
 local FARM_FLY_SPEED   = 16
@@ -720,32 +1176,24 @@ local farmPauseBetween = 0.8
 local function flyTo(dest)
     local hrp = myHRP(); if not hrp then return end
     local chr = player.Character; if not chr then return end
-
-    -- Desativa colisão
     local collisionStates = {}
     for _, p in ipairs(chr:GetDescendants()) do
-        if p:IsA("BasePart") then
-            collisionStates[p] = p.CanCollide
-            pcall(function() p.CanCollide = false end)
-        end
+        if p:IsA("BasePart") then collisionStates[p]=p.CanCollide; pcall(function() p.CanCollide=false end) end
     end
-
-    local s = hrp.Position; local dist = (dest - s).Magnitude
+    local s = hrp.Position; local dist = (dest-s).Magnitude
     if dist >= 0.5 then
-        local steps = math.max(3, math.ceil(dist)); local st = 1 / FARM_FLY_SPEED
+        local steps = math.max(3,math.ceil(dist)); local st = 1/FARM_FLY_SPEED
         for i = 1, steps do
             hrp = myHRP(); if not hrp then break end
-            hrp.CFrame = CFrame.new(s:Lerp(dest, i / steps)); task.wait(st)
+            hrp.CFrame = CFrame.new(s:Lerp(dest, i/steps)); task.wait(st)
         end
         hrp = myHRP(); if hrp then hrp.CFrame = CFrame.new(dest) end
     end
-
-    -- FIX #5: restaura colisão após chegar
     chr = player.Character
     if chr then
         for _, p in ipairs(chr:GetDescendants()) do
-            if p:IsA("BasePart") and collisionStates[p] ~= nil then
-                pcall(function() p.CanCollide = collisionStates[p] end)
+            if p:IsA("BasePart") and collisionStates[p]~=nil then
+                pcall(function() p.CanCollide=collisionStates[p] end)
             end
         end
     end
@@ -756,7 +1204,7 @@ local function collectCoin(c)
     flyTo(c.Position)
     local hrp = myHRP()
     if hrp and c.Parent then
-        hrp.CFrame = CFrame.new(c.Position + Vector3.new(0.3, 0, 0)); task.wait(0.05)
+        hrp.CFrame = CFrame.new(c.Position+Vector3.new(0.3,0,0)); task.wait(0.05)
         hrp = myHRP(); if hrp and c.Parent then hrp.CFrame = CFrame.new(c.Position) end
     end
     if GetCoinEvent then pcall(function() GetCoinEvent:FireServer() end) end
@@ -794,23 +1242,19 @@ local secInfo = tabMain:Section("round info")
 
 secInfo:Button("checar meu papel", function()
     local role = getRole(); local alive = 0
-    for _, p in ipairs(Players:GetPlayers()) do if isAlive(p) then alive = alive + 1 end end
-    ui:Toast("rbxassetid://131165537896572",
-        "["..ROLE_LABEL[role].."] "..player.DisplayName, "vivos: "..alive, ROLE_COLOR[role])
+    for _, p in ipairs(Players:GetPlayers()) do if isAlive(p) then alive=alive+1 end end
+    ui:Toast("", "["..ROLE_LABEL[role].."] "..player.DisplayName, "vivos: "..alive, ROLE_COLOR[role])
 end)
 
 secInfo:Button("scan todos os papeis", function()
     local list = {}
     for _, p in ipairs(Players:GetPlayers()) do
-        local r = getRole(p); if r ~= "innocent" then table.insert(list, {p=p, r=r}) end
+        local r = getRole(p); if r ~= "innocent" then table.insert(list, {p=p,r=r}) end
     end
-    if #list == 0 then
-        ui:Toast("rbxassetid://131165537896572","scan","nenhum killer/sheriff",ROLE_COLOR.unknown); return
-    end
+    if #list == 0 then ui:Toast("","scan","nenhum killer/sheriff",ROLE_COLOR.unknown); return end
     for _, info in ipairs(list) do
         task.spawn(function()
-            ui:Toast("rbxassetid://131165537896572",
-                "["..ROLE_LABEL[info.r].."] "..info.p.DisplayName, info.p.Name, ROLE_COLOR[info.r])
+            ui:Toast("","["..ROLE_LABEL[info.r].."] "..info.p.DisplayName, info.p.Name, ROLE_COLOR[info.r])
         end)
         task.wait(0.4)
     end
@@ -821,8 +1265,8 @@ local roleEspOn = false; local roleEspCache = {}
 
 local function removeRoleEsp(p)
     local d = roleEspCache[p]; if not d then return end
-    pcall(function() if d.hl  and d.hl.Parent  then d.hl:Destroy()  end end)
-    pcall(function() if d.bb  and d.bb.Parent  then d.bb:Destroy()  end end)
+    pcall(function() if d.hl and d.hl.Parent then d.hl:Destroy() end end)
+    pcall(function() if d.bb and d.bb.Parent then d.bb:Destroy() end end)
     roleEspCache[p] = nil
 end
 
@@ -848,7 +1292,7 @@ local function buildRoleEsp(p)
     rl.Font=Enum.Font.GothamSemibold; rl.TextSize=11; rl.TextColor3=col
     rl.TextStrokeTransparency=0.2; rl.TextXAlignment=Enum.TextXAlignment.Center
     rl.Text="["..ROLE_LABEL[role].."]"; rl.Parent=bb
-    roleEspCache[p] = {hl=hl, bb=bb, nm=nm, rl=rl}
+    roleEspCache[p] = {hl=hl,bb=bb,nm=nm,rl=rl}
 end
 
 RunService.RenderStepped:Connect(function()
@@ -872,12 +1316,11 @@ Players.PlayerAdded:Connect(function(p) p.CharacterAdded:Connect(function()
 end) end)
 
 local t_rEsp = secInfo:Toggle("role esp (highlight)", false, function(v)
-    roleEspOn = v
+    roleEspOn=v
     if not v then for p in pairs(roleEspCache) do removeRoleEsp(p) end end
 end)
 ui:CfgRegister("mm2_role_esp", function() return roleEspOn end, function(v) t_rEsp.Set(v) end)
 
--- MOVEMENT
 local secMove = tabMain:Section("movement")
 local DEF_WS = 16; local speedOn = false; local speedVal = 26
 local function applySpeed(chr)
@@ -919,23 +1362,18 @@ end -- MAIN
 
 -- ══════════════════════════════════════════════════════════════════════════════
 -- TAB: ESP
--- FIX #1: corrigido espCache/removeESP → espData/hidePlayer (variáveis corretas)
 -- ══════════════════════════════════════════════════════════════════════════════
 do
 
 local secESP = tabESP:Section("skeleton esp (wall)")
--- FIX #1: era `espCache` e `removeESP` (inexistentes) — corrigido para `espData` e `hidePlayer`
-local t_esp = secESP:Toggle("skeleton esp (vê atrás da parede)", false, function(v)
-    espOn = v
-    if not v then
-        for p in pairs(espData) do hidePlayer(p) end
-    end
+local t_esp = secESP:Toggle("skeleton esp (ve atras da parede)", false, function(v)
+    espOn=v
+    if not v then for p in pairs(espData) do hidePlayer(p) end end
 end)
 ui:CfgRegister("mm2_esp", function() return espOn end, function(v) t_esp.Set(v) end)
-local s_dist = secESP:Slider("distancia max (studs)", 50, 1000, 300, function(v) espMax = v end)
+local s_dist = secESP:Slider("distancia max (studs)", 50, 1000, 300, function(v) espMax=v end)
 ui:CfgRegister("mm2_esp_dist", function() return espMax end, function(v) s_dist.Set(v) end)
 
--- ITEM ESP
 local secItemEsp = tabESP:Section("item esp (gun)")
 local itemEspOn = false; local itemBBs = {}
 local function removeItemBB(obj)
@@ -970,7 +1408,7 @@ local function scanItems()
 end
 workspace.DescendantAdded:Connect(function(o)
     if not itemEspOn then return end; task.wait(0.1)
-    if GUNDROP_NAMES[o.Name] and o:IsA("BasePart") then makeItemBB(o, o) end
+    if GUNDROP_NAMES[o.Name] and o:IsA("BasePart") then makeItemBB(o,o) end
 end)
 local t_item = secItemEsp:Toggle("gun dropped esp", false, function(v)
     itemEspOn=v; if v then scanItems() end
@@ -978,19 +1416,16 @@ local t_item = secItemEsp:Toggle("gun dropped esp", false, function(v)
 end)
 ui:CfgRegister("mm2_item_esp", function() return itemEspOn end, function(v) t_item.Set(v) end)
 secItemEsp:Button("tp to gun", function()
-    if not isAlive(player) then
-        ui:Toast("rbxassetid://131165537896572","tp gun","voce esta morto",ROLE_COLOR.unknown); return end
+    if not isAlive(player) then ui:Toast("","tp gun","voce esta morto",ROLE_COLOR.unknown); return end
     local hrp = myHRP(); if not hrp then return end
-    local guns = findDroppedGuns(); local best, bestD = nil, math.huge
+    local guns = findDroppedGuns(); local best,bestD=nil,math.huge
     for _, g in ipairs(guns) do
-        local d = (hrp.Position - g.handle.Position).Magnitude; if d < bestD then best=g.handle; bestD=d end
+        local d=(hrp.Position-g.handle.Position).Magnitude; if d<bestD then best=g.handle; bestD=d end
     end
     if best then
-        hrp.CFrame = CFrame.new(best.Position + Vector3.new(0,3,0))
-        ui:Toast("rbxassetid://131165537896572","[Gun] tp","encontrada! "..math.floor(bestD).."m",ROLE_COLOR.sheriff)
-    else
-        ui:Toast("rbxassetid://131165537896572","tp gun","nenhuma gun dropada",ROLE_COLOR.unknown)
-    end
+        hrp.CFrame=CFrame.new(best.Position+Vector3.new(0,3,0))
+        ui:Toast("","[Gun] tp","encontrada! "..math.floor(bestD).."m",ROLE_COLOR.sheriff)
+    else ui:Toast("","tp gun","nenhuma gun dropada",ROLE_COLOR.unknown) end
 end)
 
 end -- ESP
@@ -1002,25 +1437,15 @@ do
 
 local secSheriff = tabCombat:Section("sheriff")
 
--- DUMP — FIX #2/#3: variáveis declaradas no topo + hook implementado
-secSheriff:Divider("dump (debug — use 1x pra confirmar assinatura)")
-secSheriff:Button("DUMP gun (equipa e clica, depois atira)", function()
+secSheriff:Divider("dump (debug)")
+secSheriff:Button("DUMP gun (equipa e atira 1x)", function()
     local gunTool = getGunTool()
-    if not gunTool then
-        ui:Toast("rbxassetid://131165537896572","Dump","sem gun equipada",ROLE_COLOR.unknown); return
-    end
-    dumpActive   = true
-    dumpCallback = function(desc)
-        local lines = {
-            "=== FIRESERVER CAPTURADO ===",
-            "Gun: "..gunTool.Name,
-            "Total args: "..#desc,
-            "",
-        }
-        for _, l in ipairs(desc) do table.insert(lines, l) end
-        table.insert(lines, "")
-        table.insert(lines, "Silent aim substitui arg[2] (alvo CFrame)")
-
+    if not gunTool then ui:Toast("","Dump","sem gun equipada",ROLE_COLOR.unknown); return end
+    dumpActive=true
+    dumpCallback=function(desc)
+        local lines = {"=== FIRESERVER CAPTURADO ===","Gun: "..gunTool.Name,"Total args: "..#desc,""}
+        for _, l in ipairs(desc) do table.insert(lines,l) end
+        table.insert(lines,""); table.insert(lines,"Silent aim substitui arg[2] (alvo CFrame)")
         local old = player.PlayerGui:FindFirstChild("MM2DumpGui"); if old then old:Destroy() end
         local sg = Instance.new("ScreenGui"); sg.Name="MM2DumpGui"; sg.ResetOnSpawn=false
         sg.ZIndexBehavior=Enum.ZIndexBehavior.Sibling; sg.Parent=player.PlayerGui
@@ -1031,58 +1456,49 @@ secSheriff:Button("DUMP gun (equipa e clica, depois atira)", function()
         title.BackgroundTransparency=1; title.Text="DUMP — FireServer args"
         title.TextColor3=Color3.fromRGB(200,200,210); title.Font=Enum.Font.GothamBold; title.TextSize=12
         title.TextXAlignment=Enum.TextXAlignment.Left; title.Parent=frame
-        local closeBtn = Instance.new("TextButton"); closeBtn.Size=UDim2.new(0,32,0,32); closeBtn.Position=UDim2.new(1,-34,0,0)
+        local closeBtn=Instance.new("TextButton"); closeBtn.Size=UDim2.new(0,32,0,32); closeBtn.Position=UDim2.new(1,-34,0,0)
         closeBtn.BackgroundTransparency=1; closeBtn.Text="✕"; closeBtn.TextColor3=Color3.fromRGB(180,80,80)
         closeBtn.Font=Enum.Font.GothamBold; closeBtn.TextSize=16; closeBtn.Parent=frame
         closeBtn.MouseButton1Click:Connect(function() sg:Destroy() end)
-        local scroll = Instance.new("ScrollingFrame"); scroll.Size=UDim2.new(1,-16,1,-72); scroll.Position=UDim2.new(0,8,0,36)
+        local scroll=Instance.new("ScrollingFrame"); scroll.Size=UDim2.new(1,-16,1,-72); scroll.Position=UDim2.new(0,8,0,36)
         scroll.BackgroundColor3=Color3.fromRGB(12,12,18); scroll.BorderSizePixel=0; scroll.ScrollBarThickness=4
         scroll.CanvasSize=UDim2.new(0,0,0,0); scroll.AutomaticCanvasSize=Enum.AutomaticSize.Y; scroll.Parent=frame
         Instance.new("UICorner",scroll).CornerRadius=UDim.new(0,6)
-        local txt = Instance.new("TextLabel"); txt.Size=UDim2.new(1,-8,0,0); txt.AutomaticSize=Enum.AutomaticSize.Y
+        local txt=Instance.new("TextLabel"); txt.Size=UDim2.new(1,-8,0,0); txt.AutomaticSize=Enum.AutomaticSize.Y
         txt.Position=UDim2.new(0,4,0,4); txt.BackgroundTransparency=1; txt.Text=table.concat(lines,"\n")
         txt.TextColor3=Color3.fromRGB(140,220,140); txt.Font=Enum.Font.Code; txt.TextSize=11
         txt.TextXAlignment=Enum.TextXAlignment.Left; txt.TextYAlignment=Enum.TextYAlignment.Top
         txt.TextWrapped=true; txt.Parent=scroll
-        local copyBtn = Instance.new("TextButton"); copyBtn.Size=UDim2.new(1,-16,0,28); copyBtn.Position=UDim2.new(0,8,1,-36)
+        local copyBtn=Instance.new("TextButton"); copyBtn.Size=UDim2.new(1,-16,0,28); copyBtn.Position=UDim2.new(0,8,1,-36)
         copyBtn.BackgroundColor3=Color3.fromRGB(55,180,100); copyBtn.BorderSizePixel=0
-        copyBtn.Text="📋 COPIAR"; copyBtn.TextColor3=Color3.new(1,1,1); copyBtn.Font=Enum.Font.GothamBold; copyBtn.TextSize=12; copyBtn.Parent=frame
+        copyBtn.Text="COPIAR"; copyBtn.TextColor3=Color3.new(1,1,1); copyBtn.Font=Enum.Font.GothamBold; copyBtn.TextSize=12; copyBtn.Parent=frame
         Instance.new("UICorner",copyBtn).CornerRadius=UDim.new(0,6)
         copyBtn.MouseButton1Click:Connect(function()
             pcall(function() setclipboard(table.concat(lines,"\n")) end)
-            copyBtn.Text="✔ COPIADO!"; copyBtn.BackgroundColor3=Color3.fromRGB(40,130,70)
+            copyBtn.Text="COPIADO!"; copyBtn.BackgroundColor3=Color3.fromRGB(40,130,70)
             task.delay(2, function() pcall(function() sg:Destroy() end) end)
         end)
     end
     task.delay(20, function() if dumpActive then dumpActive=false; dumpCallback=nil end end)
-    ui:Toast("rbxassetid://131165537896572","[Dump]","atire 1x — vou capturar os args",ROLE_COLOR.sheriff)
+    ui:Toast("","[Dump]","atire 1x — capturando args",ROLE_COLOR.sheriff)
 end)
 
--- SILENT AIM
 secSheriff:Divider("silent aim")
 local t_sa = secSheriff:Toggle("silent aim (trava mira no murder)", false, function(v)
-    silentAimOn = v
-    if v then
-        ui:Toast("rbxassetid://131165537896572","[Silent Aim]","ativo — clique pra atirar",ROLE_COLOR.sheriff)
-    else
-        ui:Toast("rbxassetid://131165537896572","[Silent Aim]","desativado",ROLE_COLOR.unknown)
-    end
+    silentAimOn=v
+    ui:Toast("","[Silent Aim]", v and "ativo — clique pra atirar" or "desativado", v and ROLE_COLOR.sheriff or ROLE_COLOR.unknown)
 end)
 ui:CfgRegister("mm2_silentaim", function() return silentAimOn end, function(v) t_sa.Set(v) end)
-local s_pred = secSheriff:Slider("prediction (x0.01s)", 0, 40, 17, function(v) SA_PRED = v/100 end)
+local s_pred = secSheriff:Slider("prediction (x0.01s)", 0, 40, 17, function(v) SA_PRED=v/100 end)
 ui:CfgRegister("mm2_sa_pred", function() return SA_PRED*100 end, function(v) s_pred.Set(v) end)
 
--- HITBOX
 secSheriff:Divider("hitbox expander")
 local t_hb = secSheriff:Toggle("hitbox expander", false, function(v)
-    hitboxOn = v
+    hitboxOn=v
     if v then
         for _, p in ipairs(Players:GetPlayers()) do applyHitboxToChar(p) end
-        ui:Toast("rbxassetid://131165537896572","[Hitbox]","ativo — "..hitboxSize.."x",ROLE_COLOR.sheriff)
-    else
-        restoreAllHitboxes()
-        ui:Toast("rbxassetid://131165537896572","[Hitbox]","desativado",ROLE_COLOR.unknown)
-    end
+        ui:Toast("","[Hitbox]","ativo — "..hitboxSize.."x",ROLE_COLOR.sheriff)
+    else restoreAllHitboxes(); ui:Toast("","[Hitbox]","desativado",ROLE_COLOR.unknown) end
 end)
 ui:CfgRegister("mm2_hitbox", function() return hitboxOn end, function(v) t_hb.Set(v) end)
 local s_hbsize = secSheriff:Slider("tamanho hitbox (studs)", 4, 40, 12, function(v) hitboxSize=v end)
@@ -1090,236 +1506,202 @@ ui:CfgRegister("mm2_hitboxsize", function() return hitboxSize end, function(v) s
 local t_hbvis = secSheriff:Toggle("mostrar hitbox (debug)", false, function(v) hitboxVisible=v; applyHBVis(v) end)
 ui:CfgRegister("mm2_hitboxvis", function() return hitboxVisible end, function(v) t_hbvis.Set(v) end)
 
--- SHOOT BUTTON
 secSheriff:Divider("shoot button (usa silent aim)")
-local shootBtnGui = nil; local shootBtnOn = false
+local shootBtnGui=nil; local shootBtnOn=false
 local function destroyShootBtn()
     if shootBtnGui and shootBtnGui.Parent then pcall(function() shootBtnGui:Destroy() end) end; shootBtnGui=nil
 end
 local function buildShootBtn()
     destroyShootBtn()
-    local sg = Instance.new("ScreenGui"); sg.Name="MM2ShootBtn"; sg.ResetOnSpawn=false
+    local sg=Instance.new("ScreenGui"); sg.Name="MM2ShootBtn"; sg.ResetOnSpawn=false
     sg.IgnoreGuiInset=true; sg.DisplayOrder=99; sg.Parent=player.PlayerGui
-    local card = Instance.new("Frame"); card.Size=UDim2.new(0,110,0,56); card.Position=UDim2.new(1,-120,1,-220)
+    local card=Instance.new("Frame"); card.Size=UDim2.new(0,110,0,56); card.Position=UDim2.new(1,-120,1,-220)
     card.BackgroundColor3=T.panel; card.BackgroundTransparency=0.08; card.BorderSizePixel=0; card.Parent=sg
     Instance.new("UICorner",card).CornerRadius=UDim.new(0,10)
-    local stroke = Instance.new("UIStroke"); stroke.Color=ROLE_COLOR.sheriff; stroke.Thickness=1.5
+    local stroke=Instance.new("UIStroke"); stroke.Color=ROLE_COLOR.sheriff; stroke.Thickness=1.5
     stroke.ApplyStrokeMode=Enum.ApplyStrokeMode.Border; stroke.Parent=card
-    local lbl = Instance.new("TextLabel"); lbl.Size=UDim2.new(1,0,0,14); lbl.BackgroundTransparency=1
+    local lbl=Instance.new("TextLabel"); lbl.Size=UDim2.new(1,0,0,14); lbl.BackgroundTransparency=1
     lbl.Font=Enum.Font.Gotham; lbl.TextSize=9; lbl.TextColor3=T.sub
     lbl.TextXAlignment=Enum.TextXAlignment.Center; lbl.Text="SILENT AIM"; lbl.Position=UDim2.new(0,0,0,4); lbl.Parent=card
-    local btn = Instance.new("TextButton"); btn.Size=UDim2.new(1,-10,0,30); btn.Position=UDim2.new(0,5,0,20)
+    local btn=Instance.new("TextButton"); btn.Size=UDim2.new(1,-10,0,30); btn.Position=UDim2.new(0,5,0,20)
     btn.BackgroundColor3=ROLE_COLOR.sheriff; btn.BorderSizePixel=0; btn.Text="ATIRAR"
     btn.Font=Enum.Font.GothamBold; btn.TextSize=14; btn.TextColor3=Color3.new(1,1,1)
     btn.AutoButtonColor=true; btn.Parent=card
     Instance.new("UICorner",btn).CornerRadius=UDim.new(0,6); shootBtnGui=sg
-    local busy = false
-    local function set(text, col) if btn.Parent then btn.Text=text; btn.BackgroundColor3=col end end
+    local busy=false
+    local function set(text,col) if btn.Parent then btn.Text=text; btn.BackgroundColor3=col end end
     btn.Activated:Connect(function()
         if busy then return end
-        if not getGunTool() then
-            set("SEM GUN", T.err); task.delay(1.2, function() set("ATIRAR", ROLE_COLOR.sheriff) end); return
-        end
-        local target = getSilentTarget()
-        if not target then
-            set("SEM ALVO", T.warn); task.delay(1.2, function() set("ATIRAR", ROLE_COLOR.sheriff) end); return
-        end
-        busy = true; set("...", Color3.fromRGB(80,80,80))
-        local hitPos = getPredictedPos(target)
-        if hitPos then
-            cam.CFrame = CFrame.lookAt(cam.CFrame.Position, hitPos)
-        end
-        local ok = fireWithSilentAim()
+        if not getGunTool() then set("SEM GUN",T.err); task.delay(1.2,function() set("ATIRAR",ROLE_COLOR.sheriff) end); return end
+        local target=getSilentTarget()
+        if not target then set("SEM ALVO",T.warn); task.delay(1.2,function() set("ATIRAR",ROLE_COLOR.sheriff) end); return end
+        busy=true; set("...",Color3.fromRGB(80,80,80))
+        local hitPos=getPredictedPos(target)
+        if hitPos then cam.CFrame=CFrame.lookAt(cam.CFrame.Position,hitPos) end
+        local ok=fireWithSilentAim()
         task.wait(0.15); set(ok and "FIRED!" or "MISS", ok and T.ok or T.err)
-        task.wait(0.8); set("ATIRAR", ROLE_COLOR.sheriff); busy = false
+        task.wait(0.8); set("ATIRAR",ROLE_COLOR.sheriff); busy=false
     end)
 end
-local t_btn = secSheriff:Toggle("shoot button (mobile safe)", false, function(v)
-    shootBtnOn=v; if v then buildShootBtn()
-        ui:Toast("rbxassetid://131165537896572","[Btn]","canto inf-direito",ROLE_COLOR.sheriff)
+local t_btn=secSheriff:Toggle("shoot button (mobile safe)", false, function(v)
+    shootBtnOn=v
+    if v then buildShootBtn(); ui:Toast("","[Btn]","canto inf-direito",ROLE_COLOR.sheriff)
     else destroyShootBtn() end
 end)
 ui:CfgRegister("mm2_shootbtn", function() return shootBtnOn end, function(v) t_btn.Set(v) end)
 player.CharacterAdded:Connect(function() if shootBtnOn then task.wait(1); buildShootBtn() end end)
 
--- GUN AURA
--- FIX #6: guard adicionado no início do loop para evitar disparo duplo
 secSheriff:Divider("gun aura")
 local gunAuraOn=false; local lastGA=0; local gaCD=0.8; local gaDist=18
 local function gunAuraLoop()
     while gunAuraOn do
-        task.wait(0.1)
-        if not gunAuraOn then break end  -- FIX #6: check após o yield
+        task.wait(0.1); if not gunAuraOn then break end
         if getRole()~="sheriff" and getRole()~="hero" then continue end
         if tick()-lastGA<gaCD then continue end
-        local m = findByRole("murderer"); if not m then continue end
-        local mChr = m.Character; if not mChr then continue end
-        local mHRP = mChr:FindFirstChild("HumanoidRootPart"); if not mHRP then continue end
-        local hrp = myHRP(); if not hrp then continue end
-        if (hrp.Position-mHRP.Position).Magnitude > gaDist then
-            hrp.CFrame = mHRP.CFrame * CFrame.new(0,0,-gaDist*0.6); task.wait(0.08)
-            if not gunAuraOn then break end  -- FIX #6
-            hrp = myHRP(); if not hrp then continue end
+        local m=findByRole("murderer"); if not m then continue end
+        local mChr=m.Character; if not mChr then continue end
+        local mHRP=mChr:FindFirstChild("HumanoidRootPart"); if not mHRP then continue end
+        local hrp=myHRP(); if not hrp then continue end
+        if (hrp.Position-mHRP.Position).Magnitude>gaDist then
+            hrp.CFrame=mHRP.CFrame*CFrame.new(0,0,-gaDist*0.6); task.wait(0.08)
+            if not gunAuraOn then break end
+            hrp=myHRP(); if not hrp then continue end
         end
-        hrp.CFrame = CFrame.lookAt(hrp.Position, mHRP.Position); task.wait(0.04)
-        if not gunAuraOn then break end  -- FIX #6
-        lastGA = tick(); fireWithSilentAim()
+        hrp.CFrame=CFrame.lookAt(hrp.Position,mHRP.Position); task.wait(0.04)
+        if not gunAuraOn then break end
+        lastGA=tick(); fireWithSilentAim()
     end
 end
-local t_ga = secSheriff:Toggle("gun aura (tp + silent aim + shoot)", false, function(v)
+local t_ga=secSheriff:Toggle("gun aura (tp + silent aim + shoot)", false, function(v)
     gunAuraOn=v
-    if v then task.spawn(gunAuraLoop)
-        ui:Toast("rbxassetid://131165537896572","[Gun Aura]","ativo",ROLE_COLOR.sheriff)
-    else ui:Toast("rbxassetid://131165537896572","[Gun Aura]","desativado",ROLE_COLOR.unknown) end
+    if v then task.spawn(gunAuraLoop); ui:Toast("","[Gun Aura]","ativo",ROLE_COLOR.sheriff)
+    else ui:Toast("","[Gun Aura]","desativado",ROLE_COLOR.unknown) end
 end)
 ui:CfgRegister("mm2_gunaura", function() return gunAuraOn end, function(v) t_ga.Set(v) end)
-local s_gacd = secSheriff:Slider("gun aura cooldown (x0.1s)", 2, 30, 8, function(v) gaCD=v/10 end)
+local s_gacd=secSheriff:Slider("gun aura cooldown (x0.1s)", 2, 30, 8, function(v) gaCD=v/10 end)
 ui:CfgRegister("mm2_gacd", function() return gaCD*10 end, function(v) s_gacd.Set(v) end)
 
--- AUTO SHOOT
--- FIX #6: guard adicionado para evitar disparo duplo após desativar
 secSheriff:Divider("auto shoot")
 local autoShootOn=false; local lastShot=0; local shotCD=0.6
 local function autoShootLoop()
     while autoShootOn do
-        task.wait(0.15)
-        if not autoShootOn then break end  -- FIX #6
+        task.wait(0.15); if not autoShootOn then break end
         if getRole()~="sheriff" and getRole()~="hero" then continue end
         if tick()-lastShot<shotCD then continue end
-        local m = findByRole("murderer"); if not m then continue end
-        local mHrp = m.Character and m.Character:FindFirstChild("HumanoidRootPart")
-        local hrp = myHRP()  -- FIX #8: chamado uma vez e reutilizado
+        local m=findByRole("murderer"); if not m then continue end
+        local mHrp=m.Character and m.Character:FindFirstChild("HumanoidRootPart")
+        local hrp=myHRP()
         if not mHrp or not hrp then continue end
-        if (hrp.Position-mHrp.Position).Magnitude > 300 then continue end
+        if (hrp.Position-mHrp.Position).Magnitude>300 then continue end
         lastShot=tick(); fireWithSilentAim()
     end
 end
-local t_as = secSheriff:Toggle("auto shoot murderer", false, function(v)
+local t_as=secSheriff:Toggle("auto shoot murderer", false, function(v)
     autoShootOn=v
-    if v then task.spawn(autoShootLoop)
-        ui:Toast("rbxassetid://131165537896572","[Auto Shoot]","ativo",ROLE_COLOR.sheriff)
-    else ui:Toast("rbxassetid://131165537896572","[Auto Shoot]","desativado",ROLE_COLOR.unknown) end
+    if v then task.spawn(autoShootLoop); ui:Toast("","[Auto Shoot]","ativo",ROLE_COLOR.sheriff)
+    else ui:Toast("","[Auto Shoot]","desativado",ROLE_COLOR.unknown) end
 end)
 ui:CfgRegister("mm2_autoshoot", function() return autoShootOn end, function(v) t_as.Set(v) end)
-local s_scd = secSheriff:Slider("cooldown (x0.1s)", 1, 20, 6, function(v) shotCD=v/10 end)
+local s_scd=secSheriff:Slider("cooldown (x0.1s)", 1, 20, 6, function(v) shotCD=v/10 end)
 ui:CfgRegister("mm2_shot_cd", function() return shotCD*10 end, function(v) s_scd.Set(v) end)
 
 secSheriff:Divider("manual")
 secSheriff:Button("atirar no murderer (1x)", function()
     if getRole()~="sheriff" and getRole()~="hero" then
-        ui:Toast("rbxassetid://131165537896572","[Shoot]","voce nao e xerife",ROLE_COLOR.unknown); return end
-    local m = findByRole("murderer")
-    if not m then ui:Toast("rbxassetid://131165537896572","[Shoot]","murderer nao detectado",ROLE_COLOR.unknown); return end
-    local ok = fireWithSilentAim()
-    ui:Toast("rbxassetid://131165537896572","[Shoot]",(ok and "disparado" or "falhou").." -> "..m.DisplayName,ROLE_COLOR.sheriff)
+        ui:Toast("","[Shoot]","voce nao e xerife",ROLE_COLOR.unknown); return end
+    local m=findByRole("murderer")
+    if not m then ui:Toast("","[Shoot]","murderer nao detectado",ROLE_COLOR.unknown); return end
+    local ok=fireWithSilentAim()
+    ui:Toast("","[Shoot]",(ok and "disparado" or "falhou").." -> "..m.DisplayName,ROLE_COLOR.sheriff)
 end)
 secSheriff:Button("tp para murderer", function()
-    local m = findByRole("murderer")
-    if not m then ui:Toast("rbxassetid://131165537896572","tp","murderer nao detectado",ROLE_COLOR.unknown); return end
-    local mh = m.Character and m.Character:FindFirstChild("HumanoidRootPart"); local hrp=myHRP()
+    local m=findByRole("murderer")
+    if not m then ui:Toast("","tp","murderer nao detectado",ROLE_COLOR.unknown); return end
+    local mh=m.Character and m.Character:FindFirstChild("HumanoidRootPart"); local hrp=myHRP()
     if mh and hrp then hrp.CFrame=mh.CFrame*CFrame.new(0,0,-4)
-        ui:Toast("rbxassetid://131165537896572","[TP]","-> "..m.DisplayName,ROLE_COLOR.murderer) end
+        ui:Toast("","[TP]","-> "..m.DisplayName,ROLE_COLOR.murderer) end
 end)
 
--- MURDERER
-local secMurd = tabCombat:Section("murderer")
+local secMurd=tabCombat:Section("murderer")
 secMurd:Divider("knife aura (auto swing)")
 local knifeAura=false; local knifeRange=12; local knifeCd=0.35; local _kConn=nil
 
--- FIX #4: equipar faca de forma correta, aguardando character e usando referência fresca
 local function equipKnifeForAura()
-    local chr = player.Character; if not chr then return end
-    local hum = chr:FindFirstChildOfClass("Humanoid"); if not hum then return end
-    local bp = player:FindFirstChild("Backpack"); if not bp then return end
+    local chr=player.Character; if not chr then return end
+    local hum=chr:FindFirstChildOfClass("Humanoid"); if not hum then return end
+    local bp=player:FindFirstChild("Backpack"); if not bp then return end
     for name in pairs(KNIFE_NAMES) do
-        local t = bp:FindFirstChild(name)
-        if t then
-            pcall(function() hum:EquipTool(t) end)
-            task.wait(0.15)
-            return
-        end
+        local t=bp:FindFirstChild(name)
+        if t then pcall(function() hum:EquipTool(t) end); task.wait(0.15); return end
     end
 end
 
 local function knifeAuraLoop()
     if _kConn then _kConn:Disconnect(); _kConn=nil end
-    equipKnifeForAura()  -- FIX #4: equipa corretamente antes do loop
+    equipKnifeForAura()
     local accum=0; local cRole="unknown"; local rTimer=0; local pHRPs={}
-    _kConn = RunService.Heartbeat:Connect(function(dt)
+    _kConn=RunService.Heartbeat:Connect(function(dt)
         if not knifeAura then _kConn:Disconnect(); _kConn=nil; return end
         accum=accum+dt; rTimer=rTimer+dt
         if rTimer>=0.5 then rTimer=0; cRole=getRole(); pHRPs={}
             for _,p in ipairs(Players:GetPlayers()) do if p~=player and isAlive(p) then
-                local ph = p.Character and p.Character:FindFirstChild("HumanoidRootPart")
+                local ph=p.Character and p.Character:FindFirstChild("HumanoidRootPart")
                 if ph then pHRPs[p]=ph end
             end end
         end
         if accum<knifeCd then return end; accum=0
         if cRole~="murderer" then return end
-        local hrp = myHRP(); if not hrp then return end
-        local knife = getKnifeTool()
-        if not knife then
-            -- FIX #4: tenta equipar novamente se a faca sumiu
-            task.spawn(equipKnifeForAura)
-            return
-        end
-        local hp = hrp.Position; local best,bestD=nil,knifeRange
+        local hrp=myHRP(); if not hrp then return end
+        local knife=getKnifeTool()
+        if not knife then task.spawn(equipKnifeForAura); return end
+        local hp=hrp.Position; local best,bestD=nil,knifeRange
         for p,ph in pairs(pHRPs) do
             if not ph.Parent then pHRPs[p]=nil; continue end
-            local d = (hp-ph.Position).Magnitude; if d<bestD then best=ph; bestD=d end
+            local d=(hp-ph.Position).Magnitude; if d<bestD then best=ph; bestD=d end
         end
         if best then
-            local lCF = CFrame.lookAt(hp, best.Position)
+            local lCF=CFrame.lookAt(hp,best.Position)
             if math.abs(hrp.CFrame.LookVector:Dot(lCF.LookVector)-1)>0.01 then hrp.CFrame=lCF end
             pcall(function() knife:Activate() end)
         end
     end)
 end
-local t_ka = secMurd:Toggle("knife aura", false, function(v)
+local t_ka=secMurd:Toggle("knife aura", false, function(v)
     knifeAura=v
-    if v then knifeAuraLoop()
-        ui:Toast("rbxassetid://131165537896572","[Knife Aura]","ativo",ROLE_COLOR.murderer)
-    else
-        if _kConn then _kConn:Disconnect(); _kConn=nil end
-        ui:Toast("rbxassetid://131165537896572","[Knife Aura]","desativado",ROLE_COLOR.unknown) end
+    if v then knifeAuraLoop(); ui:Toast("","[Knife Aura]","ativo",ROLE_COLOR.murderer)
+    else if _kConn then _kConn:Disconnect(); _kConn=nil end
+        ui:Toast("","[Knife Aura]","desativado",ROLE_COLOR.unknown) end
 end)
 ui:CfgRegister("mm2_knifeaura", function() return knifeAura end, function(v) t_ka.Set(v) end)
-local s_kr = secMurd:Slider("range aura (studs)", 4, 60, 12, function(v) knifeRange=v end)
+local s_kr=secMurd:Slider("range aura (studs)", 4, 60, 12, function(v) knifeRange=v end)
 ui:CfgRegister("mm2_kniferange", function() return knifeRange end, function(v) s_kr.Set(v) end)
 secMurd:Button("matar sheriff (1x)", function()
-    if getRole()~="murderer" then
-        ui:Toast("rbxassetid://131165537896572","[Knife]","voce nao e murderer",ROLE_COLOR.unknown); return end
-    local s = findByRole("sheriff"); if not s then
-        ui:Toast("rbxassetid://131165537896572","[Knife]","sheriff nao detectado",ROLE_COLOR.unknown); return end
-    knifeAt(s.Character)
-    ui:Toast("rbxassetid://131165537896572","[Knife]","-> "..s.DisplayName,ROLE_COLOR.murderer)
+    if getRole()~="murderer" then ui:Toast("","[Knife]","voce nao e murderer",ROLE_COLOR.unknown); return end
+    local s=findByRole("sheriff"); if not s then ui:Toast("","[Knife]","sheriff nao detectado",ROLE_COLOR.unknown); return end
+    knifeAt(s.Character); ui:Toast("","[Knife]","-> "..s.DisplayName,ROLE_COLOR.murderer)
 end)
 secMurd:Button("matar mais proximo", function()
-    if getRole()~="murderer" then
-        ui:Toast("rbxassetid://131165537896572","[Knife]","voce nao e murderer",ROLE_COLOR.unknown); return end
-    local hrp = myHRP(); if not hrp then return end; local best,bestD=nil,math.huge
+    if getRole()~="murderer" then ui:Toast("","[Knife]","voce nao e murderer",ROLE_COLOR.unknown); return end
+    local hrp=myHRP(); if not hrp then return end; local best,bestD=nil,math.huge
     for _,p in ipairs(Players:GetPlayers()) do if p~=player then
-        local ph = p.Character and p.Character:FindFirstChild("HumanoidRootPart")
+        local ph=p.Character and p.Character:FindFirstChild("HumanoidRootPart")
         if ph and isAlive(p) then local d=(hrp.Position-ph.Position).Magnitude; if d<bestD then best=p; bestD=d end end
     end end
-    if not best then ui:Toast("rbxassetid://131165537896572","[Knife]","nenhum alvo",ROLE_COLOR.unknown); return end
-    knifeAt(best.Character)
-    ui:Toast("rbxassetid://131165537896572","[Knife]","-> "..best.DisplayName,ROLE_COLOR.murderer)
+    if not best then ui:Toast("","[Knife]","nenhum alvo",ROLE_COLOR.unknown); return end
+    knifeAt(best.Character); ui:Toast("","[Knife]","-> "..best.DisplayName,ROLE_COLOR.murderer)
 end)
 secMurd:Button("tp para sheriff", function()
-    local s = findByRole("sheriff"); if not s then
-        ui:Toast("rbxassetid://131165537896572","tp","sheriff nao detectado",ROLE_COLOR.unknown); return end
-    local sh = s.Character and s.Character:FindFirstChild("HumanoidRootPart"); local hrp=myHRP()
+    local s=findByRole("sheriff"); if not s then ui:Toast("","tp","sheriff nao detectado",ROLE_COLOR.unknown); return end
+    local sh=s.Character and s.Character:FindFirstChild("HumanoidRootPart"); local hrp=myHRP()
     if sh and hrp then hrp.CFrame=sh.CFrame*CFrame.new(0,0,-4)
-        ui:Toast("rbxassetid://131165537896572","[TP]","-> "..s.DisplayName,ROLE_COLOR.sheriff) end
+        ui:Toast("","[TP]","-> "..s.DisplayName,ROLE_COLOR.sheriff) end
 end)
 
-local secCI = tabCombat:Section("info")
+local secCI=tabCombat:Section("info")
 secCI:Button("quem e o murderer / sheriff", function()
     local m=findByRole("murderer"); local s=findByRole("sheriff"); local alive=0
     for _,p in ipairs(Players:GetPlayers()) do if isAlive(p) then alive=alive+1 end end
-    ui:Toast("rbxassetid://131165537896572",
-        "M: "..(m and m.DisplayName or "?").."  |  S: "..(s and s.DisplayName or "?"),
+    ui:Toast("","M: "..(m and m.DisplayName or "?").."  |  S: "..(s and s.DisplayName or "?"),
         "vivos: "..alive, ROLE_COLOR.unknown)
 end)
 
@@ -1330,72 +1712,68 @@ end -- COMBAT
 -- ══════════════════════════════════════════════════════════════════════════════
 do
 
-local secFarm = tabFarm:Section("coin farm")
+local secFarm=tabFarm:Section("coin farm")
 local farmOn=false; local farmCount=0
 local function collectCoinsLoop()
     farmCount=0; while farmOn do
         if not isRoundActive() then task.wait(3); continue end
-        local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
-        -- FIX #8: myHRP() chamado uma vez e reutilizado
-        local hrp = myHRP()
+        local hum=player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+        local hrp=myHRP()
         if not hrp or not hum or hum.Health<=0 then task.wait(2); continue end
-        local coins = findAllCoinServers(); if #coins==0 then task.wait(3); continue end
-        local myPos = hrp.Position  -- FIX #8: usa hrp já obtido
-        table.sort(coins, function(a,b)
+        local coins=findAllCoinServers(); if #coins==0 then task.wait(3); continue end
+        local myPos=hrp.Position
+        table.sort(coins,function(a,b)
             if not(a and a.Parent) then return false end; if not(b and b.Parent) then return true end
-            return (a.Position-myPos).Magnitude < (b.Position-myPos).Magnitude
+            return (a.Position-myPos).Magnitude<(b.Position-myPos).Magnitude
         end)
-        for _, c in ipairs(coins) do
+        for _,c in ipairs(coins) do
             if not farmOn then break end; if not c or not c.Parent then continue end
             if not myHRP() then break end; collectCoin(c); farmCount=farmCount+1
         end; task.wait(2)
     end
 end
-local t_farm = secFarm:Toggle("auto farm coins", false, function(v)
+local t_farm=secFarm:Toggle("auto farm coins", false, function(v)
     farmOn=v
-    if v then task.spawn(collectCoinsLoop)
-        ui:Toast("rbxassetid://131165537896572","[Farm] iniciado","vel: "..FARM_FLY_SPEED.."s/s",Color3.fromRGB(255,210,50))
-    else ui:Toast("rbxassetid://131165537896572","[Farm] parado","coletadas: "..farmCount,Color3.fromRGB(255,210,50)) end
+    if v then task.spawn(collectCoinsLoop); ui:Toast("","[Farm] iniciado","vel: "..FARM_FLY_SPEED.."s/s",Color3.fromRGB(255,210,50))
+    else ui:Toast("","[Farm] parado","coletadas: "..farmCount,Color3.fromRGB(255,210,50)) end
 end)
 ui:CfgRegister("mm2_farm", function() return farmOn end, function(v) t_farm.Set(v) end)
-local s_fspd = secFarm:Slider("velocidade (studs/s)", 4, 40, 16, function(v) FARM_FLY_SPEED=v end)
+local s_fspd=secFarm:Slider("velocidade (studs/s)", 4, 40, 16, function(v) FARM_FLY_SPEED=v end)
 ui:CfgRegister("mm2_farm_speed", function() return FARM_FLY_SPEED end, function(v) s_fspd.Set(v) end)
-local s_fpause = secFarm:Slider("pausa entre coins (x0.1s)", 2, 30, 8, function(v) farmPauseBetween=v/10 end)
+local s_fpause=secFarm:Slider("pausa entre coins (x0.1s)", 2, 30, 8, function(v) farmPauseBetween=v/10 end)
 ui:CfgRegister("mm2_farm_pause", function() return farmPauseBetween*10 end, function(v) s_fpause.Set(v) end)
 secFarm:Button("status do farm", function()
-    local coins = findAllCoinServers()
-    ui:Toast("rbxassetid://131165537896572",
-        farmOn and "[Farm] rodando" or "[Farm] parado",
+    local coins=findAllCoinServers()
+    ui:Toast("",farmOn and "[Farm] rodando" or "[Farm] parado",
         "mapa: "..#coins.."  coletadas: "..farmCount, Color3.fromRGB(255,210,50))
 end)
 secFarm:Button("collect coins (1x)", function()
     if not myHRP() then return end
-    local coins = findAllCoinServers(); if #coins==0 then
-        ui:Toast("rbxassetid://131165537896572","coins","nenhuma coin encontrada",ROLE_COLOR.unknown); return end
-    ui:Toast("rbxassetid://131165537896572","[Coins]","coletando "..#coins.."...",Color3.fromRGB(255,210,50))
+    local coins=findAllCoinServers(); if #coins==0 then
+        ui:Toast("","coins","nenhuma coin encontrada",ROLE_COLOR.unknown); return end
+    ui:Toast("","[Coins]","coletando "..#coins.."...",Color3.fromRGB(255,210,50))
     task.spawn(function()
-        local hrp = myHRP()  -- FIX #8
-        local myPos = hrp and hrp.Position or Vector3.zero
-        table.sort(coins, function(a,b)
+        local hrp=myHRP(); local myPos=hrp and hrp.Position or Vector3.zero
+        table.sort(coins,function(a,b)
             if not(a and a.Parent) then return false end; if not(b and b.Parent) then return true end
-            return (a.Position-myPos).Magnitude < (b.Position-myPos).Magnitude
+            return (a.Position-myPos).Magnitude<(b.Position-myPos).Magnitude
         end); local count=0
-        for _, c in ipairs(coins) do if c and c.Parent then collectCoin(c); count=count+1 end end
-        ui:Toast("rbxassetid://131165537896572","[Coins] feito!","coletadas: "..count,Color3.fromRGB(255,210,50))
+        for _,c in ipairs(coins) do if c and c.Parent then collectCoin(c); count=count+1 end end
+        ui:Toast("","[Coins] feito!","coletadas: "..count,Color3.fromRGB(255,210,50))
     end)
 end)
 
-local secGrab = tabFarm:Section("gun grab (inocente)")
+local secGrab=tabFarm:Section("gun grab (inocente)")
 local grabOn=false
 local function grabLoop()
     while grabOn do task.wait(0.6)
         if not grabOn then break end
         if not isRoundActive() then continue end
         if getRole()=="murderer" then continue end
-        local hrp = myHRP(); if not hrp then continue end
+        local hrp=myHRP(); if not hrp then continue end
         if getGunTool() then continue end
         local best,bestD=nil,math.huge
-        for _, g in ipairs(findDroppedGuns()) do
+        for _,g in ipairs(findDroppedGuns()) do
             local d=(hrp.Position-g.handle.Position).Magnitude; if d<bestD then best=g.handle; bestD=d end
         end
         if best then
@@ -1405,42 +1783,40 @@ local function grabLoop()
         end
     end
 end
-local t_grab = secGrab:Toggle("auto pegar gun (vai e volta)", false, function(v)
+local t_grab=secGrab:Toggle("auto pegar gun (vai e volta)", false, function(v)
     grabOn=v
-    if v then task.spawn(grabLoop)
-        ui:Toast("rbxassetid://131165537896572","[Gun Grab]","buscando GunDrop...",ROLE_COLOR.sheriff)
-    else ui:Toast("rbxassetid://131165537896572","[Gun Grab]","desativado",ROLE_COLOR.unknown) end
+    if v then task.spawn(grabLoop); ui:Toast("","[Gun Grab]","buscando GunDrop...",ROLE_COLOR.sheriff)
+    else ui:Toast("","[Gun Grab]","desativado",ROLE_COLOR.unknown) end
 end)
 ui:CfgRegister("mm2_grab", function() return grabOn end, function(v) t_grab.Set(v) end)
 
-local secSurv = tabFarm:Section("survival")
+local secSurv=tabFarm:Section("survival")
 local survOn=false; local fleeDist=20
 local function surviveLoop()
     while survOn do task.wait(0.2)
         if not survOn then break end
         if getRole()=="murderer" then continue end
-        local m = findByRole("murderer"); if not m then continue end
-        local mh = m.Character and m.Character:FindFirstChild("HumanoidRootPart"); local hrp=myHRP()
+        local m=findByRole("murderer"); if not m then continue end
+        local mh=m.Character and m.Character:FindFirstChild("HumanoidRootPart"); local hrp=myHRP()
         if not mh or not hrp then continue end
-        if (hrp.Position-mh.Position).Magnitude < fleeDist then
+        if (hrp.Position-mh.Position).Magnitude<fleeDist then
             local dir=(hrp.Position-mh.Position).Unit; local np=hrp.Position+dir*32
             if isValidPos(np) then hrp.CFrame=CFrame.new(np) end
         end
     end
 end
-local t_surv = secSurv:Toggle("auto fugir do murderer", false, function(v)
+local t_surv=secSurv:Toggle("auto fugir do murderer", false, function(v)
     survOn=v
-    if v then task.spawn(surviveLoop)
-        ui:Toast("rbxassetid://131165537896572","[Survive]","ativo",ROLE_COLOR.innocent)
-    else ui:Toast("rbxassetid://131165537896572","[Survive]","desativado",ROLE_COLOR.unknown) end
+    if v then task.spawn(surviveLoop); ui:Toast("","[Survive]","ativo",ROLE_COLOR.innocent)
+    else ui:Toast("","[Survive]","desativado",ROLE_COLOR.unknown) end
 end)
 ui:CfgRegister("mm2_survive", function() return survOn end, function(v) t_surv.Set(v) end)
-local s_fl = secSurv:Slider("range de fuga (studs)", 5, 60, 20, function(v) fleeDist=v end)
+local s_fl=secSurv:Slider("range de fuga (studs)", 5, 60, 20, function(v) fleeDist=v end)
 ui:CfgRegister("mm2_flee", function() return fleeDist end, function(v) s_fl.Set(v) end)
 
-local secAfk = tabFarm:Section("anti-afk")
+local secAfk=tabFarm:Section("anti-afk")
 local afkOn=false; local afkConn=nil
-local t_afk = secAfk:Toggle("anti-afk", false, function(v)
+local t_afk=secAfk:Toggle("anti-afk", false, function(v)
     afkOn=v; if afkConn then afkConn:Disconnect(); afkConn=nil end
     if v then
         afkConn=RunService.Heartbeat:Connect(function()
@@ -1449,8 +1825,8 @@ local t_afk = secAfk:Toggle("anti-afk", false, function(v)
                 VirtualUser:Button2Up(Vector2.zero,cam.CFrame)
             end)
         end)
-        ui:Toast("rbxassetid://131165537896572","[Anti-AFK]","ativo",Color3.fromRGB(200,200,255))
-    else ui:Toast("rbxassetid://131165537896572","[Anti-AFK]","desativado",ROLE_COLOR.unknown) end
+        ui:Toast("","[Anti-AFK]","ativo",Color3.fromRGB(200,200,255))
+    else ui:Toast("","[Anti-AFK]","desativado",ROLE_COLOR.unknown) end
 end)
 ui:CfgRegister("mm2_afk", function() return afkOn end, function(v) t_afk.Set(v) end)
 
@@ -1461,10 +1837,8 @@ end -- FARM
 -- ══════════════════════════════════════════════════════════════════════════════
 ui:BuildConfigTab(tabCfg, "ref_mm2v20")
 
-
 task.delay(0.9, function()
-    local role = getRole()
-    ui:Toast("rbxassetid://131165537896572",
-        "mm2 v20  ["..ROLE_LABEL[role].."]",
+    local role=getRole()
+    ui:Toast("","mm2 v20  ["..ROLE_LABEL[role].."]",
         "bem-vindo, "..player.DisplayName, ROLE_COLOR[role])
 end)
