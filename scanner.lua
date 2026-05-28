@@ -504,7 +504,23 @@ local ui = RefLib.new("mm v20", "rbxassetid://131165537896572", "ref_mmv20")
 
 
 local GetCoinEvent
-pcall(function() GetCoinEvent = ReplicatedStorage.Remotes.Gameplay.GetCoin end)
+local function refreshCoinRemote()
+    if GetCoinEvent and GetCoinEvent.Parent then return GetCoinEvent end
+    local names = {
+        GetCoin = true,
+        CollectCoin = true,
+        CoinCollected = true,
+        PickupCoin = true,
+        ClaimCoin = true,
+    }
+    for _, d in ipairs(ReplicatedStorage:GetDescendants()) do
+        if names[d.Name] and (d:IsA("RemoteEvent") or d:IsA("RemoteFunction")) then
+            GetCoinEvent = d
+            return d
+        end
+    end
+end
+task.defer(refreshCoinRemote)
 
 local PlayerDataChangedBind
 pcall(function()
@@ -765,27 +781,36 @@ end
 
 
 local silentAimOn = false
-local SA_PRED     = 0.165
+local SA_PRED     = 0.18
 local _prevPos    = {}
 local _prevTime   = {}
 
+local function getAimPart(tp)
+    local chr = tp and tp.Character
+    if not chr then return nil end
+    return chr:FindFirstChild("Head") or chr:FindFirstChild("HumanoidRootPart") or chr:FindFirstChild("UpperTorso") or chr:FindFirstChild("Torso")
+end
+
 local function getPredictedPos(tp)
-    if not tp then return nil end
-    local chr = tp.Character; if not chr then return nil end
-    local part = chr:FindFirstChild("Head") or chr:FindFirstChild("HumanoidRootPart")
+    local part = getAimPart(tp)
     if not part then return nil end
     local now = tick()
     local cur = part.Position
-    local prev = _prevPos[tp]; local pt = _prevTime[tp]
-    local pred = cur
-    if prev and pt then
+    local vel = part.AssemblyLinearVelocity
+    local prev = _prevPos[tp]
+    local pt = _prevTime[tp]
+    if (not vel or vel.Magnitude < 0.05) and prev and pt then
         local dt = now - pt
         if dt > 0.001 and dt < 0.5 then
-            pred = cur + (cur - prev) / dt * SA_PRED
+            vel = (cur - prev) / dt
         end
     end
-    _prevPos[tp] = cur; _prevTime[tp] = now
-    return pred
+    _prevPos[tp] = cur
+    _prevTime[tp] = now
+    if vel and vel == vel then
+        return cur + vel * SA_PRED
+    end
+    return cur
 end
 
 local function getSilentTarget()
@@ -814,10 +839,33 @@ RunService.RenderStepped:Connect(function()
 end)
 
 local _shootCd = false
-local function fireWithSilentAim()
+
+local function safeLookAt(origin, target)
+    if not origin or not target then return nil end
+    if (target - origin).Magnitude < 0.05 then target = origin + cam.CFrame.LookVector end
+    return CFrame.lookAt(origin, target)
+end
+
+local function getShootRemote(gunTool)
+    if not gunTool then return nil end
+    local r = gunTool:FindFirstChild("Shoot")
+    if r and r:IsA("RemoteEvent") then return r end
+    for _, d in ipairs(gunTool:GetDescendants()) do
+        if d.Name == "Shoot" and d:IsA("RemoteEvent") then return d end
+    end
+end
+
+local function getShotOrigin(gunTool)
+    local h = gunTool and gunTool:FindFirstChild("Handle")
+    if h and h:IsA("BasePart") then return h.Position end
+    local hrp = myHRP()
+    if hrp then return hrp.Position + Vector3.new(0, 1.5, 0) end
+    return cam.CFrame.Position
+end
+
+local function fireGunAtPosition(hitPos)
     if _shootCd then return false end
-    local target = getSilentTarget(); if not target then return false end
-    local hitPos = getPredictedPos(target); if not hitPos then return false end
+    if not hitPos or hitPos ~= hitPos then return false end
     local gunTool = getGunTool(); if not gunTool then return false end
     local chr = player.Character; if not chr then return false end
     if not chr:FindFirstChild(gunTool.Name) then
@@ -825,11 +873,29 @@ local function fireWithSilentAim()
         chr = player.Character; if not chr then return false end
         gunTool = getGunTool(); if not gunTool then return false end
     end
+    local remote = getShootRemote(gunTool)
+    local originPos = getShotOrigin(gunTool)
+    local shotCF = safeLookAt(originPos, hitPos)
+    local hitCF = CFrame.new(hitPos)
+    if not shotCF then return false end
     _shootCd = true
-    cam.CFrame = CFrame.lookAt(cam.CFrame.Position, hitPos)
-    pcall(function() gunTool:Activate() end)
-    task.delay(0.65, function() _shootCd = false end)
-    return true
+    local camCF = safeLookAt(cam.CFrame.Position, hitPos)
+    if camCF then cam.CFrame = camCF end
+    local ok = false
+    if remote then
+        ok = pcall(function() remote:FireServer(shotCF, hitCF) end)
+    end
+    if not ok then
+        ok = pcall(function() gunTool:Activate() end)
+    end
+    task.delay(0.62, function() _shootCd = false end)
+    return ok
+end
+
+local function fireWithSilentAim()
+    local target = getSilentTarget(); if not target then return false end
+    local hitPos = getPredictedPos(target); if not hitPos then return false end
+    return fireGunAtPosition(hitPos)
 end
 
 
@@ -847,7 +913,7 @@ local function installHook()
         if dumpActive and method == "FireServer" then
             local args = {...}
             local gunTool = getGunTool()
-            if gunTool and self == gunTool then
+            if gunTool and (self == gunTool or self == getShootRemote(gunTool)) then
                 dumpActive = false
                 local desc = {}
                 for i, v in ipairs(args) do
@@ -1088,12 +1154,34 @@ local function findDroppedGuns()
     return found
 end
 
+local function isCoinName(name)
+    name = tostring(name or ""):lower()
+    return name == "coin_server" or name == "coin" or name == "coinpart" or name == "maincoin" or name:find("coin") ~= nil
+end
+
+local function getCoinPart(obj)
+    if not obj then return nil end
+    if obj:IsA("BasePart") then return obj end
+    if obj:IsA("Model") then
+        if obj.PrimaryPart and obj.PrimaryPart:IsA("BasePart") then return obj.PrimaryPart end
+        local h = obj:FindFirstChild("Handle") or obj:FindFirstChild("Coin") or obj:FindFirstChild("Coin_Server") or obj:FindFirstChild("MainCoin")
+        if h and h:IsA("BasePart") then return h end
+        for _, d in ipairs(obj:GetDescendants()) do
+            if d:IsA("BasePart") then return d end
+        end
+    end
+end
+
 local function findAllCoinServers()
-    local coins = {}; local seen = {}
-    local CN = {Coin_Server=true,Coin=true,CoinPart=true,MainCoin=true,CoinValue=true}
+    local coins = {}
+    local seen = {}
     for _, o in ipairs(workspace:GetDescendants()) do
-        if CN[o.Name] and o:IsA("BasePart") and not seen[o] and isValidPos(o.Position) then
-            seen[o]=true; table.insert(coins, o)
+        if isCoinName(o.Name) then
+            local part = getCoinPart(o)
+            if part and part.Parent and not seen[part] and isValidPos(part.Position) then
+                seen[part] = true
+                table.insert(coins, part)
+            end
         end
     end
     return coins
@@ -1129,15 +1217,53 @@ local function flyTo(dest)
     end
 end
 
+local function fireCoinRemote(c)
+    local r = refreshCoinRemote()
+    if not r then return false end
+    local argSets = {
+        {},
+        {c},
+        {c and c.Parent or nil},
+        {c and c.Name or nil},
+        {c and c.Position or nil},
+        {c and c.CFrame or nil},
+    }
+    local ok = false
+    for _, args in ipairs(argSets) do
+        local good = pcall(function()
+            if r:IsA("RemoteEvent") then
+                r:FireServer(table.unpack(args))
+            else
+                r:InvokeServer(table.unpack(args))
+            end
+        end)
+        ok = ok or good
+        task.wait(0.03)
+    end
+    return ok
+end
+
+local function touchCoinPart(c)
+    local hrp = myHRP()
+    if not hrp or not c or not c.Parent then return false end
+    local ok = false
+    if firetouchinterest then
+        ok = pcall(function()
+            firetouchinterest(hrp, c, 0)
+            task.wait()
+            firetouchinterest(hrp, c, 1)
+        end)
+    end
+    hrp.CFrame = CFrame.new(c.Position + Vector3.new(0, 0.2, 0))
+    task.wait(0.08)
+    return ok
+end
+
 local function collectCoin(c)
     if not c or not c.Parent then return end
-    flyTo(c.Position)
-    local hrp = myHRP()
-    if hrp and c.Parent then
-        hrp.CFrame = CFrame.new(c.Position+Vector3.new(0.3,0,0)); task.wait(0.05)
-        hrp = myHRP(); if hrp and c.Parent then hrp.CFrame = CFrame.new(c.Position) end
-    end
-    if GetCoinEvent then pcall(function() GetCoinEvent:FireServer() end) end
+    flyTo(c.Position + Vector3.new(0, 0.4, 0))
+    touchCoinPart(c)
+    fireCoinRemote(c)
     task.wait(farmPauseBetween)
 end
 
@@ -1628,7 +1754,6 @@ local secFarm=tabFarm:Section("coin farm")
 local farmOn=false; local farmCount=0
 local function collectCoinsLoop()
     farmCount=0; while farmOn do
-        if not isRoundActive() then task.wait(3); continue end
         local hum=player.Character and player.Character:FindFirstChildOfClass("Humanoid")
         local hrp=myHRP()
         if not hrp or not hum or hum.Health<=0 then task.wait(2); continue end
