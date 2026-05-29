@@ -911,10 +911,14 @@ local function rayOBB(origin, dir, cf, size, maxDist)
     if typeof(cf) ~= "CFrame" then return nil end
     if typeof(size) ~= "Vector3" then return nil end
     if dir.Magnitude < 0.0001 then return nil end
-    local ok, ro, rd = pcall(function()
-        return cf:PointToObjectSpace(origin), cf:VectorToObjectSpace(dir)
-    end)
-    if not ok or typeof(ro) ~= "Vector3" or typeof(rd) ~= "Vector3" then return nil end
+    local center = cf.Position
+    local delta = origin - center
+    local ax = cf.RightVector
+    local ay = cf.UpVector
+    local az = cf.LookVector
+    if typeof(center) ~= "Vector3" or typeof(ax) ~= "Vector3" or typeof(ay) ~= "Vector3" or typeof(az) ~= "Vector3" then return nil end
+    local ro = Vector3.new(delta:Dot(ax), delta:Dot(ay), delta:Dot(az))
+    local rd = Vector3.new(dir:Dot(ax), dir:Dot(ay), dir:Dot(az))
     local half = size * 0.5
     local tMin = 0
     local tMax = maxDist or 1800
@@ -1036,6 +1040,8 @@ local dumpActive   = false
 local dumpCallback = nil
 
 local function installHook()
+    if shared and shared.__MMV20_V9_HOOK then return end
+    if shared then shared.__MMV20_V9_HOOK = true end
     local mt = getrawmetatable and getrawmetatable(game)
     if not mt then return end
     local oldNamecall = mt.__namecall
@@ -1047,7 +1053,7 @@ local function installHook()
             local args = {...}
             local gunTool = getGunTool()
             local shootRemote = gunTool and getShootRemote(gunTool)
-            local isGunShoot = gunTool and (self == gunTool or self == shootRemote)
+            local isGunShoot = shootRemote and typeof(self) == "Instance" and self == shootRemote
             if dumpActive and isGunShoot then
                 dumpActive = false
                 local desc = {}
@@ -1246,7 +1252,7 @@ end
 local hitboxOn      = false
 local hitboxSize    = 18
 local hitboxVisible = false
-local hitboxStrong  = false
+local hitboxStrong  = true
 local hitboxCache   = {}
 
 local _myPartsCache      = nil
@@ -1278,6 +1284,39 @@ local function isHitboxCandidate(part)
         or part.Name:find("Foot") ~= nil
 end
 
+local function makeHitboxVisualClone(part, d)
+    if not part or not part.Parent then return nil end
+    if part.Name == "HumanoidRootPart" then return nil end
+    if (d.transparency or 0) >= 1 and (d.ltm or 0) >= 1 then return nil end
+    local clone
+    local ok = pcall(function() clone = part:Clone() end)
+    if not ok or not clone then return nil end
+    clone.Name = part.Name.."_Visual"
+    for _, child in ipairs(clone:GetChildren()) do
+        if child:IsA("Motor6D") or child:IsA("Weld") or child:IsA("WeldConstraint") or child:IsA("Attachment") or child:IsA("Script") or child:IsA("LocalScript") then
+            pcall(function() child:Destroy() end)
+        end
+    end
+    pcall(function()
+        clone.Size = d.size
+        clone.CFrame = part.CFrame
+        clone.Anchored = false
+        clone.CanCollide = false
+        clone.CanTouch = false
+        clone.CanQuery = false
+        clone.Massless = true
+        clone.Transparency = d.transparency
+        clone.LocalTransparencyModifier = d.ltm
+        clone.Material = d.material
+        clone.Parent = part.Parent
+        local weld = Instance.new("WeldConstraint")
+        weld.Part0 = part
+        weld.Part1 = clone
+        weld.Parent = clone
+    end)
+    return clone
+end
+
 local function setHitboxVisual(saved, visible)
     for _, d in ipairs(saved) do
         if d.part and d.part.Parent then
@@ -1286,10 +1325,15 @@ local function setHitboxVisual(saved, visible)
                     d.part.Transparency = 0.55
                     d.part.LocalTransparencyModifier = 0
                     d.part.Material = Enum.Material.ForceField
+                    if d.visual and d.visual.Parent then d.visual.LocalTransparencyModifier = 1 end
                 else
                     d.part.Transparency = d.transparency
-                    d.part.LocalTransparencyModifier = d.ltm
+                    d.part.LocalTransparencyModifier = 1
                     d.part.Material = d.material
+                    if d.visual and d.visual.Parent then
+                        d.visual.Transparency = d.transparency
+                        d.visual.LocalTransparencyModifier = d.ltm
+                    end
                 end
             end)
         end
@@ -1334,7 +1378,9 @@ local function applyHitboxToChar(p)
             canQuery = part.CanQuery,
             massless = part.Massless,
             constraints = cons,
+            visual = nil,
         }
+        d.visual = makeHitboxVisualClone(part, d)
         pcall(function()
             part.Size = targetSize
             part.CanTouch = true
@@ -1363,6 +1409,9 @@ local function restoreHitbox(p)
                 d.part.CanQuery = d.canQuery
                 d.part.Massless = d.massless
             end)
+        end
+        if d.visual and d.visual.Parent then
+            pcall(function() d.visual:Destroy() end)
         end
         for _, nc in ipairs(d.constraints) do
             pcall(function() if nc and nc.Parent then nc:Destroy() end end)
@@ -1920,7 +1969,7 @@ end)
 ui:CfgRegister("mm2_hitbox", function() return hitboxOn end, function(v) t_hb.Set(v) end)
 local s_hbsize = secSheriff:Slider("tamanho hitbox (studs)", 4, 60, 18, function(v) hitboxSize=v; rebuildHitboxes() end)
 ui:CfgRegister("mm2_hitboxsize", function() return hitboxSize end, function(v) s_hbsize.Set(v) end)
-local t_hbstrong = secSheriff:Toggle("full real hitbox", false, function(v) hitboxStrong=v; rebuildHitboxes() end)
+local t_hbstrong = secSheriff:Toggle("full real hitbox", true, function(v) hitboxStrong=v; rebuildHitboxes() end)
 ui:CfgRegister("mm2_hitboxstrong", function() return hitboxStrong end, function(v) t_hbstrong.Set(v) end)
 local t_hbvis = secSheriff:Toggle("mostrar hitbox (debug)", false, function(v) hitboxVisible=v; applyHBVis(v) end)
 ui:CfgRegister("mm2_hitboxvis", function() return hitboxVisible end, function(v) t_hbvis.Set(v) end)
@@ -2049,52 +2098,71 @@ secSheriff:Button("tp para murderer", function()
 end)
 
 local secMurd=tabCombat:Section("murderer")
-secMurd:Divider("knife aura (auto swing)")
-local knifeAura=false; local knifeRange=18; local knifeCd=0.22; local knifeBlinkAssist=false; local knifePulseCount=3; local _kConn=nil
+secMurd:Divider("knife range (manual click)")
+local knifeAura=false; local knifeRange=18; local knifeCd=0.22; local knifeBlinkAssist=false; local knifePulseCount=3; local _kConn=nil; local _lastKnifeClick=0
 
 local function equipKnifeForAura()
     return ensureKnifeEquipped()
 end
 
-local function knifeAuraLoop()
+local function getClosestKnifeTarget(range)
+    if getRole() ~= "murderer" then return nil end
+    local hrp = myHRP()
+    if not hrp then return nil end
+    local hp = hrp.Position
+    local best, bestD = nil, tonumber(range) or 18
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= player and isAlive(p) then
+            local chr = p.Character
+            local ph = chr and (chr:FindFirstChild("HumanoidRootPart") or chr:FindFirstChild("UpperTorso") or chr:FindFirstChild("Torso") or chr:FindFirstChild("Head"))
+            if ph and ph:IsA("BasePart") then
+                local d = (hp - ph.Position).Magnitude
+                if d <= bestD then
+                    best = p
+                    bestD = d
+                end
+            end
+        end
+    end
+    return best
+end
+
+local function manualKnifeRangeSwing()
+    if not knifeAura then return end
+    if getRole() ~= "murderer" then return end
+    if tick() - _lastKnifeClick < knifeCd then return end
+    local target = getClosestKnifeTarget(knifeRange)
+    if not target or not target.Character then return end
+    _lastKnifeClick = tick()
+    knifeAt(target.Character, knifeBlinkAssist, knifeRange, knifePulseCount)
+end
+
+local function bindKnifeManualInput()
     if _kConn then _kConn:Disconnect(); _kConn=nil end
     equipKnifeForAura()
-    local accum=0; local cRole="unknown"; local rTimer=0; local pHRPs={}
-    _kConn=RunService.Heartbeat:Connect(function(dt)
-        if not knifeAura then _kConn:Disconnect(); _kConn=nil; return end
-        accum=accum+dt; rTimer=rTimer+dt
-        if rTimer>=0.5 then rTimer=0; cRole=getRole(); pHRPs={}
-            for _,p in ipairs(Players:GetPlayers()) do if p~=player and isAlive(p) then
-                local ph=p.Character and p.Character:FindFirstChild("HumanoidRootPart")
-                if ph then pHRPs[p]=ph end
-            end end
-        end
-        if accum<knifeCd then return end; accum=0
-        if cRole~="murderer" then return end
-        local hrp=myHRP(); if not hrp then return end
-        local knife=getKnifeTool()
-        if not knife then task.spawn(equipKnifeForAura); return end
-        local hp=hrp.Position; local best,bestD=nil,knifeRange
-        for p,ph in pairs(pHRPs) do
-            if not ph.Parent then pHRPs[p]=nil; continue end
-            local d=(hp-ph.Position).Magnitude; if d<bestD then best=ph; bestD=d end
-        end
-        if best then
-            local targetChar = best.Parent
-            if targetChar then knifeAt(targetChar, knifeBlinkAssist, knifeRange, knifePulseCount) end
+    _kConn = UserInputService.InputBegan:Connect(function(input, gameProcessed)
+        if not knifeAura then return end
+        if gameProcessed then return end
+        if UserInputService:GetFocusedTextBox() then return end
+        local t = input.UserInputType
+        local k = input.KeyCode
+        if t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.Touch or k == Enum.KeyCode.ButtonR2 or k == Enum.KeyCode.ButtonR1 then
+            task.spawn(manualKnifeRangeSwing)
         end
     end)
 end
-local t_ka=secMurd:Toggle("knife aura", false, function(v)
+
+local t_ka=secMurd:Toggle("knife range (manual click)", false, function(v)
     knifeAura=v
-    if v then knifeAuraLoop(); ui:Toast("","[Knife Aura]","ativo",ROLE_COLOR.murderer)
+    if v then bindKnifeManualInput(); ui:Toast("","[Knife Range]","ativo — clique para atacar",ROLE_COLOR.murderer)
     else if _kConn then _kConn:Disconnect(); _kConn=nil end
-        ui:Toast("","[Knife Aura]","desativado",ROLE_COLOR.unknown) end
+        restoreKnifeReach()
+        ui:Toast("","[Knife Range]","desativado",ROLE_COLOR.unknown) end
 end)
 ui:CfgRegister("mm2_knifeaura", function() return knifeAura end, function(v) t_ka.Set(v) end)
-local s_kr=secMurd:Slider("range aura (studs)", 4, 80, 18, function(v) knifeRange=v end)
+local s_kr=secMurd:Slider("range knife (studs)", 4, 80, 18, function(v) knifeRange=v end)
 ui:CfgRegister("mm2_kniferange", function() return knifeRange end, function(v) s_kr.Set(v) end)
-local s_kpulse=secMurd:Slider("knife pulses", 1, 6, 3, function(v) knifePulseCount=v end)
+local s_kpulse=secMurd:Slider("knife pulses por clique", 1, 6, 2, function(v) knifePulseCount=v end)
 ui:CfgRegister("mm2_knifepulses", function() return knifePulseCount end, function(v) s_kpulse.Set(v) end)
 local t_kblink=secMurd:Toggle("tp fallback", false, function(v) knifeBlinkAssist=v end)
 ui:CfgRegister("mm2_knifeblink", function() return knifeBlinkAssist end, function(v) t_kblink.Set(v) end)
