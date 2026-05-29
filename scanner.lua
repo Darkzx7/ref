@@ -906,8 +906,15 @@ local function vecAxis(v, i)
 end
 
 local function rayOBB(origin, dir, cf, size, maxDist)
-    local ro = cf:PointToObjectSpace(origin)
-    local rd = cf:VectorToObjectSpace(dir)
+    if typeof(origin) ~= "Vector3" then return nil end
+    if typeof(dir) ~= "Vector3" then return nil end
+    if typeof(cf) ~= "CFrame" then return nil end
+    if typeof(size) ~= "Vector3" then return nil end
+    if dir.Magnitude < 0.0001 then return nil end
+    local ok, ro, rd = pcall(function()
+        return cf:PointToObjectSpace(origin), cf:VectorToObjectSpace(dir)
+    end)
+    if not ok or typeof(ro) ~= "Vector3" or typeof(rd) ~= "Vector3" then return nil end
     local half = size * 0.5
     local tMin = 0
     local tMax = maxDist or 1800
@@ -953,6 +960,7 @@ local function getGunHitboxParts(chr)
 end
 
 local function getGunBoxSize(part, radius)
+    if typeof(part) ~= "Instance" or not part:IsA("BasePart") then return nil end
     local s = part.Size
     local r = math.max(2, radius or 12)
     if part.Name == "HumanoidRootPart" then
@@ -963,11 +971,14 @@ local function getGunBoxSize(part, radius)
 end
 
 local function getPartPredictedCF(part, owner)
+    if typeof(part) ~= "Instance" or not part:IsA("BasePart") then return nil end
     local vel = Vector3.zero
     pcall(function() vel = part.AssemblyLinearVelocity end)
+    if typeof(vel) ~= "Vector3" then vel = Vector3.zero end
     if vel.Magnitude < 0.1 and owner and owner.Character then
         local hrp = owner.Character:FindFirstChild("HumanoidRootPart")
-        if hrp then pcall(function() vel = hrp.AssemblyLinearVelocity end) end
+        if hrp and hrp:IsA("BasePart") then pcall(function() vel = hrp.AssemblyLinearVelocity end) end
+        if typeof(vel) ~= "Vector3" then vel = Vector3.zero end
     end
     local offset = vel * (SA_PRED or 0.16)
     return part.CFrame + offset
@@ -988,12 +999,16 @@ local function getGunTargetFromRay(origin, dir, maxDist)
         if p ~= player and isAlive(p) and getRole(p) == "murderer" then
             local chr = p.Character
             for _, part in ipairs(getGunHitboxParts(chr)) do
-                local cf = getPartPredictedCF(part, p)
-                local boxSize = getGunBoxSize(part, radius)
-                local t = rayOBB(origin, dir, cf, boxSize, limit)
-                if t and t < bestT then
-                    bestT = t
-                    bestPos = cf.Position
+                if typeof(part) == "Instance" and part:IsA("BasePart") then
+                    local cf = getPartPredictedCF(part, p)
+                    local boxSize = getGunBoxSize(part, radius)
+                    if typeof(cf) == "CFrame" and typeof(boxSize) == "Vector3" then
+                        local t = rayOBB(origin, dir, cf, boxSize, limit)
+                        if t and t < bestT then
+                            bestT = t
+                            bestPos = cf.Position
+                        end
+                    end
                 end
             end
         end
@@ -1047,8 +1062,10 @@ local function installHook()
                 if dumpCallback then task.spawn(dumpCallback, desc); dumpCallback = nil end
             end
             if isGunShoot and self == shootRemote and gunHitboxOn then
-                local changed, newArgs = rewriteGunShotArgs(args)
-                if changed then
+                local okRewrite, changed, newArgs = pcall(function()
+                    return rewriteGunShotArgs(args)
+                end)
+                if okRewrite and changed and type(newArgs) == "table" then
                     return oldNamecall(self, table.unpack(newArgs))
                 end
             end
