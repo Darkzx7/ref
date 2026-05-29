@@ -781,25 +781,67 @@ end
 
 
 local silentAimOn = false
-local SA_PRED     = 0.18
-local _prevPos    = {}
-local _prevTime   = {}
+local SA_PRED = 0.17
+local SA_SIM_TIMER = 0.05
+local SA_INTERVAL = 0.03
+local SA_PRIORITIZE_PING = true
+local SA_PREDICT_JUMP = true
+local SA_PREDICT_LAG = true
+local SA_SHARP_SHOOTER = true
+local SA_VERTICAL_MULT = 1.45
+local SA_HORIZONTAL_MULT = 1.45
+local SA_OFFSET_X = 0
+local SA_OFFSET_Y = -4
+local SA_OFFSET_Z = 0
+local _prevPos = {}
+local _prevTime = {}
+local _predCache = {}
 
 local function getAimPart(tp)
     local chr = tp and tp.Character
     if not chr then return nil end
-    return chr:FindFirstChild("Head") or chr:FindFirstChild("HumanoidRootPart") or chr:FindFirstChild("UpperTorso") or chr:FindFirstChild("Torso")
+    if SA_SHARP_SHOOTER then
+        return chr:FindFirstChild("Head") or chr:FindFirstChild("UpperTorso") or chr:FindFirstChild("Torso") or chr:FindFirstChild("HumanoidRootPart")
+    end
+    return chr:FindFirstChild("UpperTorso") or chr:FindFirstChild("Torso") or chr:FindFirstChild("HumanoidRootPart") or chr:FindFirstChild("Head")
+end
+
+local function getPingSeconds()
+    local ok, val = pcall(function()
+        local stats = game:GetService("Stats")
+        local network = stats and stats:FindFirstChild("Network")
+        local serverStats = network and network:FindFirstChild("ServerStatsItem")
+        local ping = serverStats and serverStats:FindFirstChild("Data Ping")
+        if ping and ping.GetValue then return ping:GetValue() end
+    end)
+    if ok and type(val) == "number" then
+        return math.clamp(val / 1000, 0, 0.35)
+    end
+    return 0
+end
+
+local function getPredictionTime()
+    local t = tonumber(SA_PRED) or 0
+    if SA_PREDICT_LAG then t = t + (tonumber(SA_SIM_TIMER) or 0) end
+    if SA_PRIORITIZE_PING then t = t + getPingSeconds() end
+    return math.clamp(t, 0, 0.75)
 end
 
 local function getPredictedPos(tp)
     local part = getAimPart(tp)
     if not part then return nil end
     local now = tick()
+    local cached = _predCache[tp]
+    if cached and (now - cached.t) < math.max(0.005, SA_INTERVAL) then
+        return cached.pos
+    end
     local cur = part.Position
-    local vel = part.AssemblyLinearVelocity
+    local vel = Vector3.zero
+    pcall(function() vel = part.AssemblyLinearVelocity end)
+    if typeof(vel) ~= "Vector3" then vel = Vector3.zero end
     local prev = _prevPos[tp]
     local pt = _prevTime[tp]
-    if (not vel or vel.Magnitude < 0.05) and prev and pt then
+    if vel.Magnitude < 0.05 and prev and pt then
         local dt = now - pt
         if dt > 0.001 and dt < 0.5 then
             vel = (cur - prev) / dt
@@ -807,10 +849,14 @@ local function getPredictedPos(tp)
     end
     _prevPos[tp] = cur
     _prevTime[tp] = now
-    if vel and vel == vel then
-        return cur + vel * SA_PRED
+    local horizontal = Vector3.new(vel.X, 0, vel.Z) * (tonumber(SA_HORIZONTAL_MULT) or 1)
+    local vertical = Vector3.new(0, vel.Y, 0) * (tonumber(SA_VERTICAL_MULT) or 1)
+    if not SA_PREDICT_JUMP and vertical.Y > 0 then
+        vertical = Vector3.zero
     end
-    return cur
+    local pred = cur + (horizontal + vertical) * getPredictionTime() + Vector3.new(SA_OFFSET_X, SA_OFFSET_Y, SA_OFFSET_Z)
+    _predCache[tp] = {t = now, pos = pred}
+    return pred
 end
 
 local function getSilentTarget()
@@ -839,8 +885,6 @@ RunService.RenderStepped:Connect(function()
 end)
 
 local _shootCd = false
-local gunHitboxOn = false
-local gunHitboxSize = 12
 
 local function safeLookAt(origin, target)
     if not origin or not target then return nil end
@@ -899,136 +943,23 @@ local function fireWithSilentAim()
 end
 
 
-local function vecAxis(v, i)
-    if i == 1 then return v.X end
-    if i == 2 then return v.Y end
-    return v.Z
-end
+local dumpActive   = false
+local dumpCallback = nil
 
-local function rayOBB(origin, dir, cf, size, maxDist)
-    if typeof(origin) ~= "Vector3" then return nil end
-    if typeof(dir) ~= "Vector3" then return nil end
-    if typeof(cf) ~= "CFrame" then return nil end
-    if typeof(size) ~= "Vector3" then return nil end
-    if dir.Magnitude < 0.0001 then return nil end
-    local center = cf.Position
-    local delta = origin - center
-    local ax = cf.RightVector
-    local ay = cf.UpVector
-    local az = cf.LookVector
-    if typeof(center) ~= "Vector3" or typeof(ax) ~= "Vector3" or typeof(ay) ~= "Vector3" or typeof(az) ~= "Vector3" then return nil end
-    local ro = Vector3.new(delta:Dot(ax), delta:Dot(ay), delta:Dot(az))
-    local rd = Vector3.new(dir:Dot(ax), dir:Dot(ay), dir:Dot(az))
-    local half = size * 0.5
-    local tMin = 0
-    local tMax = maxDist or 1800
-    for i = 1, 3 do
-        local o = vecAxis(ro, i)
-        local d = vecAxis(rd, i)
-        local h = vecAxis(half, i)
-        if math.abs(d) < 0.00001 then
-            if o < -h or o > h then return nil end
-        else
-            local a = (-h - o) / d
-            local b = (h - o) / d
-            if a > b then a, b = b, a end
-            if a > tMin then tMin = a end
-            if b < tMax then tMax = b end
-            if tMin > tMax then return nil end
-        end
-    end
-    if tMin < 0 then return nil end
-    return tMin
-end
-
-local function getGunHitboxParts(chr)
-    local parts = {}
-    if not chr then return parts end
-    for _, part in ipairs(chr:GetDescendants()) do
-        if part:IsA("BasePart") then
-            local parent = part.Parent
-            if parent and not parent:IsA("Accessory") and not parent:IsA("Tool") then
-                if part.Name == "HumanoidRootPart"
-                    or part.Name == "Head"
-                    or part.Name:find("Torso")
-                    or part.Name:find("Arm")
-                    or part.Name:find("Hand")
-                    or part.Name:find("Leg")
-                    or part.Name:find("Foot") then
-                    table.insert(parts, part)
-                end
-            end
-        end
-    end
-    return parts
-end
-
-local function getGunBoxSize(part, radius)
-    if typeof(part) ~= "Instance" or not part:IsA("BasePart") then return nil end
-    local s = part.Size
-    local r = math.max(2, radius or 12)
-    if part.Name == "HumanoidRootPart" then
-        return Vector3.new(math.max(s.X, r), math.max(s.Y, r), math.max(s.Z, r))
-    end
-    local pad = math.max(0, r * 0.55)
-    return Vector3.new(math.max(s.X + pad, r * 0.45), math.max(s.Y + pad, r * 0.45), math.max(s.Z + pad, r * 0.45))
-end
-
-local function getPartPredictedCF(part, owner)
-    if typeof(part) ~= "Instance" or not part:IsA("BasePart") then return nil end
-    local vel = Vector3.zero
-    pcall(function() vel = part.AssemblyLinearVelocity end)
-    if typeof(vel) ~= "Vector3" then vel = Vector3.zero end
-    if vel.Magnitude < 0.1 and owner and owner.Character then
-        local hrp = owner.Character:FindFirstChild("HumanoidRootPart")
-        if hrp and hrp:IsA("BasePart") then pcall(function() vel = hrp.AssemblyLinearVelocity end) end
-        if typeof(vel) ~= "Vector3" then vel = Vector3.zero end
-    end
-    local offset = vel * (SA_PRED or 0.16)
-    return part.CFrame + offset
-end
-
-local function getGunTargetFromRay(origin, dir, maxDist)
-    if not gunHitboxOn then return nil end
-    if not origin or not dir then return nil end
-    if dir.Magnitude < 0.05 then return nil end
-    dir = dir.Unit
-    local role = getRole()
-    if role ~= "sheriff" and role ~= "hero" then return nil end
-    local radius = math.max(2, tonumber(gunHitboxSize) or 12)
-    local limit = tonumber(maxDist) or 1800
-    local bestT = math.huge
-    local bestPos = nil
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= player and isAlive(p) and getRole(p) == "murderer" then
-            local chr = p.Character
-            for _, part in ipairs(getGunHitboxParts(chr)) do
-                if typeof(part) == "Instance" and part:IsA("BasePart") then
-                    local cf = getPartPredictedCF(part, p)
-                    local boxSize = getGunBoxSize(part, radius)
-                    if typeof(cf) == "CFrame" and typeof(boxSize) == "Vector3" then
-                        local t = rayOBB(origin, dir, cf, boxSize, limit)
-                        if t and t < bestT then
-                            bestT = t
-                            bestPos = cf.Position
-                        end
-                    end
-                end
-            end
-        end
-    end
-    return bestPos
-end
-
-local function rewriteGunShotArgs(args)
-    if not gunHitboxOn then return false, args end
+local function rewriteSilentShotArgs(args)
+    if not silentAimOn then return false, args end
     if type(args) ~= "table" then return false, args end
+    local target = getSilentTarget()
+    if not target then return false, args end
+    local hitPos = getPredictedPos(target)
+    if not hitPos or hitPos ~= hitPos then return false, args end
     local shotCF = args[1]
-    if typeof(shotCF) ~= "CFrame" then return false, args end
-    local origin = shotCF.Position
-    local dir = shotCF.LookVector
-    local hitPos = getGunTargetFromRay(origin, dir, 1800)
-    if not hitPos then return false, args end
+    local origin
+    if typeof(shotCF) == "CFrame" then
+        origin = shotCF.Position
+    else
+        origin = getShotOrigin(getGunTool())
+    end
     local newShot = safeLookAt(origin, hitPos)
     if not newShot then return false, args end
     args[1] = newShot
@@ -1036,12 +967,9 @@ local function rewriteGunShotArgs(args)
     return true, args
 end
 
-local dumpActive   = false
-local dumpCallback = nil
-
 local function installHook()
-    if shared and shared.__MMV20_V8_HOOK then return end
-    if shared then shared.__MMV20_V8_HOOK = true end
+    if shared and shared.__MMV20_V11_HOOK then return end
+    if shared then shared.__MMV20_V11_HOOK = true end
     local mt = getrawmetatable and getrawmetatable(game)
     if not mt then return end
     local oldNamecall = mt.__namecall
@@ -1067,9 +995,9 @@ local function installHook()
                 end
                 if dumpCallback then task.spawn(dumpCallback, desc); dumpCallback = nil end
             end
-            if isGunShoot and self == shootRemote and gunHitboxOn then
+            if isGunShoot and silentAimOn then
                 local okRewrite, changed, newArgs = pcall(function()
-                    return rewriteGunShotArgs(args)
+                    return rewriteSilentShotArgs(args)
                 end)
                 if okRewrite and changed and type(newArgs) == "table" then
                     return oldNamecall(self, table.unpack(newArgs))
@@ -1236,7 +1164,7 @@ end
 local hitboxOn      = false
 local hitboxSize    = 18
 local hitboxVisible = false
-local hitboxStrong  = true
+local hitboxStrong  = false
 local hitboxCache   = {}
 
 local _myPartsCache      = nil
@@ -1277,8 +1205,8 @@ local function setHitboxVisual(saved, visible)
                     d.part.LocalTransparencyModifier = 0
                     d.part.Material = Enum.Material.ForceField
                 else
-                    d.part.Transparency = d.transparency
-                    d.part.LocalTransparencyModifier = d.ltm
+                    d.part.Transparency = 1
+                    d.part.LocalTransparencyModifier = 1
                     d.part.Material = d.material
                 end
             end)
@@ -1324,6 +1252,7 @@ local function applyHitboxToChar(p)
             canQuery = part.CanQuery,
             massless = part.Massless,
             customPhysicalProperties = part.CustomPhysicalProperties,
+            castShadow = part.CastShadow,
             constraints = cons,
         }
         pcall(function()
@@ -1333,6 +1262,7 @@ local function applyHitboxToChar(p)
             part.CanQuery = true
             part.Massless = true
             part.CustomPhysicalProperties = PhysicalProperties.new(0.01, 0, 0, 0, 0)
+            part.CastShadow = false
         end)
         table.insert(saved, d)
     end
@@ -1355,6 +1285,7 @@ local function restoreHitbox(p)
                 d.part.CanQuery = d.canQuery
                 d.part.Massless = d.massless
                 d.part.CustomPhysicalProperties = d.customPhysicalProperties
+                d.part.CastShadow = d.castShadow
             end)
         end
         for _, nc in ipairs(d.constraints) do
@@ -1894,13 +1825,35 @@ secSheriff:Button("DUMP gun (equipa e atira 1x)", function()
 end)
 
 secSheriff:Divider("silent aim")
-local t_sa = secSheriff:Toggle("silent aim (sem mover camera)", false, function(v)
+local t_sa = secSheriff:Toggle("silent aim manual shot", false, function(v)
     silentAimOn=v
-    ui:Toast("","[Silent Aim]", v and "ativo — sem travar camera" or "desativado", v and ROLE_COLOR.sheriff or ROLE_COLOR.unknown)
+    ui:Toast("","[Silent Aim]", v and "manual shots redirected" or "disabled", v and ROLE_COLOR.sheriff or ROLE_COLOR.unknown)
 end)
 ui:CfgRegister("mm2_silentaim", function() return silentAimOn end, function(v) t_sa.Set(v) end)
-local s_pred = secSheriff:Slider("prediction (x0.01s)", 0, 40, 17, function(v) SA_PRED=v/100 end)
+local s_pred = secSheriff:Slider("prediction base (x0.01s)", 0, 60, 17, function(v) SA_PRED=v/100 end)
 ui:CfgRegister("mm2_sa_pred", function() return SA_PRED*100 end, function(v) s_pred.Set(v) end)
+local s_sim = secSheriff:Slider("prediction simulation timer (x0.01s)", 0, 80, 5, function(v) SA_SIM_TIMER=v/100 end)
+ui:CfgRegister("mm2_sa_sim", function() return SA_SIM_TIMER*100 end, function(v) s_sim.Set(v) end)
+local s_int = secSheriff:Slider("prediction interval (x0.01s)", 1, 20, 3, function(v) SA_INTERVAL=v/100 end)
+ui:CfgRegister("mm2_sa_interval", function() return SA_INTERVAL*100 end, function(v) s_int.Set(v) end)
+local t_ping = secSheriff:Toggle("prioritize ping", true, function(v) SA_PRIORITIZE_PING=v end)
+ui:CfgRegister("mm2_sa_ping", function() return SA_PRIORITIZE_PING end, function(v) t_ping.Set(v) end)
+local t_jump = secSheriff:Toggle("predict jump", true, function(v) SA_PREDICT_JUMP=v end)
+ui:CfgRegister("mm2_sa_jump", function() return SA_PREDICT_JUMP end, function(v) t_jump.Set(v) end)
+local t_lag = secSheriff:Toggle("predict lag", true, function(v) SA_PREDICT_LAG=v end)
+ui:CfgRegister("mm2_sa_lag", function() return SA_PREDICT_LAG end, function(v) t_lag.Set(v) end)
+local t_sharp = secSheriff:Toggle("sharp shooter", true, function(v) SA_SHARP_SHOOTER=v end)
+ui:CfgRegister("mm2_sa_sharp", function() return SA_SHARP_SHOOTER end, function(v) t_sharp.Set(v) end)
+local s_vmult = secSheriff:Slider("vertical multiplier (%)", 0, 300, 145, function(v) SA_VERTICAL_MULT=v/100 end)
+ui:CfgRegister("mm2_sa_vmult", function() return SA_VERTICAL_MULT*100 end, function(v) s_vmult.Set(v) end)
+local s_hmult = secSheriff:Slider("horizontal multiplier (%)", 0, 300, 145, function(v) SA_HORIZONTAL_MULT=v/100 end)
+ui:CfgRegister("mm2_sa_hmult", function() return SA_HORIZONTAL_MULT*100 end, function(v) s_hmult.Set(v) end)
+local s_offx = secSheriff:Slider("offset X", -30, 30, 0, function(v) SA_OFFSET_X=v end)
+ui:CfgRegister("mm2_sa_offx", function() return SA_OFFSET_X end, function(v) s_offx.Set(v) end)
+local s_offy = secSheriff:Slider("offset Y", -30, 30, -4, function(v) SA_OFFSET_Y=v end)
+ui:CfgRegister("mm2_sa_offy", function() return SA_OFFSET_Y end, function(v) s_offy.Set(v) end)
+local s_offz = secSheriff:Slider("offset Z", -30, 30, 0, function(v) SA_OFFSET_Z=v end)
+ui:CfgRegister("mm2_sa_offz", function() return SA_OFFSET_Z end, function(v) s_offz.Set(v) end)
 
 secSheriff:Divider("hitbox expander")
 local t_hb = secSheriff:Toggle("hitbox expander", false, function(v)
@@ -1913,19 +1866,10 @@ end)
 ui:CfgRegister("mm2_hitbox", function() return hitboxOn end, function(v) t_hb.Set(v) end)
 local s_hbsize = secSheriff:Slider("tamanho hitbox (studs)", 4, 60, 18, function(v) hitboxSize=v; rebuildHitboxes() end)
 ui:CfgRegister("mm2_hitboxsize", function() return hitboxSize end, function(v) s_hbsize.Set(v) end)
-local t_hbstrong = secSheriff:Toggle("full real hitbox", true, function(v) hitboxStrong=v; rebuildHitboxes() end)
+local t_hbstrong = secSheriff:Toggle("full real hitbox", false, function(v) hitboxStrong=v; rebuildHitboxes() end)
 ui:CfgRegister("mm2_hitboxstrong", function() return hitboxStrong end, function(v) t_hbstrong.Set(v) end)
 local t_hbvis = secSheriff:Toggle("mostrar hitbox (debug)", false, function(v) hitboxVisible=v; applyHBVis(v) end)
 ui:CfgRegister("mm2_hitboxvis", function() return hitboxVisible end, function(v) t_hbvis.Set(v) end)
-
-secSheriff:Divider("gun hitbox")
-local t_ghb = secSheriff:Toggle("gun hitbox assist", false, function(v)
-    gunHitboxOn = v
-    ui:Toast("","[Gun Hitbox]", v and ("ativo — "..gunHitboxSize.." studs") or "desativado", v and ROLE_COLOR.sheriff or ROLE_COLOR.unknown)
-end)
-ui:CfgRegister("mm2_gunhitbox", function() return gunHitboxOn end, function(v) t_ghb.Set(v) end)
-local s_ghb = secSheriff:Slider("gun hitbox radius", 2, 45, 12, function(v) gunHitboxSize = v end)
-ui:CfgRegister("mm2_gunhitbox_size", function() return gunHitboxSize end, function(v) s_ghb.Set(v) end)
 
 secSheriff:Divider("shoot button (silent aim)")
 local shootBtnGui=nil; local shootBtnOn=false
@@ -2048,8 +1992,10 @@ local knifeAura=false; local knifeRange=18
 local function applyKnifeRangeHitbox()
     hitboxSize = knifeRange
     hitboxStrong = true
+    hitboxVisible = false
     if s_hbsize then pcall(function() s_hbsize.Set(knifeRange) end) end
     if t_hbstrong then pcall(function() t_hbstrong.Set(true) end) end
+    if t_hbvis then pcall(function() t_hbvis.Set(false) end) end
     if not hitboxOn then
         hitboxOn = true
         if t_hb then pcall(function() t_hb.Set(true) end) end
@@ -2073,21 +2019,7 @@ local s_kr=secMurd:Slider("range knife hitbox", 4, 80, 18, function(v)
     if knifeAura then applyKnifeRangeHitbox() end
 end)
 ui:CfgRegister("mm2_kniferange", function() return knifeRange end, function(v) s_kr.Set(v) end)
-secMurd:Button("matar sheriff (1x)", function()
-    if getRole()~="murderer" then ui:Toast("","[Knife]","voce nao e murderer",ROLE_COLOR.unknown); return end
-    local s=findByRole("sheriff"); if not s then ui:Toast("","[Knife]","sheriff nao detectado",ROLE_COLOR.unknown); return end
-    knifeAt(s.Character, true, knifeRange, 1); ui:Toast("","[Knife]","-> "..s.DisplayName,ROLE_COLOR.murderer)
-end)
-secMurd:Button("matar mais proximo", function()
-    if getRole()~="murderer" then ui:Toast("","[Knife]","voce nao e murderer",ROLE_COLOR.unknown); return end
-    local hrp=myHRP(); if not hrp then return end; local best,bestD=nil,math.huge
-    for _,p in ipairs(Players:GetPlayers()) do if p~=player then
-        local ph=p.Character and p.Character:FindFirstChild("HumanoidRootPart")
-        if ph and isAlive(p) then local d=(hrp.Position-ph.Position).Magnitude; if d<bestD then best=p; bestD=d end end
-    end end
-    if not best then ui:Toast("","[Knife]","nenhum alvo",ROLE_COLOR.unknown); return end
-    knifeAt(best.Character, true, knifeRange, 1); ui:Toast("","[Knife]","-> "..best.DisplayName,ROLE_COLOR.murderer)
-end)
+
 secMurd:Button("tp para sheriff", function()
     local s=findByRole("sheriff"); if not s then ui:Toast("","tp","sheriff nao detectado",ROLE_COLOR.unknown); return end
     local sh=s.Character and s.Character:FindFirstChild("HumanoidRootPart"); local hrp=myHRP()
