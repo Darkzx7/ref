@@ -500,7 +500,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local player = Players.LocalPlayer
 local cam    = workspace.CurrentCamera
 
-local ui = RefLib.new("mm v20 v16 v13", "rbxassetid://131165537896572", "ref_mmv20")
+local ui = RefLib.new("mm v20 v18 v16 v13", "rbxassetid://131165537896572", "ref_mmv20")
 
 
 local GetCoinEvent
@@ -773,21 +773,22 @@ local function getGunTool()
     end
     for _, container in ipairs(containers) do
         for _, obj in ipairs(container:GetChildren()) do
-            if obj:IsA("Tool") and wanted[string.lower(obj.Name)] and hasShoot(obj) then
-                return obj
+            if obj:IsA("Tool") then
+                local low = string.lower(obj.Name)
+                if (wanted[low] or low:find("gun") or low:find("revolver") or low:find("sheriff")) and hasShoot(obj) then
+                    return obj
+                end
             end
         end
     end
     for _, container in ipairs(containers) do
         for _, obj in ipairs(container:GetChildren()) do
-            if obj:IsA("Tool") and string.find(string.lower(obj.Name), "gun") and hasShoot(obj) then
-                return obj
+            if obj:IsA("Tool") then
+                local low = string.lower(obj.Name)
+                if wanted[low] or low:find("gun") or low:find("revolver") or low:find("sheriff") then
+                    return obj
+                end
             end
-        end
-    end
-    for _, container in ipairs(containers) do
-        for _, obj in ipairs(container:GetChildren()) do
-            if obj:IsA("Tool") and wanted[string.lower(obj.Name)] then return obj end
         end
     end
 end
@@ -947,7 +948,6 @@ end
 
 local _manualSilentOverridePos = nil
 local _manualSilentOverrideUntil = 0
-local _lastSilentShotAt = 0
 
 local fireGunAtPosition
 fireGunAtPosition = function(hitPos)
@@ -976,7 +976,7 @@ local function getRewriteHitPosition()
 end
 
 local function buildSilentShootArgs(args, hitPos)
-    if type(args) ~= "table" then return nil end
+    if type(args) ~= "table" then args = {} end
     if not hitPos or hitPos ~= hitPos then return nil end
     if #args >= 2 and typeof(args[1]) == "CFrame" and typeof(args[2]) == "CFrame" then
         local out = {}
@@ -990,71 +990,60 @@ local function buildSilentShootArgs(args, hitPos)
         out[2] = hitPos
         return out
     end
-    return nil
-end
-
-local function getReadyGun()
-    local gunTool = getGunTool()
-    if not gunTool then return nil end
-    local chr = player.Character
-    if not chr then return nil end
-    if not chr:FindFirstChild(gunTool.Name) then
-        equipTool(gunTool)
-        task.wait(0.06)
-        chr = player.Character
-        if not chr then return nil end
-        gunTool = getGunTool()
+    if #args == 0 then
+        local origin = getShotOrigin(getGunTool())
+        if not origin or origin ~= origin then return nil end
+        local shotCF = safeLookAt(origin, hitPos)
+        if not shotCF then return nil end
+        return {shotCF, CFrame.new(hitPos)}
     end
-    return gunTool
-end
-
-local function fireDirectShootAtPosition(hitPos)
-    local gunTool = getReadyGun()
-    if not gunTool then return false end
-    local shootRemote = getShootRemote(gunTool)
-    if not shootRemote or not shootRemote:IsA("RemoteEvent") then return false end
-    local origin = getShotOrigin(gunTool)
-    local shotCF = safeLookAt(origin, hitPos)
-    if not shotCF then return false end
-    _silentFireGuard = true
-    local ok = pcall(function()
-        shootRemote:FireServer(shotCF, CFrame.new(hitPos))
-    end)
-    _silentFireGuard = false
-    return ok
+    return nil
 end
 
 local function fireShootRemoteAtPosition(hitPos)
     if _shootCd then return false end
     if not hitPos or hitPos ~= hitPos then return false end
-    local gunTool = getReadyGun()
+    local gunTool = getGunTool()
     if not gunTool then return false end
+    local chr = player.Character
+    if not chr then return false end
+    if not chr:FindFirstChild(gunTool.Name) then
+        equipTool(gunTool)
+        task.wait(0.08)
+        chr = player.Character
+        if not chr then return false end
+        gunTool = getGunTool()
+        if not gunTool then return false end
+    end
+    local shootRemote = getShootRemote(gunTool)
+    if not shootRemote or not shootRemote:IsA("RemoteEvent") then return false end
+    local origin = getShotOrigin(gunTool)
+    local shotCF = safeLookAt(origin, hitPos)
+    if not shotCF then return false end
+    local args = buildSilentShootArgs({shotCF, CFrame.new(hitPos)}, hitPos)
+    if not args then return false end
     _shootCd = true
     _manualSilentOverridePos = hitPos
-    _manualSilentOverrideUntil = tick() + 0.55
-    _lastSilentShotAt = 0
-    local activated = pcall(function()
-        gunTool:Activate()
+    _manualSilentOverrideUntil = tick() + 0.45
+    _silentFireGuard = true
+    local ok = pcall(function()
+        shootRemote:FireServer(table.unpack(args))
     end)
-    task.delay(0.14, function()
-        if tick() <= _manualSilentOverrideUntil and tick() - _lastSilentShotAt > 0.13 then
-            fireDirectShootAtPosition(hitPos)
-        end
-    end)
+    _silentFireGuard = false
     task.delay(0.62, function()
         _shootCd = false
         if tick() > _manualSilentOverrideUntil then
             _manualSilentOverridePos = nil
         end
     end)
-    return activated
+    return ok
 end
 
 fireGunAtPosition = fireShootRemoteAtPosition
 
 local function installShootHook()
-    if shared and shared.__MMV20_V17_SHOOTH0OK then return end
-    if shared then shared.__MMV20_V17_SHOOTH0OK = true end
+    if shared and shared.__MMV20_V18_SHOOTH0OK then return end
+    if shared then shared.__MMV20_V18_SHOOTH0OK = true end
     local mt = getrawmetatable and getrawmetatable(game)
     if not mt then return end
     local oldNamecall = mt.__namecall
@@ -1062,33 +1051,30 @@ local function installShootHook()
     pcall(setreadonly, mt, false)
     mt.__namecall = newcclosure and newcclosure(function(self, ...)
         local method = getnamecallmethod and getnamecallmethod()
-        if method == "FireServer" then
+        if method == "FireServer" and not _silentFireGuard then
             local args = {...}
             local gunTool = getGunTool()
             local shootRemote = gunTool and getShootRemote(gunTool)
             local isGunShoot = shootRemote and typeof(self) == "Instance" and self == shootRemote
-            if isGunShoot then
-                _lastSilentShotAt = tick()
-                if dumpActive then
-                    dumpActive = false
-                    local desc = {}
-                    for i, v in ipairs(args) do
-                        local t = typeof(v)
-                        local rep = t == "CFrame" and string.format("CFrame(%.2f,%.2f,%.2f)", v.X, v.Y, v.Z)
-                            or t == "Vector3" and string.format("Vector3(%.2f,%.2f,%.2f)", v.X, v.Y, v.Z)
-                            or t == "Instance" and ("Instance:"..v.ClassName.."["..v.Name.."]")
-                            or tostring(v)
-                        table.insert(desc, string.format("[%d] (%s) = %s", i, t, rep))
-                    end
-                    if dumpCallback then task.spawn(dumpCallback, desc); dumpCallback = nil end
+            if dumpActive and isGunShoot then
+                dumpActive = false
+                local desc = {}
+                for i, v in ipairs(args) do
+                    local t = typeof(v)
+                    local rep = t == "CFrame" and string.format("CFrame(%.2f,%.2f,%.2f)", v.X, v.Y, v.Z)
+                        or t == "Vector3" and string.format("Vector3(%.2f,%.2f,%.2f)", v.X, v.Y, v.Z)
+                        or t == "Instance" and ("Instance:"..v.ClassName.."["..v.Name.."]")
+                        or tostring(v)
+                    table.insert(desc, string.format("[%d] (%s) = %s", i, t, rep))
                 end
-                if silentAimOn and not _silentFireGuard then
-                    local hitPos = getRewriteHitPosition()
-                    local newArgs = buildSilentShootArgs(args, hitPos)
-                    if newArgs then
-                        _manualSilentOverridePos = nil
-                        return oldNamecall(self, table.unpack(newArgs))
-                    end
+                if dumpCallback then task.spawn(dumpCallback, desc); dumpCallback = nil end
+            end
+            if isGunShoot and silentAimOn then
+                local hitPos = getRewriteHitPosition()
+                local newArgs = buildSilentShootArgs(args, hitPos)
+                if newArgs then
+                    _manualSilentOverridePos = nil
+                    return oldNamecall(self, table.unpack(newArgs))
                 end
             end
         end
@@ -1097,6 +1083,7 @@ local function installShootHook()
     pcall(setreadonly, mt, true)
 end
 task.defer(installShootHook)
+
 
 local function getKnifeHandle(knifeTool)
     if not knifeTool then return nil end
@@ -1111,9 +1098,6 @@ local knifeReachCache = {}
 
 local function restoreKnifeReach()
     for part, d in pairs(knifeReachCache) do
-        if d.visual and d.visual.Parent then
-            pcall(function() d.visual:Destroy() end)
-        end
         if part and part.Parent then
             pcall(function()
                 part.Size = d.size
@@ -1145,41 +1129,7 @@ local function applyKnifeReach(knife, size)
             massless = h.Massless,
             material = h.Material,
             castShadow = h.CastShadow,
-            visual = nil,
         }
-    end
-    local d = knifeReachCache[h]
-    if not d.visual or not d.visual.Parent then
-        local ok, visual = pcall(function()
-            local clone = h:Clone()
-            clone.Name = "KnifeVisible"
-            clone.Size = d.size
-            clone.CFrame = h.CFrame
-            clone.Transparency = d.transparency
-            clone.LocalTransparencyModifier = d.ltm
-            clone.CanCollide = false
-            clone.CanTouch = false
-            clone.CanQuery = false
-            clone.Massless = true
-            clone.Anchored = false
-            for _, obj in ipairs(clone:GetDescendants()) do
-                if obj:IsA("Script") or obj:IsA("LocalScript") or obj:IsA("ModuleScript") or obj:IsA("WeldConstraint") or obj:IsA("JointInstance") or obj:IsA("Constraint") then
-                    obj:Destroy()
-                elseif obj:IsA("BasePart") then
-                    obj.CanCollide = false
-                    obj.CanTouch = false
-                    obj.CanQuery = false
-                    obj.Massless = true
-                end
-            end
-            clone.Parent = h.Parent
-            local weld = Instance.new("WeldConstraint")
-            weld.Part0 = h
-            weld.Part1 = clone
-            weld.Parent = clone
-            return clone
-        end)
-        if ok then d.visual = visual end
     end
     local n = math.max(3, tonumber(size) or 12)
     pcall(function()
@@ -1193,17 +1143,6 @@ local function applyKnifeReach(knife, size)
         h.Material = Enum.Material.SmoothPlastic
         h.CastShadow = false
     end)
-    if d.visual and d.visual.Parent then
-        pcall(function()
-            d.visual.Size = d.size
-            d.visual.Transparency = d.transparency
-            d.visual.LocalTransparencyModifier = d.ltm
-            d.visual.CanCollide = false
-            d.visual.CanTouch = false
-            d.visual.CanQuery = false
-            d.visual.Massless = true
-        end)
-    end
     return h
 end
 
@@ -2172,7 +2111,7 @@ local t_ka=secMurd:Toggle("knife range (enemy hitbox)", false, function(v)
         local knife = getKnifeTool()
         if knife then applyKnifeReach(knife, knifeRange) end
         rebuildHitboxes()
-        ui:Toast("","[Knife Range]","hitbox ativo, faca visivel",ROLE_COLOR.murderer)
+        ui:Toast("","[Knife Range]","reach/hitbox manual ativo — ataque clicando",ROLE_COLOR.murderer)
     else
         if hitboxOn then rebuildHitboxes() else restoreAllHitboxes() end
         ui:Toast("","[Knife Range]","desativado",ROLE_COLOR.unknown)
