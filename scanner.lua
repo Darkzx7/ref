@@ -1012,48 +1012,42 @@ local function rewriteSilentShotArgs(args)
     return true, out
 end
 
-local function installHook()
-    if shared and shared.__MMV20_V13_HOOK then return end
-    if shared then shared.__MMV20_V13_HOOK = true end
+local function installSilentMouseHook()
+    if shared and shared.__MMV20_V14_MOUSEHOOK then return end
+    if shared then shared.__MMV20_V14_MOUSEHOOK = true end
+    local mouse = player:GetMouse()
     local mt = getrawmetatable and getrawmetatable(game)
     if not mt then return end
-    local oldNamecall = mt.__namecall
-    if not oldNamecall then return end
+    local oldIndex = mt.__index
+    if not oldIndex then return end
     pcall(setreadonly, mt, false)
-    mt.__namecall = newcclosure and newcclosure(function(self, ...)
-        local method = getnamecallmethod and getnamecallmethod()
-        if method == "FireServer" then
-            local args = {...}
-            local gunTool = getGunTool()
-            local shootRemote = gunTool and getShootRemote(gunTool)
-            local isGunShoot = shootRemote and typeof(self) == "Instance" and self == shootRemote
-            if dumpActive and isGunShoot then
-                dumpActive = false
-                local desc = {}
-                for i, v in ipairs(args) do
-                    local t = typeof(v)
-                    local rep = t=="CFrame" and string.format("CFrame(%.2f,%.2f,%.2f)",v.X,v.Y,v.Z)
-                        or t=="Vector3" and string.format("Vector3(%.2f,%.2f,%.2f)",v.X,v.Y,v.Z)
-                        or t=="Instance" and ("Instance:"..v.ClassName.."["..v.Name.."]")
-                        or tostring(v)
-                    table.insert(desc, string.format("[%d] (%s) = %s", i, t, rep))
-                end
-                if dumpCallback then task.spawn(dumpCallback, desc); dumpCallback = nil end
-            end
-            if isGunShoot and silentAimOn then
-                local okRewrite, changed, newArgs = pcall(function()
-                    return rewriteSilentShotArgs(args)
-                end)
-                if okRewrite and changed and type(newArgs) == "table" then
-                    return oldNamecall(self, table.unpack(newArgs))
+    mt.__index = newcclosure and newcclosure(function(self, key)
+        if self == mouse and (silentAimOn or _manualSilentOverridePos) then
+            local hitPos = getRewriteHitPosition()
+            if hitPos and hitPos == hitPos then
+                if key == "Hit" then
+                    return CFrame.new(hitPos)
+                elseif key == "Target" then
+                    local target = getSilentTarget()
+                    local part = target and getAimPart(target)
+                    if part then return part end
+                elseif key == "UnitRay" then
+                    local origin = cam.CFrame.Position
+                    local dir = hitPos - origin
+                    if dir.Magnitude > 0.05 then
+                        return Ray.new(origin, dir.Unit * 1000)
+                    end
                 end
             end
         end
-        return oldNamecall(self, ...)
-    end) or oldNamecall
+        if type(oldIndex) == "function" then
+            return oldIndex(self, key)
+        end
+        return oldIndex[key]
+    end) or oldIndex
     pcall(setreadonly, mt, true)
 end
-task.defer(installHook)
+task.defer(installSilentMouseHook)
 
 
 local function getKnifeHandle(knifeTool)
@@ -1075,7 +1069,11 @@ local function restoreKnifeReach()
                 part.Transparency = d.transparency
                 part.LocalTransparencyModifier = d.ltm
                 part.CanTouch = d.canTouch
+                part.CanCollide = d.canCollide
+                part.CanQuery = d.canQuery
                 part.Massless = d.massless
+                part.Material = d.material
+                part.CastShadow = d.castShadow
             end)
         end
     end
@@ -1091,15 +1089,24 @@ local function applyKnifeReach(knife, size)
             transparency = h.Transparency,
             ltm = h.LocalTransparencyModifier,
             canTouch = h.CanTouch,
+            canCollide = h.CanCollide,
+            canQuery = h.CanQuery,
             massless = h.Massless,
+            material = h.Material,
+            castShadow = h.CastShadow,
         }
     end
     local n = math.max(3, tonumber(size) or 12)
     pcall(function()
         h.Size = Vector3.new(n, n, n)
-        h.CanTouch = true
-        h.Massless = true
+        h.Transparency = 1
         h.LocalTransparencyModifier = 1
+        h.CanTouch = true
+        h.CanCollide = false
+        h.CanQuery = false
+        h.Massless = true
+        h.Material = Enum.Material.SmoothPlastic
+        h.CastShadow = false
     end)
     return h
 end
@@ -1232,7 +1239,7 @@ local function isHitboxCandidate(part)
     if not part or not part:IsA("BasePart") then return false end
     if part.Parent:IsA("Accessory") or part.Parent:IsA("Tool") then return false end
     if part.Name == "HumanoidRootPart" then return true end
-    if not hitboxStrong then return false end
+    if not hitboxStrong or not hitboxVisible then return false end
     return part.Name == "Head"
         or part.Name:find("Torso") ~= nil
         or part.Name:find("Arm") ~= nil
@@ -1905,13 +1912,13 @@ local t_hb = secSheriff:Toggle("hitbox expander", false, function(v)
     hitboxOn=v
     if v then
         rebuildHitboxes()
-        ui:Toast("","[Hitbox]",(hitboxStrong and "full real" or "core").." — "..hitboxSize.." studs",ROLE_COLOR.sheriff)
+        ui:Toast("","[Hitbox]",(hitboxStrong and hitboxVisible and "full body" or "root invisivel").." — "..hitboxSize.." studs",ROLE_COLOR.sheriff)
     else restoreAllHitboxes(); ui:Toast("","[Hitbox]","desativado",ROLE_COLOR.unknown) end
 end)
 ui:CfgRegister("mm2_hitbox", function() return hitboxOn end, function(v) t_hb.Set(v) end)
 local s_hbsize = secSheriff:Slider("tamanho hitbox (studs)", 4, 60, 18, function(v) hitboxSize=v; rebuildHitboxes() end)
 ui:CfgRegister("mm2_hitboxsize", function() return hitboxSize end, function(v) s_hbsize.Set(v) end)
-local t_hbstrong = secSheriff:Toggle("full real hitbox", false, function(v) hitboxStrong=v; rebuildHitboxes() end)
+local t_hbstrong = secSheriff:Toggle("full body hitbox (debug only)", false, function(v) hitboxStrong=v; rebuildHitboxes() end)
 ui:CfgRegister("mm2_hitboxstrong", function() return hitboxStrong end, function(v) t_hbstrong.Set(v) end)
 local t_hbvis = secSheriff:Toggle("mostrar hitbox (debug)", false, function(v) hitboxVisible=v; applyHBVis(v) end)
 ui:CfgRegister("mm2_hitboxvis", function() return hitboxVisible end, function(v) t_hbvis.Set(v) end)
@@ -2031,40 +2038,47 @@ secSheriff:Button("tp para murderer", function()
 end)
 
 local secMurd=tabCombat:Section("murderer")
-secMurd:Divider("knife range (hitbox)")
-local knifeAura=false; local knifeRange=18
+secMurd:Divider("knife range")
+local knifeRangeOn=false; local knifeRange=18; local knifeRangeLoop=false
 
-local function applyKnifeRangeHitbox()
-    hitboxSize = knifeRange
-    hitboxStrong = true
-    hitboxVisible = false
-    if s_hbsize then pcall(function() s_hbsize.Set(knifeRange) end) end
-    if t_hbstrong then pcall(function() t_hbstrong.Set(true) end) end
-    if t_hbvis then pcall(function() t_hbvis.Set(false) end) end
-    if not hitboxOn then
-        hitboxOn = true
-        if t_hb then pcall(function() t_hb.Set(true) end) end
-    else
-        rebuildHitboxes()
-    end
+local function applyKnifeRangeNow()
+    if not knifeRangeOn then restoreKnifeReach(); return end
+    local knife = getKnifeTool()
+    if knife then applyKnifeReach(knife, knifeRange) end
 end
 
-local t_ka=secMurd:Toggle("knife range (hitbox only)", false, function(v)
-    knifeAura=v
+local function knifeRangeLoopFn()
+    if knifeRangeLoop then return end
+    knifeRangeLoop = true
+    while knifeRangeOn do
+        applyKnifeRangeNow()
+        task.wait(0.2)
+    end
+    restoreKnifeReach()
+    knifeRangeLoop = false
+end
+
+local t_ka=secMurd:Toggle("knife range (handle hitbox)", false, function(v)
+    knifeRangeOn=v
     if v then
-        applyKnifeRangeHitbox()
-        ui:Toast("","[Knife Range]","hitbox ligada — ataque manualmente",ROLE_COLOR.murderer)
+        applyKnifeRangeNow()
+        task.spawn(knifeRangeLoopFn)
+        ui:Toast("","[Knife Range]","ativo — ataque manualmente",ROLE_COLOR.murderer)
     else
-        ui:Toast("","[Knife Range]","desativado — use hitbox expander se quiser manter",ROLE_COLOR.unknown)
+        restoreKnifeReach()
+        ui:Toast("","[Knife Range]","desativado",ROLE_COLOR.unknown)
     end
 end)
-ui:CfgRegister("mm2_knifeaura", function() return knifeAura end, function(v) t_ka.Set(v) end)
-local s_kr=secMurd:Slider("range knife hitbox", 4, 80, 18, function(v)
+ui:CfgRegister("mm2_knifeaura", function() return knifeRangeOn end, function(v) t_ka.Set(v) end)
+local s_kr=secMurd:Slider("range knife handle", 4, 80, 18, function(v)
     knifeRange=v
-    if knifeAura then applyKnifeRangeHitbox() end
+    if knifeRangeOn then applyKnifeRangeNow() end
 end)
 ui:CfgRegister("mm2_kniferange", function() return knifeRange end, function(v) s_kr.Set(v) end)
-
+player.CharacterAdded:Connect(function()
+    restoreKnifeReach()
+    if knifeRangeOn then task.wait(0.8); applyKnifeRangeNow() end
+end)
 secMurd:Button("tp para sheriff", function()
     local s=findByRole("sheriff"); if not s then ui:Toast("","tp","sheriff nao detectado",ROLE_COLOR.unknown); return end
     local sh=s.Character and s.Character:FindFirstChild("HumanoidRootPart"); local hrp=myHRP()
