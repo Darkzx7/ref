@@ -839,6 +839,8 @@ RunService.RenderStepped:Connect(function()
 end)
 
 local _shootCd = false
+local gunHitboxOn = false
+local gunHitboxSize = 12
 
 local function safeLookAt(origin, target)
     if not origin or not target then return nil end
@@ -897,6 +899,124 @@ local function fireWithSilentAim()
 end
 
 
+local function vecAxis(v, i)
+    if i == 1 then return v.X end
+    if i == 2 then return v.Y end
+    return v.Z
+end
+
+local function rayOBB(origin, dir, cf, size, maxDist)
+    local ro = cf:PointToObjectSpace(origin)
+    local rd = cf:VectorToObjectSpace(dir)
+    local half = size * 0.5
+    local tMin = 0
+    local tMax = maxDist or 1800
+    for i = 1, 3 do
+        local o = vecAxis(ro, i)
+        local d = vecAxis(rd, i)
+        local h = vecAxis(half, i)
+        if math.abs(d) < 0.00001 then
+            if o < -h or o > h then return nil end
+        else
+            local a = (-h - o) / d
+            local b = (h - o) / d
+            if a > b then a, b = b, a end
+            if a > tMin then tMin = a end
+            if b < tMax then tMax = b end
+            if tMin > tMax then return nil end
+        end
+    end
+    if tMin < 0 then return nil end
+    return tMin
+end
+
+local function getGunHitboxParts(chr)
+    local parts = {}
+    if not chr then return parts end
+    for _, part in ipairs(chr:GetDescendants()) do
+        if part:IsA("BasePart") then
+            local parent = part.Parent
+            if parent and not parent:IsA("Accessory") and not parent:IsA("Tool") then
+                if part.Name == "HumanoidRootPart"
+                    or part.Name == "Head"
+                    or part.Name:find("Torso")
+                    or part.Name:find("Arm")
+                    or part.Name:find("Hand")
+                    or part.Name:find("Leg")
+                    or part.Name:find("Foot") then
+                    table.insert(parts, part)
+                end
+            end
+        end
+    end
+    return parts
+end
+
+local function getGunBoxSize(part, radius)
+    local s = part.Size
+    local r = math.max(2, radius or 12)
+    if part.Name == "HumanoidRootPart" then
+        return Vector3.new(math.max(s.X, r), math.max(s.Y, r), math.max(s.Z, r))
+    end
+    local pad = math.max(0, r * 0.55)
+    return Vector3.new(math.max(s.X + pad, r * 0.45), math.max(s.Y + pad, r * 0.45), math.max(s.Z + pad, r * 0.45))
+end
+
+local function getPartPredictedCF(part, owner)
+    local vel = Vector3.zero
+    pcall(function() vel = part.AssemblyLinearVelocity end)
+    if vel.Magnitude < 0.1 and owner and owner.Character then
+        local hrp = owner.Character:FindFirstChild("HumanoidRootPart")
+        if hrp then pcall(function() vel = hrp.AssemblyLinearVelocity end) end
+    end
+    local offset = vel * (SA_PRED or 0.16)
+    return part.CFrame + offset
+end
+
+local function getGunTargetFromRay(origin, dir, maxDist)
+    if not gunHitboxOn then return nil end
+    if not origin or not dir then return nil end
+    if dir.Magnitude < 0.05 then return nil end
+    dir = dir.Unit
+    local role = getRole()
+    if role ~= "sheriff" and role ~= "hero" then return nil end
+    local radius = math.max(2, tonumber(gunHitboxSize) or 12)
+    local limit = tonumber(maxDist) or 1800
+    local bestT = math.huge
+    local bestPos = nil
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= player and isAlive(p) and getRole(p) == "murderer" then
+            local chr = p.Character
+            for _, part in ipairs(getGunHitboxParts(chr)) do
+                local cf = getPartPredictedCF(part, p)
+                local boxSize = getGunBoxSize(part, radius)
+                local t = rayOBB(origin, dir, cf, boxSize, limit)
+                if t and t < bestT then
+                    bestT = t
+                    bestPos = cf.Position
+                end
+            end
+        end
+    end
+    return bestPos
+end
+
+local function rewriteGunShotArgs(args)
+    if not gunHitboxOn then return false, args end
+    if type(args) ~= "table" then return false, args end
+    local shotCF = args[1]
+    if typeof(shotCF) ~= "CFrame" then return false, args end
+    local origin = shotCF.Position
+    local dir = shotCF.LookVector
+    local hitPos = getGunTargetFromRay(origin, dir, 1800)
+    if not hitPos then return false, args end
+    local newShot = safeLookAt(origin, hitPos)
+    if not newShot then return false, args end
+    args[1] = newShot
+    args[2] = CFrame.new(hitPos)
+    return true, args
+end
+
 local dumpActive   = false
 local dumpCallback = nil
 
@@ -908,10 +1028,12 @@ local function installHook()
     pcall(setreadonly, mt, false)
     mt.__namecall = newcclosure and newcclosure(function(self, ...)
         local method = getnamecallmethod and getnamecallmethod()
-        if dumpActive and method == "FireServer" then
+        if method == "FireServer" then
             local args = {...}
             local gunTool = getGunTool()
-            if gunTool and (self == gunTool or self == getShootRemote(gunTool)) then
+            local shootRemote = gunTool and getShootRemote(gunTool)
+            local isGunShoot = gunTool and (self == gunTool or self == shootRemote)
+            if dumpActive and isGunShoot then
                 dumpActive = false
                 local desc = {}
                 for i, v in ipairs(args) do
@@ -923,6 +1045,12 @@ local function installHook()
                     table.insert(desc, string.format("[%d] (%s) = %s", i, t, rep))
                 end
                 if dumpCallback then task.spawn(dumpCallback, desc); dumpCallback = nil end
+            end
+            if isGunShoot and self == shootRemote and gunHitboxOn then
+                local changed, newArgs = rewriteGunShotArgs(args)
+                if changed then
+                    return oldNamecall(self, table.unpack(newArgs))
+                end
             end
         end
         return oldNamecall(self, ...)
@@ -1101,7 +1229,7 @@ end
 local hitboxOn      = false
 local hitboxSize    = 18
 local hitboxVisible = false
-local hitboxStrong  = true
+local hitboxStrong  = false
 local hitboxCache   = {}
 
 local _myPartsCache      = nil
@@ -1143,11 +1271,7 @@ local function setHitboxVisual(saved, visible)
                     d.part.Material = Enum.Material.ForceField
                 else
                     d.part.Transparency = d.transparency
-                    if d.part.Name == "HumanoidRootPart" then
-                        d.part.LocalTransparencyModifier = d.ltm
-                    else
-                        d.part.LocalTransparencyModifier = 1
-                    end
+                    d.part.LocalTransparencyModifier = d.ltm
                     d.part.Material = d.material
                 end
             end)
@@ -1190,6 +1314,7 @@ local function applyHitboxToChar(p)
             material = part.Material,
             canTouch = part.CanTouch,
             canCollide = part.CanCollide,
+            canQuery = part.CanQuery,
             massless = part.Massless,
             constraints = cons,
         }
@@ -1197,6 +1322,7 @@ local function applyHitboxToChar(p)
             part.Size = targetSize
             part.CanTouch = true
             part.CanCollide = false
+            part.CanQuery = true
             part.Massless = true
         end)
         table.insert(saved, d)
@@ -1217,6 +1343,7 @@ local function restoreHitbox(p)
                 d.part.Material = d.material
                 d.part.CanTouch = d.canTouch
                 d.part.CanCollide = d.canCollide
+                d.part.CanQuery = d.canQuery
                 d.part.Massless = d.massless
             end)
         end
@@ -1770,16 +1897,25 @@ local t_hb = secSheriff:Toggle("hitbox expander", false, function(v)
     hitboxOn=v
     if v then
         rebuildHitboxes()
-        ui:Toast("","[Hitbox]","real invisivel — "..hitboxSize.." studs",ROLE_COLOR.sheriff)
+        ui:Toast("","[Hitbox]",(hitboxStrong and "full real" or "core").." — "..hitboxSize.." studs",ROLE_COLOR.sheriff)
     else restoreAllHitboxes(); ui:Toast("","[Hitbox]","desativado",ROLE_COLOR.unknown) end
 end)
 ui:CfgRegister("mm2_hitbox", function() return hitboxOn end, function(v) t_hb.Set(v) end)
 local s_hbsize = secSheriff:Slider("tamanho hitbox (studs)", 4, 60, 18, function(v) hitboxSize=v; rebuildHitboxes() end)
 ui:CfgRegister("mm2_hitboxsize", function() return hitboxSize end, function(v) s_hbsize.Set(v) end)
-local t_hbstrong = secSheriff:Toggle("full real hitbox", true, function(v) hitboxStrong=v; rebuildHitboxes() end)
+local t_hbstrong = secSheriff:Toggle("full real hitbox", false, function(v) hitboxStrong=v; rebuildHitboxes() end)
 ui:CfgRegister("mm2_hitboxstrong", function() return hitboxStrong end, function(v) t_hbstrong.Set(v) end)
 local t_hbvis = secSheriff:Toggle("mostrar hitbox (debug)", false, function(v) hitboxVisible=v; applyHBVis(v) end)
 ui:CfgRegister("mm2_hitboxvis", function() return hitboxVisible end, function(v) t_hbvis.Set(v) end)
+
+secSheriff:Divider("gun hitbox")
+local t_ghb = secSheriff:Toggle("gun hitbox assist", false, function(v)
+    gunHitboxOn = v
+    ui:Toast("","[Gun Hitbox]", v and ("ativo — "..gunHitboxSize.." studs") or "desativado", v and ROLE_COLOR.sheriff or ROLE_COLOR.unknown)
+end)
+ui:CfgRegister("mm2_gunhitbox", function() return gunHitboxOn end, function(v) t_ghb.Set(v) end)
+local s_ghb = secSheriff:Slider("gun hitbox radius", 2, 45, 12, function(v) gunHitboxSize = v end)
+ui:CfgRegister("mm2_gunhitbox_size", function() return gunHitboxSize end, function(v) s_ghb.Set(v) end)
 
 secSheriff:Divider("shoot button (silent aim)")
 local shootBtnGui=nil; local shootBtnOn=false
