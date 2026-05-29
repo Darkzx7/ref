@@ -500,7 +500,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local player = Players.LocalPlayer
 local cam    = workspace.CurrentCamera
 
-local ui = RefLib.new("mm v20", "rbxassetid://131165537896572", "ref_mmv20")
+local ui = RefLib.new("mm v20 v13", "rbxassetid://131165537896572", "ref_mmv20")
 
 
 local GetCoinEvent
@@ -917,30 +917,35 @@ local function getShotOrigin(gunTool)
     return cam.CFrame.Position
 end
 
+local _manualSilentOverridePos = nil
+local _manualSilentOverrideUntil = 0
+
 local function fireGunAtPosition(hitPos)
     if _shootCd then return false end
     if not hitPos or hitPos ~= hitPos then return false end
-    local gunTool = getGunTool(); if not gunTool then return false end
-    local chr = player.Character; if not chr then return false end
+    local gunTool = getGunTool()
+    if not gunTool then return false end
+    local chr = player.Character
+    if not chr then return false end
     if not chr:FindFirstChild(gunTool.Name) then
         equipTool(gunTool)
-        chr = player.Character; if not chr then return false end
-        gunTool = getGunTool(); if not gunTool then return false end
+        chr = player.Character
+        if not chr then return false end
+        gunTool = getGunTool()
+        if not gunTool then return false end
     end
-    local remote = getShootRemote(gunTool)
-    local originPos = getShotOrigin(gunTool)
-    local shotCF = safeLookAt(originPos, hitPos)
-    local hitCF = CFrame.new(hitPos)
-    if not shotCF then return false end
     _shootCd = true
-    local ok = false
-    if remote then
-        ok = pcall(function() remote:FireServer(shotCF, hitCF) end)
-    end
-    if not ok then
-        ok = pcall(function() gunTool:Activate() end)
-    end
-    task.delay(0.62, function() _shootCd = false end)
+    _manualSilentOverridePos = hitPos
+    _manualSilentOverrideUntil = tick() + 0.35
+    local ok = pcall(function()
+        gunTool:Activate()
+    end)
+    task.delay(0.62, function()
+        _shootCd = false
+        if tick() > _manualSilentOverrideUntil then
+            _manualSilentOverridePos = nil
+        end
+    end)
     return ok
 end
 
@@ -954,28 +959,62 @@ end
 local dumpActive   = false
 local dumpCallback = nil
 
+local function getRewriteHitPosition()
+    if _manualSilentOverridePos and tick() <= _manualSilentOverrideUntil then
+        return _manualSilentOverridePos
+    end
+    local target = getSilentTarget()
+    if not target then return nil end
+    return getPredictedPos(target)
+end
+
 local function rewriteSilentShotArgs(args)
     if not silentAimOn then return false, args end
     if type(args) ~= "table" then return false, args end
-    if typeof(args[1]) ~= "CFrame" or typeof(args[2]) ~= "CFrame" then
+    if #args == 0 then return false, args end
+    if typeof(args[1]) ~= "string" then
         return false, args
     end
-    local target = getSilentTarget()
-    if not target then return false, args end
-    local hitPos = getPredictedPos(target)
+    local hitPos = getRewriteHitPosition()
     if not hitPos or hitPos ~= hitPos then return false, args end
-    local origin = args[1].Position
-    local newShot = safeLookAt(origin, hitPos)
-    if not newShot then return false, args end
+    local firstCFIndex, secondCFIndex = nil, nil
+    local firstVectorIndex, secondVectorIndex = nil, nil
+    for i = 2, #args do
+        local tv = typeof(args[i])
+        if tv == "CFrame" then
+            if not firstCFIndex then firstCFIndex = i elseif not secondCFIndex then secondCFIndex = i end
+        elseif tv == "Vector3" then
+            if not firstVectorIndex then firstVectorIndex = i elseif not secondVectorIndex then secondVectorIndex = i end
+        end
+    end
+    if not firstCFIndex and not firstVectorIndex then
+        return false, args
+    end
     local out = table.clone(args)
-    out[1] = newShot
-    out[2] = CFrame.new(hitPos)
+    local origin = nil
+    if firstCFIndex then origin = args[firstCFIndex].Position end
+    if not origin and firstVectorIndex then origin = args[firstVectorIndex] end
+    if not origin then origin = getShotOrigin(getGunTool()) end
+    local newShot = safeLookAt(origin, hitPos)
+    if firstCFIndex and newShot then
+        out[firstCFIndex] = newShot
+    end
+    if secondCFIndex then
+        out[secondCFIndex] = CFrame.new(hitPos)
+    end
+    if firstVectorIndex then
+        out[firstVectorIndex] = origin
+    end
+    if secondVectorIndex then
+        out[secondVectorIndex] = hitPos
+    end
+    _manualSilentOverridePos = nil
     return true, out
 end
 
 local function installHook()
-    if shared and shared.__MMV20_V12_HOOK then return end
-    if shared then shared.__MMV20_V12_HOOK = true end
+    if shared and shared.__MMV20_V13_HOOK then return end
+    if shared then shared.__MMV20_V13_HOOK = true end
     local mt = getrawmetatable and getrawmetatable(game)
     if not mt then return end
     local oldNamecall = mt.__namecall
