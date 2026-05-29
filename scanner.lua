@@ -807,15 +807,23 @@ local function getAimPart(tp)
 end
 
 local function getPingSeconds()
+    local stats = game:GetService("Stats")
+    local network = stats and stats:FindFirstChild("Network")
+    local serverStats = network and network:FindFirstChild("ServerStatsItem")
+    local ping = serverStats and serverStats:FindFirstChild("Data Ping")
+    if not ping or ping.ClassName ~= "StatsItem" then return 0 end
     local ok, val = pcall(function()
-        local stats = game:GetService("Stats")
-        local network = stats and stats:FindFirstChild("Network")
-        local serverStats = network and network:FindFirstChild("ServerStatsItem")
-        local ping = serverStats and serverStats:FindFirstChild("Data Ping")
-        if ping and ping.GetValue then return ping:GetValue() end
+        return ping:GetValue()
     end)
     if ok and type(val) == "number" then
         return math.clamp(val / 1000, 0, 0.35)
+    end
+    local okText, txt = pcall(function()
+        return ping:GetValueString()
+    end)
+    if okText and type(txt) == "string" then
+        local n = tonumber(txt:match("[%d%.]+"))
+        if n then return math.clamp(n / 1000, 0, 0.35) end
     end
     return 0
 end
@@ -949,27 +957,25 @@ local dumpCallback = nil
 local function rewriteSilentShotArgs(args)
     if not silentAimOn then return false, args end
     if type(args) ~= "table" then return false, args end
+    if typeof(args[1]) ~= "CFrame" or typeof(args[2]) ~= "CFrame" then
+        return false, args
+    end
     local target = getSilentTarget()
     if not target then return false, args end
     local hitPos = getPredictedPos(target)
     if not hitPos or hitPos ~= hitPos then return false, args end
-    local shotCF = args[1]
-    local origin
-    if typeof(shotCF) == "CFrame" then
-        origin = shotCF.Position
-    else
-        origin = getShotOrigin(getGunTool())
-    end
+    local origin = args[1].Position
     local newShot = safeLookAt(origin, hitPos)
     if not newShot then return false, args end
-    args[1] = newShot
-    args[2] = CFrame.new(hitPos)
-    return true, args
+    local out = table.clone(args)
+    out[1] = newShot
+    out[2] = CFrame.new(hitPos)
+    return true, out
 end
 
 local function installHook()
-    if shared and shared.__MMV20_V11_HOOK then return end
-    if shared then shared.__MMV20_V11_HOOK = true end
+    if shared and shared.__MMV20_V12_HOOK then return end
+    if shared then shared.__MMV20_V12_HOOK = true end
     local mt = getrawmetatable and getrawmetatable(game)
     if not mt then return end
     local oldNamecall = mt.__namecall
