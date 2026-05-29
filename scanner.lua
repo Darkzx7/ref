@@ -500,7 +500,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local player = Players.LocalPlayer
 local cam    = workspace.CurrentCamera
 
-local ui = RefLib.new("mm v20 v13", "rbxassetid://131165537896572", "ref_mmv20")
+local ui = RefLib.new("mm v20 v16 v13", "rbxassetid://131165537896572", "ref_mmv20")
 
 
 local GetCoinEvent
@@ -757,10 +757,38 @@ end
 
 
 local function getGunTool()
-    local bp, chr = player:FindFirstChild("Backpack"), player.Character
-    for name in pairs(GUN_NAMES) do
-        if chr then local t = chr:FindFirstChild(name); if t then return t end end
-        if bp  then local t = bp:FindFirstChild(name);  if t then return t end end
+    local containers = {}
+    if player.Character then table.insert(containers, player.Character) end
+    local bp = player:FindFirstChild("Backpack")
+    if bp then table.insert(containers, bp) end
+    local wanted = {}
+    for name in pairs(GUN_NAMES) do wanted[string.lower(name)] = true end
+    local function hasShoot(obj)
+        local direct = obj:FindFirstChild("Shoot")
+        if direct and direct:IsA("RemoteEvent") then return true end
+        for _, d in ipairs(obj:GetDescendants()) do
+            if d.Name == "Shoot" and d:IsA("RemoteEvent") then return true end
+        end
+        return false
+    end
+    for _, container in ipairs(containers) do
+        for _, obj in ipairs(container:GetChildren()) do
+            if obj:IsA("Tool") and wanted[string.lower(obj.Name)] and hasShoot(obj) then
+                return obj
+            end
+        end
+    end
+    for _, container in ipairs(containers) do
+        for _, obj in ipairs(container:GetChildren()) do
+            if obj:IsA("Tool") and string.find(string.lower(obj.Name), "gun") and hasShoot(obj) then
+                return obj
+            end
+        end
+    end
+    for _, container in ipairs(containers) do
+        for _, obj in ipairs(container:GetChildren()) do
+            if obj:IsA("Tool") and wanted[string.lower(obj.Name)] then return obj end
+        end
     end
 end
 
@@ -919,34 +947,11 @@ end
 
 local _manualSilentOverridePos = nil
 local _manualSilentOverrideUntil = 0
+local _lastSilentShotAt = 0
 
-local function fireGunAtPosition(hitPos)
-    if _shootCd then return false end
-    if not hitPos or hitPos ~= hitPos then return false end
-    local gunTool = getGunTool()
-    if not gunTool then return false end
-    local chr = player.Character
-    if not chr then return false end
-    if not chr:FindFirstChild(gunTool.Name) then
-        equipTool(gunTool)
-        chr = player.Character
-        if not chr then return false end
-        gunTool = getGunTool()
-        if not gunTool then return false end
-    end
-    _shootCd = true
-    _manualSilentOverridePos = hitPos
-    _manualSilentOverrideUntil = tick() + 0.35
-    local ok = pcall(function()
-        gunTool:Activate()
-    end)
-    task.delay(0.62, function()
-        _shootCd = false
-        if tick() > _manualSilentOverrideUntil then
-            _manualSilentOverridePos = nil
-        end
-    end)
-    return ok
+local fireGunAtPosition
+fireGunAtPosition = function(hitPos)
+    return fireShootRemoteAtPosition and fireShootRemoteAtPosition(hitPos) or false
 end
 
 local function fireWithSilentAim()
@@ -959,6 +964,8 @@ end
 local dumpActive   = false
 local dumpCallback = nil
 
+local _silentFireGuard = false
+
 local function getRewriteHitPosition()
     if _manualSilentOverridePos and tick() <= _manualSilentOverrideUntil then
         return _manualSilentOverridePos
@@ -968,87 +975,128 @@ local function getRewriteHitPosition()
     return getPredictedPos(target)
 end
 
-local function rewriteSilentShotArgs(args)
-    if not silentAimOn then return false, args end
-    if type(args) ~= "table" then return false, args end
-    if #args == 0 then return false, args end
-    if typeof(args[1]) ~= "string" then
-        return false, args
+local function buildSilentShootArgs(args, hitPos)
+    if type(args) ~= "table" then return nil end
+    if not hitPos or hitPos ~= hitPos then return nil end
+    if #args >= 2 and typeof(args[1]) == "CFrame" and typeof(args[2]) == "CFrame" then
+        local out = {}
+        for i, v in ipairs(args) do out[i] = v end
+        out[2] = CFrame.new(hitPos)
+        return out
     end
-    local hitPos = getRewriteHitPosition()
-    if not hitPos or hitPos ~= hitPos then return false, args end
-    local firstCFIndex, secondCFIndex = nil, nil
-    local firstVectorIndex, secondVectorIndex = nil, nil
-    for i = 2, #args do
-        local tv = typeof(args[i])
-        if tv == "CFrame" then
-            if not firstCFIndex then firstCFIndex = i elseif not secondCFIndex then secondCFIndex = i end
-        elseif tv == "Vector3" then
-            if not firstVectorIndex then firstVectorIndex = i elseif not secondVectorIndex then secondVectorIndex = i end
-        end
+    if #args >= 2 and typeof(args[1]) == "Vector3" and typeof(args[2]) == "Vector3" then
+        local out = {}
+        for i, v in ipairs(args) do out[i] = v end
+        out[2] = hitPos
+        return out
     end
-    if not firstCFIndex and not firstVectorIndex then
-        return false, args
-    end
-    local out = table.clone(args)
-    local origin = nil
-    if firstCFIndex then origin = args[firstCFIndex].Position end
-    if not origin and firstVectorIndex then origin = args[firstVectorIndex] end
-    if not origin then origin = getShotOrigin(getGunTool()) end
-    local newShot = safeLookAt(origin, hitPos)
-    if firstCFIndex and newShot then
-        out[firstCFIndex] = newShot
-    end
-    if secondCFIndex then
-        out[secondCFIndex] = CFrame.new(hitPos)
-    end
-    if firstVectorIndex then
-        out[firstVectorIndex] = origin
-    end
-    if secondVectorIndex then
-        out[secondVectorIndex] = hitPos
-    end
-    _manualSilentOverridePos = nil
-    return true, out
+    return nil
 end
 
-local function installSilentMouseHook()
-    if shared and shared.__MMV20_V14_MOUSEHOOK then return end
-    if shared then shared.__MMV20_V14_MOUSEHOOK = true end
-    local mouse = player:GetMouse()
+local function getReadyGun()
+    local gunTool = getGunTool()
+    if not gunTool then return nil end
+    local chr = player.Character
+    if not chr then return nil end
+    if not chr:FindFirstChild(gunTool.Name) then
+        equipTool(gunTool)
+        task.wait(0.06)
+        chr = player.Character
+        if not chr then return nil end
+        gunTool = getGunTool()
+    end
+    return gunTool
+end
+
+local function fireDirectShootAtPosition(hitPos)
+    local gunTool = getReadyGun()
+    if not gunTool then return false end
+    local shootRemote = getShootRemote(gunTool)
+    if not shootRemote or not shootRemote:IsA("RemoteEvent") then return false end
+    local origin = getShotOrigin(gunTool)
+    local shotCF = safeLookAt(origin, hitPos)
+    if not shotCF then return false end
+    _silentFireGuard = true
+    local ok = pcall(function()
+        shootRemote:FireServer(shotCF, CFrame.new(hitPos))
+    end)
+    _silentFireGuard = false
+    return ok
+end
+
+local function fireShootRemoteAtPosition(hitPos)
+    if _shootCd then return false end
+    if not hitPos or hitPos ~= hitPos then return false end
+    local gunTool = getReadyGun()
+    if not gunTool then return false end
+    _shootCd = true
+    _manualSilentOverridePos = hitPos
+    _manualSilentOverrideUntil = tick() + 0.55
+    _lastSilentShotAt = 0
+    local activated = pcall(function()
+        gunTool:Activate()
+    end)
+    task.delay(0.14, function()
+        if tick() <= _manualSilentOverrideUntil and tick() - _lastSilentShotAt > 0.13 then
+            fireDirectShootAtPosition(hitPos)
+        end
+    end)
+    task.delay(0.62, function()
+        _shootCd = false
+        if tick() > _manualSilentOverrideUntil then
+            _manualSilentOverridePos = nil
+        end
+    end)
+    return activated
+end
+
+fireGunAtPosition = fireShootRemoteAtPosition
+
+local function installShootHook()
+    if shared and shared.__MMV20_V17_SHOOTH0OK then return end
+    if shared then shared.__MMV20_V17_SHOOTH0OK = true end
     local mt = getrawmetatable and getrawmetatable(game)
     if not mt then return end
-    local oldIndex = mt.__index
-    if not oldIndex then return end
+    local oldNamecall = mt.__namecall
+    if not oldNamecall then return end
     pcall(setreadonly, mt, false)
-    mt.__index = newcclosure and newcclosure(function(self, key)
-        if self == mouse and (silentAimOn or _manualSilentOverridePos) then
-            local hitPos = getRewriteHitPosition()
-            if hitPos and hitPos == hitPos then
-                if key == "Hit" then
-                    return CFrame.new(hitPos)
-                elseif key == "Target" then
-                    local target = getSilentTarget()
-                    local part = target and getAimPart(target)
-                    if part then return part end
-                elseif key == "UnitRay" then
-                    local origin = cam.CFrame.Position
-                    local dir = hitPos - origin
-                    if dir.Magnitude > 0.05 then
-                        return Ray.new(origin, dir.Unit * 1000)
+    mt.__namecall = newcclosure and newcclosure(function(self, ...)
+        local method = getnamecallmethod and getnamecallmethod()
+        if method == "FireServer" then
+            local args = {...}
+            local gunTool = getGunTool()
+            local shootRemote = gunTool and getShootRemote(gunTool)
+            local isGunShoot = shootRemote and typeof(self) == "Instance" and self == shootRemote
+            if isGunShoot then
+                _lastSilentShotAt = tick()
+                if dumpActive then
+                    dumpActive = false
+                    local desc = {}
+                    for i, v in ipairs(args) do
+                        local t = typeof(v)
+                        local rep = t == "CFrame" and string.format("CFrame(%.2f,%.2f,%.2f)", v.X, v.Y, v.Z)
+                            or t == "Vector3" and string.format("Vector3(%.2f,%.2f,%.2f)", v.X, v.Y, v.Z)
+                            or t == "Instance" and ("Instance:"..v.ClassName.."["..v.Name.."]")
+                            or tostring(v)
+                        table.insert(desc, string.format("[%d] (%s) = %s", i, t, rep))
+                    end
+                    if dumpCallback then task.spawn(dumpCallback, desc); dumpCallback = nil end
+                end
+                if silentAimOn and not _silentFireGuard then
+                    local hitPos = getRewriteHitPosition()
+                    local newArgs = buildSilentShootArgs(args, hitPos)
+                    if newArgs then
+                        _manualSilentOverridePos = nil
+                        return oldNamecall(self, table.unpack(newArgs))
                     end
                 end
             end
         end
-        if type(oldIndex) == "function" then
-            return oldIndex(self, key)
-        end
-        return oldIndex[key]
-    end) or oldIndex
+        return oldNamecall(self, ...)
+    end) or oldNamecall
     pcall(setreadonly, mt, true)
 end
-task.defer(installSilentMouseHook)
-
+task.defer(installShootHook)
 
 local function getKnifeHandle(knifeTool)
     if not knifeTool then return nil end
@@ -1063,6 +1111,9 @@ local knifeReachCache = {}
 
 local function restoreKnifeReach()
     for part, d in pairs(knifeReachCache) do
+        if d.visual and d.visual.Parent then
+            pcall(function() d.visual:Destroy() end)
+        end
         if part and part.Parent then
             pcall(function()
                 part.Size = d.size
@@ -1094,7 +1145,41 @@ local function applyKnifeReach(knife, size)
             massless = h.Massless,
             material = h.Material,
             castShadow = h.CastShadow,
+            visual = nil,
         }
+    end
+    local d = knifeReachCache[h]
+    if not d.visual or not d.visual.Parent then
+        local ok, visual = pcall(function()
+            local clone = h:Clone()
+            clone.Name = "KnifeVisible"
+            clone.Size = d.size
+            clone.CFrame = h.CFrame
+            clone.Transparency = d.transparency
+            clone.LocalTransparencyModifier = d.ltm
+            clone.CanCollide = false
+            clone.CanTouch = false
+            clone.CanQuery = false
+            clone.Massless = true
+            clone.Anchored = false
+            for _, obj in ipairs(clone:GetDescendants()) do
+                if obj:IsA("Script") or obj:IsA("LocalScript") or obj:IsA("ModuleScript") or obj:IsA("WeldConstraint") or obj:IsA("JointInstance") or obj:IsA("Constraint") then
+                    obj:Destroy()
+                elseif obj:IsA("BasePart") then
+                    obj.CanCollide = false
+                    obj.CanTouch = false
+                    obj.CanQuery = false
+                    obj.Massless = true
+                end
+            end
+            clone.Parent = h.Parent
+            local weld = Instance.new("WeldConstraint")
+            weld.Part0 = h
+            weld.Part1 = clone
+            weld.Parent = clone
+            return clone
+        end)
+        if ok then d.visual = visual end
     end
     local n = math.max(3, tonumber(size) or 12)
     pcall(function()
@@ -1108,6 +1193,17 @@ local function applyKnifeReach(knife, size)
         h.Material = Enum.Material.SmoothPlastic
         h.CastShadow = false
     end)
+    if d.visual and d.visual.Parent then
+        pcall(function()
+            d.visual.Size = d.size
+            d.visual.Transparency = d.transparency
+            d.visual.LocalTransparencyModifier = d.ltm
+            d.visual.CanCollide = false
+            d.visual.CanTouch = false
+            d.visual.CanQuery = false
+            d.visual.Massless = true
+        end)
+    end
     return h
 end
 
@@ -1213,6 +1309,9 @@ local function knifeAt(targetChar, blinkAssist, reachSize, pulses)
     return ok
 end
 
+local knifeRangeOn = false
+local knifeRange = 18
+
 local hitboxOn      = false
 local hitboxSize    = 18
 local hitboxVisible = false
@@ -1222,7 +1321,7 @@ local hitboxCache   = {}
 local _myPartsCache      = nil
 local _myPartsCacheTime  = -1
 local function getMyParts()
-    if _myPartsCache and (tick() - _myPartsCacheTime) < 0.1 then return _myPartsCache end
+    if _myPartsCache and (tick() - _myPartsCacheTime) < 0.15 then return _myPartsCache end
     local chr = player.Character
     if not chr then _myPartsCache = {}; _myPartsCacheTime = tick(); return {} end
     local parts = {}
@@ -1235,31 +1334,46 @@ local function getMyParts()
 end
 player.CharacterAdded:Connect(function() _myPartsCache = nil end)
 
+local function hitboxEnabled()
+    return hitboxOn or knifeRangeOn
+end
+
+local function activeHitboxSize()
+    local n = 0
+    if hitboxOn then n = math.max(n, tonumber(hitboxSize) or 0) end
+    if knifeRangeOn then n = math.max(n, tonumber(knifeRange) or 0) end
+    return math.clamp(n, 4, 80)
+end
+
 local function isHitboxCandidate(part)
     if not part or not part:IsA("BasePart") then return false end
-    if part.Parent:IsA("Accessory") or part.Parent:IsA("Tool") then return false end
+    if part.Parent and (part.Parent:IsA("Accessory") or part.Parent:IsA("Tool")) then return false end
     if part.Name == "HumanoidRootPart" then return true end
     if not hitboxStrong or not hitboxVisible then return false end
-    return part.Name == "Head"
-        or part.Name:find("Torso") ~= nil
-        or part.Name:find("Arm") ~= nil
-        or part.Name:find("Hand") ~= nil
-        or part.Name:find("Leg") ~= nil
-        or part.Name:find("Foot") ~= nil
+    return part.Name == "UpperTorso"
+        or part.Name == "LowerTorso"
+        or part.Name == "Torso"
+        or part.Name == "Head"
 end
 
 local function setHitboxVisual(saved, visible)
     for _, d in ipairs(saved) do
-        if d.part and d.part.Parent then
+        local part = d.part
+        if part and part.Parent then
             pcall(function()
                 if visible then
-                    d.part.Transparency = 0.55
-                    d.part.LocalTransparencyModifier = 0
-                    d.part.Material = Enum.Material.ForceField
+                    part.Transparency = 0.55
+                    part.LocalTransparencyModifier = 0
+                    part.Material = Enum.Material.ForceField
                 else
-                    d.part.Transparency = 1
-                    d.part.LocalTransparencyModifier = 1
-                    d.part.Material = d.material
+                    if part.Name == "HumanoidRootPart" then
+                        part.Transparency = 1
+                        part.LocalTransparencyModifier = 1
+                    else
+                        part.Transparency = d.transparency
+                        part.LocalTransparencyModifier = d.ltm
+                    end
+                    part.Material = d.material
                 end
             end)
         end
@@ -1268,8 +1382,10 @@ end
 
 local function applyHitboxToChar(p)
     if not p or p == player then return end
-    local chr = p.Character; if not chr then return end
+    local chr = p.Character
+    if not chr then return end
     if hitboxCache[p] then return end
+    local size = activeHitboxSize()
     local myParts = getMyParts()
     local saved = {}
     for _, part in ipairs(chr:GetDescendants()) do
@@ -1277,10 +1393,10 @@ local function applyHitboxToChar(p)
         local os = part.Size
         local targetSize
         if part.Name == "HumanoidRootPart" then
-            targetSize = Vector3.new(hitboxSize, hitboxSize, hitboxSize)
+            targetSize = Vector3.new(size, size, size)
         else
             local maxD = math.max(os.X, os.Y, os.Z, 0.1)
-            local sc = math.max(1, hitboxSize / maxD)
+            local sc = math.max(1, size / maxD)
             targetSize = os * sc
         end
         local cons = {}
@@ -1303,8 +1419,6 @@ local function applyHitboxToChar(p)
             canCollide = part.CanCollide,
             canQuery = part.CanQuery,
             massless = part.Massless,
-            customPhysicalProperties = part.CustomPhysicalProperties,
-            castShadow = part.CastShadow,
             constraints = cons,
         }
         pcall(function()
@@ -1313,8 +1427,6 @@ local function applyHitboxToChar(p)
             part.CanCollide = false
             part.CanQuery = true
             part.Massless = true
-            part.CustomPhysicalProperties = PhysicalProperties.new(0.01, 0, 0, 0, 0)
-            part.CastShadow = false
         end)
         table.insert(saved, d)
     end
@@ -1336,8 +1448,6 @@ local function restoreHitbox(p)
                 d.part.CanCollide = d.canCollide
                 d.part.CanQuery = d.canQuery
                 d.part.Massless = d.massless
-                d.part.CustomPhysicalProperties = d.customPhysicalProperties
-                d.part.CastShadow = d.castShadow
             end)
         end
         for _, nc in ipairs(d.constraints) do
@@ -1355,12 +1465,13 @@ local function restoreAllHitboxes()
 end
 
 local function rebuildHitboxes()
-    if not hitboxOn then return end
     restoreAllHitboxes()
+    if not hitboxEnabled() then return end
     for _, p in ipairs(Players:GetPlayers()) do applyHitboxToChar(p) end
 end
 
 local function applyHBVis(v)
+    hitboxVisible = v
     for _, saved in pairs(hitboxCache) do
         setHitboxVisual(saved, v)
     end
@@ -1368,7 +1479,7 @@ end
 
 player.CharacterAdded:Connect(function()
     _myPartsCache = nil
-    if not hitboxOn then return end
+    if not hitboxEnabled() then return end
     task.wait(1)
     rebuildHitboxes()
 end)
@@ -1376,17 +1487,28 @@ Players.PlayerRemoving:Connect(function(p) restoreHitbox(p) end)
 Players.PlayerAdded:Connect(function(p)
     p.CharacterAdded:Connect(function()
         restoreHitbox(p)
-        if hitboxOn then task.wait(1); applyHitboxToChar(p) end
+        if hitboxEnabled() then task.wait(1); applyHitboxToChar(p) end
     end)
 end)
 for _, p in ipairs(Players:GetPlayers()) do
     if p ~= player then
         p.CharacterAdded:Connect(function()
             restoreHitbox(p)
-            if hitboxOn then task.wait(1); applyHitboxToChar(p) end
+            if hitboxEnabled() then task.wait(1); applyHitboxToChar(p) end
         end)
     end
 end
+
+local _knifeReachConn = nil
+local function refreshKnifeReachLoop()
+    if _knifeReachConn then return end
+    _knifeReachConn = RunService.Heartbeat:Connect(function()
+        if not knifeRangeOn then return end
+        local knife = getKnifeTool()
+        if knife then applyKnifeReach(knife, knifeRange) end
+    end)
+end
+refreshKnifeReachLoop()
 
 local espOn  = false
 local espMax = 300
@@ -1912,13 +2034,16 @@ local t_hb = secSheriff:Toggle("hitbox expander", false, function(v)
     hitboxOn=v
     if v then
         rebuildHitboxes()
-        ui:Toast("","[Hitbox]",(hitboxStrong and hitboxVisible and "full body" or "root invisivel").." — "..hitboxSize.." studs",ROLE_COLOR.sheriff)
-    else restoreAllHitboxes(); ui:Toast("","[Hitbox]","desativado",ROLE_COLOR.unknown) end
+        ui:Toast("","[Hitbox]","invisivel — "..activeHitboxSize().." studs",ROLE_COLOR.sheriff)
+    else
+        if knifeRangeOn then rebuildHitboxes() else restoreAllHitboxes() end
+        ui:Toast("","[Hitbox]","desativado",ROLE_COLOR.unknown)
+    end
 end)
 ui:CfgRegister("mm2_hitbox", function() return hitboxOn end, function(v) t_hb.Set(v) end)
 local s_hbsize = secSheriff:Slider("tamanho hitbox (studs)", 4, 60, 18, function(v) hitboxSize=v; rebuildHitboxes() end)
 ui:CfgRegister("mm2_hitboxsize", function() return hitboxSize end, function(v) s_hbsize.Set(v) end)
-local t_hbstrong = secSheriff:Toggle("full body hitbox (debug only)", false, function(v) hitboxStrong=v; rebuildHitboxes() end)
+local t_hbstrong = secSheriff:Toggle("full body hitbox", false, function(v) hitboxStrong=v; rebuildHitboxes() end)
 ui:CfgRegister("mm2_hitboxstrong", function() return hitboxStrong end, function(v) t_hbstrong.Set(v) end)
 local t_hbvis = secSheriff:Toggle("mostrar hitbox (debug)", false, function(v) hitboxVisible=v; applyHBVis(v) end)
 ui:CfgRegister("mm2_hitboxvis", function() return hitboxVisible end, function(v) t_hbvis.Set(v) end)
@@ -2039,45 +2164,34 @@ end)
 
 local secMurd=tabCombat:Section("murderer")
 secMurd:Divider("knife range")
-local knifeRangeOn=false; local knifeRange=18; local knifeRangeLoop=false
 
-local function applyKnifeRangeNow()
-    if not knifeRangeOn then restoreKnifeReach(); return end
-    local knife = getKnifeTool()
-    if knife then applyKnifeReach(knife, knifeRange) end
-end
-
-local function knifeRangeLoopFn()
-    if knifeRangeLoop then return end
-    knifeRangeLoop = true
-    while knifeRangeOn do
-        applyKnifeRangeNow()
-        task.wait(0.2)
-    end
-    restoreKnifeReach()
-    knifeRangeLoop = false
-end
-
-local t_ka=secMurd:Toggle("knife range (handle hitbox)", false, function(v)
+local t_ka=secMurd:Toggle("knife range (enemy hitbox)", false, function(v)
     knifeRangeOn=v
     if v then
-        applyKnifeRangeNow()
-        task.spawn(knifeRangeLoopFn)
-        ui:Toast("","[Knife Range]","ativo — ataque manualmente",ROLE_COLOR.murderer)
-    else
         restoreKnifeReach()
+        local knife = getKnifeTool()
+        if knife then applyKnifeReach(knife, knifeRange) end
+        rebuildHitboxes()
+        ui:Toast("","[Knife Range]","hitbox ativo, faca visivel",ROLE_COLOR.murderer)
+    else
+        if hitboxOn then rebuildHitboxes() else restoreAllHitboxes() end
         ui:Toast("","[Knife Range]","desativado",ROLE_COLOR.unknown)
     end
 end)
 ui:CfgRegister("mm2_knifeaura", function() return knifeRangeOn end, function(v) t_ka.Set(v) end)
-local s_kr=secMurd:Slider("range knife handle", 4, 80, 18, function(v)
+local s_kr=secMurd:Slider("range knife hitbox", 4, 80, 18, function(v)
     knifeRange=v
-    if knifeRangeOn then applyKnifeRangeNow() end
+    if knifeRangeOn then
+        restoreKnifeReach()
+        local knife = getKnifeTool()
+        if knife then applyKnifeReach(knife, knifeRange) end
+        rebuildHitboxes()
+    end
 end)
 ui:CfgRegister("mm2_kniferange", function() return knifeRange end, function(v) s_kr.Set(v) end)
 player.CharacterAdded:Connect(function()
     restoreKnifeReach()
-    if knifeRangeOn then task.wait(0.8); applyKnifeRangeNow() end
+    if hitboxEnabled() then task.wait(0.8); rebuildHitboxes() end
 end)
 secMurd:Button("tp para sheriff", function()
     local s=findByRole("sheriff"); if not s then ui:Toast("","tp","sheriff nao detectado",ROLE_COLOR.unknown); return end
