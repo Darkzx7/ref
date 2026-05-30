@@ -794,10 +794,25 @@ local function getGunTool()
 end
 
 local function getKnifeTool()
-    local bp, chr = player:FindFirstChild("Backpack"), player.Character
-    for name in pairs(KNIFE_NAMES) do
-        if chr and chr:FindFirstChild(name) then return chr:FindFirstChild(name) end
-        if bp  and bp:FindFirstChild(name)  then return bp:FindFirstChild(name)  end
+    local containers = {}
+    if player.Character then table.insert(containers, player.Character) end
+    local bp = player:FindFirstChild("Backpack")
+    if bp then table.insert(containers, bp) end
+    local function looksLikeKnife(tool)
+        if not tool or not tool:IsA("Tool") then return false end
+        local low = string.lower(tool.Name or "")
+        if KNIFE_NAMES[tool.Name] or low:find("knife") or low:find("blade") then return true end
+        local ev = tool:FindFirstChild("Events")
+        if ev and ev:FindFirstChild("KnifeStabbed") then return true end
+        for _, d in ipairs(tool:GetDescendants()) do
+            if d.Name == "KnifeStabbed" and d:IsA("RemoteEvent") then return true end
+        end
+        return false
+    end
+    for _, container in ipairs(containers) do
+        for _, obj in ipairs(container:GetChildren()) do
+            if looksLikeKnife(obj) then return obj end
+        end
     end
 end
 
@@ -896,23 +911,30 @@ local function getPredictedPos(tp)
     return pred
 end
 
-local function getSilentTarget()
-    local r = getRole()
-    if r == "sheriff" or r == "hero" then return findByRole("murderer") end
-    if r == "murderer" then
-        local hrp = myHRP(); if not hrp then return nil end
-        local best, bestD = nil, math.huge
-        for _, p in ipairs(Players:GetPlayers()) do
-            if p ~= player and isAlive(p) then
-                local ph = p.Character and p.Character:FindFirstChild("HumanoidRootPart")
-                if ph then
-                    local d = (hrp.Position - ph.Position).Magnitude
-                    if d < bestD then best = p; bestD = d end
-                end
+local function getNearestAliveTarget()
+    local hrp = myHRP(); if not hrp then return nil end
+    local best, bestD = nil, math.huge
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= player and isAlive(p) then
+            local ph = p.Character and (p.Character:FindFirstChild("HumanoidRootPart") or p.Character:FindFirstChild("UpperTorso") or p.Character:FindFirstChild("Torso"))
+            if ph then
+                local d = (hrp.Position - ph.Position).Magnitude
+                if d < bestD then best = p; bestD = d end
             end
         end
-        return best
     end
+    return best
+end
+
+local function getSilentTarget()
+    local r = getRole()
+    if r == "sheriff" or r == "hero" then
+        return findByRole("murderer") or getNearestAliveTarget()
+    end
+    if r == "murderer" then
+        return getNearestAliveTarget()
+    end
+    return findByRole("murderer") or getNearestAliveTarget()
 end
 
 RunService.RenderStepped:Connect(function()
@@ -978,10 +1000,22 @@ end
 local function buildSilentShootArgs(args, hitPos)
     if type(args) ~= "table" then args = {} end
     if not hitPos or hitPos ~= hitPos then return nil end
+    local function aimCFFrom(cf)
+        if typeof(cf) ~= "CFrame" then return nil end
+        return safeLookAt(cf.Position, hitPos) or cf
+    end
     if #args >= 2 and typeof(args[1]) == "CFrame" and typeof(args[2]) == "CFrame" then
         local out = {}
         for i, v in ipairs(args) do out[i] = v end
+        out[1] = aimCFFrom(args[1]) or args[1]
         out[2] = CFrame.new(hitPos)
+        return out
+    end
+    if #args >= 3 and type(args[1]) == "string" and typeof(args[2]) == "CFrame" and typeof(args[3]) == "CFrame" then
+        local out = {}
+        for i, v in ipairs(args) do out[i] = v end
+        out[2] = aimCFFrom(args[2]) or args[2]
+        out[3] = CFrame.new(hitPos)
         return out
     end
     if #args >= 2 and typeof(args[1]) == "Vector3" and typeof(args[2]) == "Vector3" then
@@ -1042,8 +1076,8 @@ end
 fireGunAtPosition = fireShootRemoteAtPosition
 
 local function installShootHook()
-    if shared and shared.__MMV20_V18_SHOOTH0OK then return end
-    if shared then shared.__MMV20_V18_SHOOTH0OK = true end
+    if shared and shared.__MMV20_V19_SHOOTH0OK then return end
+    if shared then shared.__MMV20_V19_SHOOTH0OK = true end
     local mt = getrawmetatable and getrawmetatable(game)
     if not mt then return end
     local oldNamecall = mt.__namecall
@@ -1074,7 +1108,10 @@ local function installShootHook()
                 local newArgs = buildSilentShootArgs(args, hitPos)
                 if newArgs then
                     _manualSilentOverridePos = nil
-                    return oldNamecall(self, table.unpack(newArgs))
+                    local ok, result = pcall(function()
+                        return oldNamecall(self, table.unpack(newArgs))
+                    end)
+                    if ok then return result end
                 end
             end
         end
@@ -1116,34 +1153,7 @@ local function restoreKnifeReach()
 end
 
 local function applyKnifeReach(knife, size)
-    local h = getKnifeHandle(knife)
-    if not h then return nil end
-    if not knifeReachCache[h] then
-        knifeReachCache[h] = {
-            size = h.Size,
-            transparency = h.Transparency,
-            ltm = h.LocalTransparencyModifier,
-            canTouch = h.CanTouch,
-            canCollide = h.CanCollide,
-            canQuery = h.CanQuery,
-            massless = h.Massless,
-            material = h.Material,
-            castShadow = h.CastShadow,
-        }
-    end
-    local n = math.max(3, tonumber(size) or 12)
-    pcall(function()
-        h.Size = Vector3.new(n, n, n)
-        h.Transparency = 1
-        h.LocalTransparencyModifier = 1
-        h.CanTouch = true
-        h.CanCollide = false
-        h.CanQuery = false
-        h.Massless = true
-        h.Material = Enum.Material.SmoothPlastic
-        h.CastShadow = false
-    end)
-    return h
+    return getKnifeHandle(knife)
 end
 
 local function ensureKnifeEquipped()
@@ -1254,7 +1264,7 @@ local knifeRange = 18
 local hitboxOn      = false
 local hitboxSize    = 18
 local hitboxVisible = false
-local hitboxStrong  = false
+local hitboxStrong  = true
 local hitboxCache   = {}
 
 local _myPartsCache      = nil
@@ -1288,11 +1298,13 @@ local function isHitboxCandidate(part)
     if not part or not part:IsA("BasePart") then return false end
     if part.Parent and (part.Parent:IsA("Accessory") or part.Parent:IsA("Tool")) then return false end
     if part.Name == "HumanoidRootPart" then return true end
-    if not hitboxStrong or not hitboxVisible then return false end
-    return part.Name == "UpperTorso"
-        or part.Name == "LowerTorso"
-        or part.Name == "Torso"
-        or part.Name == "Head"
+    if not hitboxStrong then return false end
+    return part.Name == "Head"
+        or part.Name:find("Torso") ~= nil
+        or part.Name:find("Arm") ~= nil
+        or part.Name:find("Hand") ~= nil
+        or part.Name:find("Leg") ~= nil
+        or part.Name:find("Foot") ~= nil
 end
 
 local function setHitboxVisual(saved, visible)
@@ -1305,13 +1317,8 @@ local function setHitboxVisual(saved, visible)
                     part.LocalTransparencyModifier = 0
                     part.Material = Enum.Material.ForceField
                 else
-                    if part.Name == "HumanoidRootPart" then
-                        part.Transparency = 1
-                        part.LocalTransparencyModifier = 1
-                    else
-                        part.Transparency = d.transparency
-                        part.LocalTransparencyModifier = d.ltm
-                    end
+                    part.Transparency = 1
+                    part.LocalTransparencyModifier = 1
                     part.Material = d.material
                 end
             end)
@@ -1982,7 +1989,7 @@ end)
 ui:CfgRegister("mm2_hitbox", function() return hitboxOn end, function(v) t_hb.Set(v) end)
 local s_hbsize = secSheriff:Slider("tamanho hitbox (studs)", 4, 60, 18, function(v) hitboxSize=v; rebuildHitboxes() end)
 ui:CfgRegister("mm2_hitboxsize", function() return hitboxSize end, function(v) s_hbsize.Set(v) end)
-local t_hbstrong = secSheriff:Toggle("full body hitbox", false, function(v) hitboxStrong=v; rebuildHitboxes() end)
+local t_hbstrong = secSheriff:Toggle("full body hitbox", true, function(v) hitboxStrong=v; rebuildHitboxes() end)
 ui:CfgRegister("mm2_hitboxstrong", function() return hitboxStrong end, function(v) t_hbstrong.Set(v) end)
 local t_hbvis = secSheriff:Toggle("mostrar hitbox (debug)", false, function(v) hitboxVisible=v; applyHBVis(v) end)
 ui:CfgRegister("mm2_hitboxvis", function() return hitboxVisible end, function(v) t_hbvis.Set(v) end)
