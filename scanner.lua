@@ -558,14 +558,16 @@ local function main()
 
     local function packArgs(...)
         local count = _select("#", ...)
+        local rawArgs = { ... }
         local values = {}
         local limit = count
         if limit > 20 then
             limit = 20
         end
         for index = 1, limit do
+            local item = rawArgs[index]
             local ok, result = safeCall(function()
-                return serialize(_select(index, ...))
+                return serialize(item)
             end)
             values[index] = ok and result or { type = "serialization_error", value = shortString(result, 300) }
         end
