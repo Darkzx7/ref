@@ -61,7 +61,6 @@ local startedAt = tostring((os and os.time and os.time()) or math.floor((tick an
 local filePath = folder .. "/scan_" .. placeId .. "_" .. startedAt .. ".log"
 
 local writefileFn = globalFunction("writefile")
-local appendfileFn = globalFunction("appendfile")
 local makefolderFn = globalFunction("makefolder")
 local isfolderFn = globalFunction("isfolder")
 local newcclosureFn = globalFunction("newcclosure") or function(fn)
@@ -346,19 +345,10 @@ local function flush()
     local chunk = table.concat(Scanner.buffer, "\n") .. "\n"
     Scanner.buffer = {}
 
-    if appendfileFn then
-        local ok = pcall(function()
-            appendfileFn(filePath, chunk)
-        end)
-        if ok then
-            Scanner.flushing = false
-            return
-        end
-    end
-
     Scanner.fileText = (Scanner.fileText or "") .. chunk
-    if #Scanner.fileText > 6000000 then
-        Scanner.fileText = Scanner.fileText:sub(#Scanner.fileText - 5000000)
+    if #Scanner.fileText > 4000000 then
+        Scanner.fileText = Scanner.fileText:sub(#Scanner.fileText - 3000000)
+        Scanner.fileText = "{\"event\":\"scanner_file_trimmed\",\"time\":\"" .. now() .. "\"}\n" .. Scanner.fileText
     end
     pcall(function()
         writefileFn(filePath, Scanner.fileText)
@@ -674,7 +664,6 @@ logRecord({
     } or nil,
     capabilities = {
         writefile = writefileFn ~= nil,
-        appendfile = appendfileFn ~= nil,
         hookmetamethod = globalFunction("hookmetamethod") ~= nil,
         getnamecallmethod = globalFunction("getnamecallmethod") ~= nil,
     },
