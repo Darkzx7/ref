@@ -782,10 +782,15 @@ local function getGunTool()
     local wanted = {}
     for name in pairs(GUN_NAMES) do wanted[string.lower(name)] = true end
     local function hasShoot(obj)
+        local knifeLocal = obj:FindFirstChild("KnifeLocal")
+        local createBeam = knifeLocal and knifeLocal:FindFirstChild("CreateBeam")
+        local beamRemote = createBeam and createBeam:FindFirstChild("RemoteFunction")
+        if beamRemote and beamRemote:IsA("RemoteFunction") then return true end
         local direct = obj:FindFirstChild("Shoot")
         if direct and direct:IsA("RemoteEvent") then return true end
         for _, d in ipairs(obj:GetDescendants()) do
             if d.Name == "Shoot" and d:IsA("RemoteEvent") then return true end
+            if d.Name == "RemoteFunction" and d:IsA("RemoteFunction") and d.Parent and d.Parent.Name == "CreateBeam" then return true end
         end
         return false
     end
@@ -969,6 +974,19 @@ local function safeLookAt(origin, target)
     return CFrame.lookAt(origin, target)
 end
 
+local function getBeamRemote(gunTool)
+    if not gunTool then return nil end
+    local knifeLocal = gunTool:FindFirstChild("KnifeLocal")
+    local createBeam = knifeLocal and knifeLocal:FindFirstChild("CreateBeam")
+    local remote = createBeam and createBeam:FindFirstChild("RemoteFunction")
+    if remote and remote:IsA("RemoteFunction") then return remote end
+    for _, d in ipairs(gunTool:GetDescendants()) do
+        if d.Name == "RemoteFunction" and d:IsA("RemoteFunction") and d.Parent and d.Parent.Name == "CreateBeam" then
+            return d
+        end
+    end
+end
+
 local function getShootRemote(gunTool)
     if not gunTool then return nil end
     local r = gunTool:FindFirstChild("Shoot")
@@ -976,6 +994,13 @@ local function getShootRemote(gunTool)
     for _, d in ipairs(gunTool:GetDescendants()) do
         if d.Name == "Shoot" and d:IsA("RemoteEvent") then return d end
     end
+end
+
+local function getGunFireEndpoint(gunTool)
+    local beamRemote = getBeamRemote(gunTool)
+    if beamRemote then return beamRemote, "beam" end
+    local shootRemote = getShootRemote(gunTool)
+    if shootRemote then return shootRemote, "shoot" end
 end
 
 local function getShotOrigin(gunTool)
@@ -1081,14 +1106,29 @@ local function fireShootRemoteAtPosition(hitPos)
     _manualSilentOverrideUntil = tick() + 0.45
     _forceSilentRewriteUntil = tick() + 0.45
     local ok = false
-    local shootRemote = getShootRemote(gunTool)
-    local canReplay = shootRemote and _lastShootArgs and (tick() - _lastShootArgsAt) < 20
-    if canReplay then
-        local replayArgs = buildSilentShootArgs(_lastShootArgs, hitPos)
-        if replayArgs then
+    local endpoint, endpointKind = getGunFireEndpoint(gunTool)
+    if endpointKind == "beam" then
+        _silentFireGuard = true
+        ok = pcall(function()
+            endpoint:InvokeServer(1, hitPos, "AH2")
+        end)
+        _silentFireGuard = false
+    elseif endpointKind == "shoot" then
+        local canReplay = _lastShootArgs and (tick() - _lastShootArgsAt) < 20
+        if canReplay then
+            local replayArgs = buildSilentShootArgs(_lastShootArgs, hitPos)
+            if replayArgs then
+                _silentFireGuard = true
+                ok = pcall(function()
+                    endpoint:FireServer(table.unpack(replayArgs))
+                end)
+                _silentFireGuard = false
+            end
+        end
+        if not ok then
             _silentFireGuard = true
             ok = pcall(function()
-                shootRemote:FireServer(table.unpack(replayArgs))
+                gunTool:Activate()
             end)
             _silentFireGuard = false
         end
@@ -1119,16 +1159,17 @@ local function installShootHook()
     pcall(setreadonly, mt, false)
     local hookFn = function(self, ...)
         local method = getnamecallmethod and getnamecallmethod()
-        if method == "FireServer" and not _silentFireGuard then
+        if (method == "FireServer" or method == "InvokeServer") and not _silentFireGuard then
             local args = {...}
             local gunTool = getGunTool()
-            local shootRemote = gunTool and getShootRemote(gunTool)
-            local isGunShoot = shootRemote and typeof(self) == "Instance" and self == shootRemote
+            local endpoint, endpointKind = getGunFireEndpoint(gunTool)
+            local isBeamShoot = method == "InvokeServer" and endpointKind == "beam" and typeof(self) == "Instance" and self == endpoint
+            local isGunShoot = method == "FireServer" and endpointKind == "shoot" and typeof(self) == "Instance" and self == endpoint
             if isGunShoot and type(args[1]) == "string" then
                 _lastShootArgs = copyArgs(args)
                 _lastShootArgsAt = tick()
             end
-            if dumpActive and isGunShoot then
+            if dumpActive and (isGunShoot or isBeamShoot) then
                 dumpActive = false
                 local desc = {}
                 for i, v in ipairs(args) do
@@ -1141,7 +1182,20 @@ local function installShootHook()
                 end
                 if dumpCallback then task.spawn(dumpCallback, desc); dumpCallback = nil end
             end
-            if isGunShoot and (silentAimOn or tick() <= _forceSilentRewriteUntil) then
+            if isBeamShoot and (silentAimOn or tick() <= _forceSilentRewriteUntil) then
+                local hitPos = getRewriteHitPosition()
+                if hitPos then
+                    local newArgs = copyArgs(args)
+                    newArgs[1] = newArgs[1] or 1
+                    newArgs[2] = hitPos
+                    newArgs[3] = newArgs[3] or "AH2"
+                    _manualSilentOverridePos = nil
+                    local ok, result = pcall(function()
+                        return oldNamecall(self, table.unpack(newArgs))
+                    end)
+                    if ok then return result end
+                end
+            elseif isGunShoot and (silentAimOn or tick() <= _forceSilentRewriteUntil) then
                 local hitPos = getRewriteHitPosition()
                 local newArgs = buildSilentShootArgs(args, hitPos)
                 if newArgs then
@@ -1970,9 +2024,9 @@ secSheriff:Button("DUMP gun (equipa e atira 1x)", function()
     if not gunTool then ui:Toast("","Dump","sem gun equipada",ROLE_COLOR.unknown); return end
     dumpActive=true
     dumpCallback=function(desc)
-        local lines = {"=== FIRESERVER CAPTURADO ===","Gun: "..gunTool.Name,"Total args: "..#desc,""}
+        local lines = {"=== REMOTE CAPTURADO ===","Gun: "..gunTool.Name,"Total args: "..#desc,""}
         for _, l in ipairs(desc) do table.insert(lines,l) end
-        table.insert(lines,""); table.insert(lines,"Silent aim substitui arg[2] (alvo CFrame)")
+        table.insert(lines,""); table.insert(lines,"CreateBeam esperado: InvokeServer(1, targetPos, \"AH2\")")
         local old = player.PlayerGui:FindFirstChild("MM2DumpGui"); if old then old:Destroy() end
         local sg = Instance.new("ScreenGui"); sg.Name="MM2DumpGui"; sg.ResetOnSpawn=false
         sg.ZIndexBehavior=Enum.ZIndexBehavior.Sibling; sg.Parent=player.PlayerGui
@@ -1980,7 +2034,7 @@ secSheriff:Button("DUMP gun (equipa e atira 1x)", function()
         frame.Position=UDim2.new(0.5,-200,0.5,-120); frame.BackgroundColor3=Color3.fromRGB(18,18,28)
         frame.BorderSizePixel=0; frame.Parent=sg; Instance.new("UICorner",frame).CornerRadius=UDim.new(0,8)
         local title = Instance.new("TextLabel"); title.Size=UDim2.new(1,-36,0,32); title.Position=UDim2.new(0,8,0,0)
-        title.BackgroundTransparency=1; title.Text="DUMP — FireServer args"
+        title.BackgroundTransparency=1; title.Text="DUMP - remote args"
         title.TextColor3=Color3.fromRGB(200,200,210); title.Font=Enum.Font.GothamBold; title.TextSize=12
         title.TextXAlignment=Enum.TextXAlignment.Left; title.Parent=frame
         local closeBtn=Instance.new("TextButton"); closeBtn.Size=UDim2.new(0,32,0,32); closeBtn.Position=UDim2.new(1,-34,0,0)
