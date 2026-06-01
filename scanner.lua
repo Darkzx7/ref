@@ -1,5 +1,5 @@
-local VERSION = "2026-06-01-mm-scanner-passive-safe-v3"
-local ENABLE_OUTBOUND_HOOK = false
+local VERSION = "2026-06-01-mm-scanner-weapon-outbound-v4"
+local ENABLE_OUTBOUND_HOOK = true
 
 local _type = type
 local _tostring = tostring
@@ -16,8 +16,6 @@ local _string = string
 local _os = os
 local _coroutine = coroutine
 local _unpack = unpack or (_table and _table.unpack)
-local _warn = warn
-local _print = print
 local _game = game
 local _G_ref = _G
 
@@ -46,12 +44,7 @@ local function safeToString(value)
 end
 
 local function safeWarn(message)
-    message = "[MMScanner] " .. safeToString(message)
-    if callable(_warn) then
-        safeCall(_warn, message)
-    elseif callable(_print) then
-        safeCall(_print, message)
-    end
+    return false
 end
 
 local function envTable()
@@ -85,7 +78,6 @@ local function envFunction(name)
 end
 
 local writefileFn = envFunction("writefile")
-local appendfileFn = envFunction("appendfile")
 local makefolderFn = envFunction("makefolder")
 local isfolderFn = envFunction("isfolder")
 local delfileFn = envFunction("delfile")
@@ -123,26 +115,11 @@ local function writeText(path, text)
             return true
         end
     end
-    if callable(appendfileFn) then
-        if callable(delfileFn) then
-            safeCall(delfileFn, path)
-        end
-        local ok = safeCall(appendfileFn, path, text)
-        if ok then
-            return true
-        end
-    end
     return false
 end
 
 local function appendText(path, text)
     text = safeToString(text)
-    if callable(appendfileFn) then
-        local ok = safeCall(appendfileFn, path, text)
-        if ok then
-            return true
-        end
-    end
     if callable(writefileFn) then
         local ok = safeCall(writefileFn, path, text)
         if ok then
@@ -578,6 +555,86 @@ local function main()
         }
     end
 
+    local function lowerText(value)
+        value = safeToString(value or "")
+        if _type(_string) == "table" and callable(_string.lower) then
+            local ok, result = safeCall(_string.lower, value)
+            if ok and result then
+                return result
+            end
+        end
+        return value
+    end
+
+    local function containsText(text, needle)
+        text = lowerText(text)
+        needle = lowerText(needle)
+        if _type(_string) == "table" and callable(_string.find) then
+            local ok, result = safeCall(_string.find, text, needle, 1, true)
+            return ok and result ~= nil
+        end
+        return false
+    end
+
+    local function simpleRemotePath(remote)
+        local parts = {}
+        local current = remote
+        local depth = 0
+        while current and depth < 10 do
+            local name = prop(current, "Name")
+            if name then
+                parts[#parts + 1] = safeToString(name)
+            end
+            current = prop(current, "Parent")
+            depth = depth + 1
+        end
+
+        local ordered = {}
+        for index = #parts, 1, -1 do
+            ordered[#ordered + 1] = parts[index]
+        end
+
+        if _type(_table) == "table" and callable(_table.concat) then
+            local ok, result = safeCall(_table.concat, ordered, ".")
+            if ok and result then
+                return result
+            end
+        end
+        return safeToString(prop(remote, "Name") or "")
+    end
+
+    local function shouldCaptureOutbound(remote, method)
+        if method ~= "FireServer" and method ~= "InvokeServer" then
+            return false
+        end
+
+        local className = safeToString(prop(remote, "ClassName") or "")
+        if className ~= "RemoteEvent" and className ~= "RemoteFunction" then
+            return false
+        end
+
+        local path = simpleRemotePath(remote)
+        local tokens = {
+            "gun",
+            "knife",
+            "weapon",
+            "shoot",
+            "stab",
+            "touch",
+            "throw",
+            "hit",
+            "beam",
+        }
+
+        for _, token in _ipairs(tokens) do
+            if containsText(path, token) then
+                return true
+            end
+        end
+
+        return false
+    end
+
     local function inc(eventName)
         eventName = eventName or "unknown"
         Scanner.counts[eventName] = (Scanner.counts[eventName] or 0) + 1
@@ -765,7 +822,7 @@ local function main()
     end
 
     local function logOutbound(method, remote, ...)
-        if Scanner.active and not Scanner.inHook and (method == "FireServer" or method == "InvokeServer") and isRemote(remote) then
+        if Scanner.active and not Scanner.inHook and shouldCaptureOutbound(remote, method) then
             Scanner.inHook = true
             protected("remote_outbound", function(...)
                 logRecord({ event = "remote_outbound", method = method, remote = remoteInfo(remote), args = packArgs(...) })
@@ -795,7 +852,7 @@ local function main()
                 end)
 
                 if callable(original) then
-                    if Scanner.active and not Scanner.inHook and (method == "FireServer" or method == "InvokeServer") and isRemote(self) then
+                    if Scanner.active and not Scanner.inHook and shouldCaptureOutbound(self, method) then
                         local argc = _select("#", ...)
                         local rawArgs = { ... }
                         local results = { original(self, ...) }
@@ -844,7 +901,7 @@ local function main()
             safeCall(function()
                 method = getnamecallmethodFn()
             end)
-            if Scanner.active and not Scanner.inHook and (method == "FireServer" or method == "InvokeServer") and isRemote(self) then
+            if Scanner.active and not Scanner.inHook and shouldCaptureOutbound(self, method) then
                 local argc = _select("#", ...)
                 local rawArgs = { ... }
                 local results = { original(self, ...) }
@@ -873,10 +930,10 @@ local function main()
         localPlayer = LocalPlayer and { name = safeToString(prop(LocalPlayer, "Name") or ""), userId = prop(LocalPlayer, "UserId") } or nil,
         capabilities = {
             writefile = callable(writefileFn),
-            appendfile = callable(appendfileFn),
             hookmetamethod = callable(envFunction("hookmetamethod")),
             getnamecallmethod = callable(envFunction("getnamecallmethod")),
         },
+        outboundMode = ENABLE_OUTBOUND_HOOK and "selective_weapon_remotes" or "disabled",
     })
 
     local hookInstalled = protected("installNamecallHook", installNamecallHook)
@@ -940,9 +997,9 @@ local function main()
     end)
 
     flush()
-    writeText(statusPath, "running: " .. VERSION .. "\nmode: passive/no outbound hook\nfile: " .. filePath .. "\n")
+    writeText(statusPath, "running: " .. VERSION .. "\nmode: selective weapon outbound hook\nfile: " .. filePath .. "\n")
     if folderAvailable then
-        writeText(folder .. "/status.txt", "running: " .. VERSION .. "\nfile: " .. filePath .. "\n")
+        writeText(folder .. "/status.txt", "running: " .. VERSION .. "\nmode: selective weapon outbound hook\nfile: " .. filePath .. "\n")
     end
     safeWarn("running; output: " .. filePath)
 end
