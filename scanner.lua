@@ -989,6 +989,14 @@ end
 local _manualSilentOverridePos = nil
 local _manualSilentOverrideUntil = 0
 local _forceSilentRewriteUntil = 0
+local _lastShootArgs = nil
+local _lastShootArgsAt = 0
+
+local function copyArgs(args)
+    local out = {}
+    for i, v in ipairs(args or {}) do out[i] = v end
+    return out
+end
 
 local fireGunAtPosition
 fireGunAtPosition = function(hitPos)
@@ -1019,17 +1027,12 @@ end
 local function buildSilentShootArgs(args, hitPos)
     if type(args) ~= "table" then args = {} end
     if not hitPos or hitPos ~= hitPos then return nil end
-    local function cloneArgs()
-        local out = {}
-        for i, v in ipairs(args) do out[i] = v end
-        return out
-    end
     local function aimCFFrom(cf)
         if typeof(cf) ~= "CFrame" then return nil end
         return safeLookAt(cf.Position, hitPos) or cf
     end
     local function rewriteTypedArgs(firstIndex)
-        local out = cloneArgs()
+        local out = copyArgs(args)
         local firstCF, lastCF, lastV3
         for i = firstIndex, #args do
             local v = args[i]
@@ -1055,17 +1058,6 @@ local function buildSilentShootArgs(args, hitPos)
     if type(args[1]) == "string" then
         return rewriteTypedArgs(2)
     end
-    if #args >= 2 and typeof(args[1]) == "CFrame" and typeof(args[2]) == "CFrame" then
-        local out = cloneArgs()
-        out[1] = aimCFFrom(args[1]) or args[1]
-        out[2] = CFrame.new(hitPos)
-        return out
-    end
-    if #args >= 2 and typeof(args[1]) == "Vector3" and typeof(args[2]) == "Vector3" then
-        local out = cloneArgs()
-        out[2] = hitPos
-        return out
-    end
     return nil
 end
 
@@ -1088,20 +1080,29 @@ local function fireShootRemoteAtPosition(hitPos)
     _manualSilentOverridePos = hitPos
     _manualSilentOverrideUntil = tick() + 0.45
     _forceSilentRewriteUntil = tick() + 0.45
-    local oldCamCF = cam and cam.CFrame
-    local ok = pcall(function()
-        local origin = getShotOrigin(gunTool)
-        local shotCF = safeLookAt(origin, hitPos)
-        if shotCF and cam then cam.CFrame = shotCF end
-        gunTool:Activate()
-    end)
-    task.delay(0.08, function()
-        if oldCamCF and cam then pcall(function() cam.CFrame = oldCamCF end) end
-    end)
+    local ok = false
+    local shootRemote = getShootRemote(gunTool)
+    local canReplay = shootRemote and _lastShootArgs and (tick() - _lastShootArgsAt) < 20
+    if canReplay then
+        local replayArgs = buildSilentShootArgs(_lastShootArgs, hitPos)
+        if replayArgs then
+            _silentFireGuard = true
+            ok = pcall(function()
+                shootRemote:FireServer(table.unpack(replayArgs))
+            end)
+            _silentFireGuard = false
+        end
+    end
+    if not ok then
+        ok = pcall(function()
+            gunTool:Activate()
+        end)
+    end
     task.delay(0.62, function()
         _shootCd = false
         if tick() > _manualSilentOverrideUntil then
             _manualSilentOverridePos = nil
+            _forceSilentRewriteUntil = 0
         end
     end)
     return ok
@@ -1123,6 +1124,10 @@ local function installShootHook()
             local gunTool = getGunTool()
             local shootRemote = gunTool and getShootRemote(gunTool)
             local isGunShoot = shootRemote and typeof(self) == "Instance" and self == shootRemote
+            if isGunShoot and type(args[1]) == "string" then
+                _lastShootArgs = copyArgs(args)
+                _lastShootArgsAt = tick()
+            end
             if dumpActive and isGunShoot then
                 dumpActive = false
                 local desc = {}
