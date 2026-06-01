@@ -988,6 +988,7 @@ end
 
 local _manualSilentOverridePos = nil
 local _manualSilentOverrideUntil = 0
+local _forceSilentRewriteUntil = 0
 
 local fireGunAtPosition
 fireGunAtPosition = function(hitPos)
@@ -1018,36 +1019,52 @@ end
 local function buildSilentShootArgs(args, hitPos)
     if type(args) ~= "table" then args = {} end
     if not hitPos or hitPos ~= hitPos then return nil end
+    local function cloneArgs()
+        local out = {}
+        for i, v in ipairs(args) do out[i] = v end
+        return out
+    end
     local function aimCFFrom(cf)
         if typeof(cf) ~= "CFrame" then return nil end
         return safeLookAt(cf.Position, hitPos) or cf
     end
+    local function rewriteTypedArgs(firstIndex)
+        local out = cloneArgs()
+        local firstCF, lastCF, lastV3
+        for i = firstIndex, #args do
+            local v = args[i]
+            if typeof(v) == "CFrame" then
+                firstCF = firstCF or i
+                lastCF = i
+            elseif typeof(v) == "Vector3" then
+                lastV3 = i
+            end
+        end
+        if lastCF then
+            if firstCF and firstCF ~= lastCF then
+                out[firstCF] = aimCFFrom(args[firstCF]) or args[firstCF]
+            end
+            out[lastCF] = CFrame.new(hitPos)
+            return out
+        end
+        if lastV3 then
+            out[lastV3] = hitPos
+            return out
+        end
+    end
+    if type(args[1]) == "string" then
+        return rewriteTypedArgs(2)
+    end
     if #args >= 2 and typeof(args[1]) == "CFrame" and typeof(args[2]) == "CFrame" then
-        local out = {}
-        for i, v in ipairs(args) do out[i] = v end
+        local out = cloneArgs()
         out[1] = aimCFFrom(args[1]) or args[1]
         out[2] = CFrame.new(hitPos)
         return out
     end
-    if #args >= 3 and type(args[1]) == "string" and typeof(args[2]) == "CFrame" and typeof(args[3]) == "CFrame" then
-        local out = {}
-        for i, v in ipairs(args) do out[i] = v end
-        out[2] = aimCFFrom(args[2]) or args[2]
-        out[3] = CFrame.new(hitPos)
-        return out
-    end
     if #args >= 2 and typeof(args[1]) == "Vector3" and typeof(args[2]) == "Vector3" then
-        local out = {}
-        for i, v in ipairs(args) do out[i] = v end
+        local out = cloneArgs()
         out[2] = hitPos
         return out
-    end
-    if #args == 0 then
-        local origin = getShotOrigin(getGunTool())
-        if not origin or origin ~= origin then return nil end
-        local shotCF = safeLookAt(origin, hitPos)
-        if not shotCF then return nil end
-        return {shotCF, CFrame.new(hitPos)}
     end
     return nil
 end
@@ -1067,21 +1084,20 @@ local function fireShootRemoteAtPosition(hitPos)
         gunTool = getGunTool()
         if not gunTool then return false end
     end
-    local shootRemote = getShootRemote(gunTool)
-    if not shootRemote or not shootRemote:IsA("RemoteEvent") then return false end
-    local origin = getShotOrigin(gunTool)
-    local shotCF = safeLookAt(origin, hitPos)
-    if not shotCF then return false end
-    local args = buildSilentShootArgs({shotCF, CFrame.new(hitPos)}, hitPos)
-    if not args then return false end
     _shootCd = true
     _manualSilentOverridePos = hitPos
     _manualSilentOverrideUntil = tick() + 0.45
-    _silentFireGuard = true
+    _forceSilentRewriteUntil = tick() + 0.45
+    local oldCamCF = cam and cam.CFrame
     local ok = pcall(function()
-        shootRemote:FireServer(table.unpack(args))
+        local origin = getShotOrigin(gunTool)
+        local shotCF = safeLookAt(origin, hitPos)
+        if shotCF and cam then cam.CFrame = shotCF end
+        gunTool:Activate()
     end)
-    _silentFireGuard = false
+    task.delay(0.08, function()
+        if oldCamCF and cam then pcall(function() cam.CFrame = oldCamCF end) end
+    end)
     task.delay(0.62, function()
         _shootCd = false
         if tick() > _manualSilentOverrideUntil then
@@ -1120,7 +1136,7 @@ local function installShootHook()
                 end
                 if dumpCallback then task.spawn(dumpCallback, desc); dumpCallback = nil end
             end
-            if isGunShoot and silentAimOn then
+            if isGunShoot and (silentAimOn or tick() <= _forceSilentRewriteUntil) then
                 local hitPos = getRewriteHitPosition()
                 local newArgs = buildSilentShootArgs(args, hitPos)
                 if newArgs then
@@ -1177,7 +1193,6 @@ end
 local function applyKnifeReach(knife, size)
     local h = getKnifeHandle(knife)
     if not h then return nil end
-    local reach = math.clamp(tonumber(size) or 18, 4, 80)
     if not knifeReachCache[h] then
         knifeReachCache[h] = {
             size = h.Size,
@@ -1192,14 +1207,10 @@ local function applyKnifeReach(knife, size)
         }
     end
     pcall(function()
-        h.Size = Vector3.new(reach, reach, reach)
-        h.Transparency = 1
-        h.LocalTransparencyModifier = 1
         h.CanTouch = true
         h.CanCollide = false
-        h.CanQuery = true
+        h.CanQuery = false
         h.Massless = true
-        h.CastShadow = false
     end)
     return h
 end
@@ -1244,41 +1255,17 @@ local function getKnifeTouchParts(targetChar)
 end
 
 local function pulseKnifeTouch(knife, targetChar, pulses)
-    local h = getKnifeHandle(knife)
-    if not h or not targetChar then return false end
-    local parts = getKnifeTouchParts(targetChar)
-    if #parts == 0 then return false end
-    local ok = false
-    local n = math.clamp(tonumber(pulses) or 2, 1, 6)
-    for _ = 1, n do
-        for _, part in ipairs(parts) do
-            if part and part.Parent then
-                if firetouchinterest then
-                    local good = pcall(function()
-                        firetouchinterest(h, part, 0)
-                        task.wait()
-                        firetouchinterest(h, part, 1)
-                    end)
-                    ok = ok or good
-                else
-                    ok = true
-                end
-            end
-        end
-        task.wait(0.025)
-    end
-    return ok
+    return false
 end
 
 local function swingKnifeOnce(knife, targetChar, reachSize, pulses)
     if not knife then return false end
-    local touched = targetChar and pulseKnifeTouch(knife, targetChar, pulses)
     local ok = false
     pcall(function()
         knife:Activate()
         ok = true
     end)
-    return ok or touched
+    return ok
 end
 
 local function knifeAt(targetChar, blinkAssist, reachSize, pulses)
@@ -1309,6 +1296,41 @@ end
 
 local knifeRangeOn = false
 local knifeRange = 18
+local lastKnifeRangeSwing = 0
+
+local function getKnifeRangeTarget()
+    local hrp = myHRP(); if not hrp then return nil end
+    local best, bestD = nil, math.huge
+    local maxDist = math.clamp(tonumber(knifeRange) or 18, 4, 80)
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= player and isAlive(p) then
+            local chr = p.Character
+            local part = chr and (chr:FindFirstChild("HumanoidRootPart") or chr:FindFirstChild("UpperTorso") or chr:FindFirstChild("Torso") or chr:FindFirstChild("Head"))
+            if part then
+                local d = (hrp.Position - part.Position).Magnitude
+                if d <= maxDist and d < bestD then
+                    best = p
+                    bestD = d
+                end
+            end
+        end
+    end
+    return best
+end
+
+local function knifeRangeLoop()
+    while knifeRangeOn do
+        task.wait(0.12)
+        if not knifeRangeOn then break end
+        if getRole() ~= "murderer" then continue end
+        if tick() - lastKnifeRangeSwing < 0.65 then continue end
+        local target = getKnifeRangeTarget()
+        if target and target.Character then
+            lastKnifeRangeSwing = tick()
+            knifeAt(target.Character, true, knifeRange, 1)
+        end
+    end
+end
 
 local hitboxOn      = false
 local hitboxSize    = 18
@@ -1333,13 +1355,12 @@ end
 player.CharacterAdded:Connect(function() _myPartsCache = nil end)
 
 local function hitboxEnabled()
-    return hitboxOn or knifeRangeOn
+    return hitboxOn
 end
 
 local function activeHitboxSize()
     local n = 0
     if hitboxOn then n = math.max(n, tonumber(hitboxSize) or 0) end
-    if knifeRangeOn then n = math.max(n, tonumber(knifeRange) or 0) end
     return math.clamp(n, 4, 80)
 end
 
@@ -1395,15 +1416,6 @@ local function applyHitboxToChar(p)
             targetSize = os * sc
         end
         local cons = {}
-        for _, mp in ipairs(myParts) do
-            pcall(function()
-                local nc = Instance.new("NoCollisionConstraint")
-                nc.Part0 = part
-                nc.Part1 = mp
-                nc.Parent = part
-                table.insert(cons, nc)
-            end)
-        end
         local d = {
             part = part,
             size = os,
@@ -1418,7 +1430,7 @@ local function applyHitboxToChar(p)
         }
         pcall(function()
             part.Size = targetSize
-            part.CanTouch = true
+            part.CanTouch = false
             part.CanCollide = false
             part.CanQuery = true
             part.Massless = true
@@ -2166,10 +2178,10 @@ local t_ka=secMurd:Toggle("knife range (enemy hitbox)", false, function(v)
         restoreKnifeReach()
         local knife = getKnifeTool()
         if knife then applyKnifeReach(knife, knifeRange) end
-        rebuildHitboxes()
-        ui:Toast("","[Knife Range]","reach/hitbox manual ativo — ataque clicando",ROLE_COLOR.murderer)
+        task.spawn(knifeRangeLoop)
+        ui:Toast("","[Knife Range]","auto swing ativo - "..knifeRange.." studs",ROLE_COLOR.murderer)
     else
-        if hitboxOn then rebuildHitboxes() else restoreAllHitboxes() end
+        restoreKnifeReach()
         ui:Toast("","[Knife Range]","desativado",ROLE_COLOR.unknown)
     end
 end)
@@ -2180,7 +2192,6 @@ local s_kr=secMurd:Slider("range knife hitbox", 4, 80, 18, function(v)
         restoreKnifeReach()
         local knife = getKnifeTool()
         if knife then applyKnifeReach(knife, knifeRange) end
-        rebuildHitboxes()
     end
 end)
 ui:CfgRegister("mm2_kniferange", function() return knifeRange end, function(v) s_kr.Set(v) end)
