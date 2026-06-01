@@ -84,8 +84,10 @@ local delfileFn = envFunction("delfile")
 
 local folder = "MMScanner"
 local bootPath = "MMScanner_boot.txt"
+local bootVisiblePath = "MMScanner_BOOT_REACHED.txt"
 local rootCrashPath = "MMScanner_crash_last.txt"
 local statusPath = "MMScanner_status.txt"
+local runningPath = "MMScanner_RUNNING.txt"
 
 local function ensureBaseFolder()
     if not callable(makefolderFn) then
@@ -129,12 +131,98 @@ local function appendText(path, text)
     return false
 end
 
+local function showStatus(message, lifetime)
+    message = safeToString(message)
+    lifetime = lifetime or 5
+
+    safeCall(function()
+        if not _game or _type(Instance) ~= "table" or not callable(Instance.new) then
+            return
+        end
+
+        local players = _game:GetService("Players")
+        local localPlayer = players and players.LocalPlayer
+        if not localPlayer then
+            return
+        end
+
+        local playerGui = nil
+        safeCall(function()
+            playerGui = localPlayer:FindFirstChildOfClass("PlayerGui")
+        end)
+        if not playerGui then
+            safeCall(function()
+                playerGui = localPlayer:WaitForChild("PlayerGui", 2)
+            end)
+        end
+        if not playerGui then
+            return
+        end
+
+        safeCall(function()
+            local old = playerGui:FindFirstChild("MMScannerStatus")
+            if old then
+                old:Destroy()
+            end
+        end)
+
+        local gui = Instance.new("ScreenGui")
+        gui.Name = "MMScannerStatus"
+        gui.ResetOnSpawn = false
+        gui.IgnoreGuiInset = true
+        gui.DisplayOrder = 999999
+
+        local label = Instance.new("TextLabel")
+        label.Name = "Status"
+        label.AnchorPoint = Vector2.new(0.5, 0)
+        label.Position = UDim2.new(0.5, 0, 0, 18)
+        label.Size = UDim2.new(0, 360, 0, 34)
+        label.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
+        label.BackgroundTransparency = 0.08
+        label.BorderSizePixel = 0
+        label.Text = message
+        label.TextColor3 = Color3.fromRGB(235, 255, 235)
+        label.TextSize = 14
+        label.Font = Enum.Font.GothamSemibold
+        label.TextWrapped = true
+        label.Parent = gui
+
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(0, 6)
+        corner.Parent = label
+
+        gui.Parent = playerGui
+
+        local destroyGui = function()
+            safeCall(function()
+                if gui and gui.Parent then
+                    gui:Destroy()
+                end
+            end)
+        end
+
+        if _type(task) == "table" and callable(task.delay) then
+            task.delay(lifetime, destroyGui)
+        elseif callable(delay) then
+            delay(lifetime, destroyGui)
+        elseif callable(spawn) then
+            spawn(function()
+                if callable(wait) then
+                    wait(lifetime)
+                end
+                destroyGui()
+            end)
+        end
+    end)
+end
+
 writeText(bootPath, "boot reached: " .. VERSION .. "\n")
+writeText(bootVisiblePath, "boot reached: " .. VERSION .. "\n")
 writeText(statusPath, "boot reached\n")
 if folderAvailable then
     writeText(folder .. "/boot.txt", "boot reached: " .. VERSION .. "\n")
 end
-safeWarn("boot reached")
+showStatus("MMScanner boot reached", 4)
 
 local function tracebackMessage(err)
     local message = safeToString(err)
@@ -178,6 +266,7 @@ local function protected(name, fn, ...)
         if folderAvailable then
             writeText(folder .. "/crash_last.txt", msg)
         end
+        showStatus("MMScanner crashed - check crash file", 8)
         safeWarn(msg)
     end
     return ok, result
@@ -997,10 +1086,14 @@ local function main()
     end)
 
     flush()
-    writeText(statusPath, "running: " .. VERSION .. "\nmode: selective weapon outbound hook\nfile: " .. filePath .. "\n")
+    local runningText = "running: " .. VERSION .. "\nmode: selective weapon outbound hook\nfile: " .. filePath .. "\nhook: " .. safeToString(Scanner.namecallHook or "none") .. "\n"
+    writeText(statusPath, runningText)
+    writeText(runningPath, runningText)
     if folderAvailable then
-        writeText(folder .. "/status.txt", "running: " .. VERSION .. "\nmode: selective weapon outbound hook\nfile: " .. filePath .. "\n")
+        writeText(folder .. "/status.txt", runningText)
+        writeText(folder .. "/RUNNING.txt", runningText)
     end
+    showStatus("MMScanner running - weapon outbound ON", 7)
     safeWarn("running; output: " .. filePath)
 end
 
