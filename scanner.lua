@@ -40,6 +40,17 @@ local function mkLabel(parent, text, size, color, bold, xa)
     return l
 end
 
+local function safeCall(label, cb, ...)
+    if type(cb) ~= "function" then return end
+    local args = {...}
+    local ok, err = xpcall(function()
+        return cb(table.unpack(args))
+    end, debug.traceback)
+    if not ok then
+        warn(("[RefLib] %s failed: %s"):format(tostring(label or "callback"), tostring(err)))
+    end
+end
+
 local toastGui
 local function ensureToastGui()
     if toastGui and toastGui.Parent then return end
@@ -179,6 +190,13 @@ function RefLib.new(title, icon, key)
         win.Visible = not win.Visible
     end)
 
+    UserInputService.InputBegan:Connect(function(input, gameProcessed)
+        if gameProcessed then return end
+        if input.KeyCode == Enum.KeyCode.RightShift then
+            win.Visible = not win.Visible
+        end
+    end)
+
     local tabBar = Instance.new("Frame")
     tabBar.Size = UDim2.new(1,-8,0,28)
     tabBar.Position = UDim2.new(0,4,0,38)
@@ -290,7 +308,7 @@ function RefLib:Tab(name)
             btn2.LayoutOrder = order
             btn2.Parent = inner
             mkCorner(btn2, 6)
-            btn2.MouseButton1Click:Connect(function() pcall(cb) end)
+            btn2.MouseButton1Click:Connect(function() safeCall(label, cb) end)
             btn2.MouseEnter:Connect(function() btn2.BackgroundColor3 = C.btnHov end)
             btn2.MouseLeave:Connect(function() btn2.BackgroundColor3 = C.btn end)
         end
@@ -330,7 +348,7 @@ function RefLib:Tab(name)
                 state = v
                 pill.BackgroundColor3 = state and C.toggle or C.toggleOff
                 knob.Position = state and UDim2.new(1,-16,0.5,-7) or UDim2.new(0,2,0.5,-7)
-                pcall(cb, state)
+                safeCall(label, cb, state)
             end
 
             local clickArea = Instance.new("TextButton")
@@ -378,7 +396,7 @@ function RefLib:Tab(name)
                 val = v
                 fill.Size = UDim2.new((val-min)/(max-min), 0, 1, 0)
                 lbl2.Text = label.." ["..val.."]"
-                pcall(cb, val)
+                safeCall(label, cb, val)
             end
 
             local dragging = false
@@ -732,7 +750,7 @@ local function getRole(p)
     end
     if hasDrop(chr) or hasDrop(bp) then return "hero" end
     if hasGunOrig(chr) or hasGunOrig(bp) then return "sheriff" end
-    return "innocent"
+    return "unknown"
 end
 
 local function findByRole(role)
@@ -929,12 +947,12 @@ end
 local function getSilentTarget()
     local r = getRole()
     if r == "sheriff" or r == "hero" then
-        return findByRole("murderer") or getNearestAliveTarget()
+        return findByRole("murderer")
     end
     if r == "murderer" then
         return getNearestAliveTarget()
     end
-    return findByRole("murderer") or getNearestAliveTarget()
+    return nil
 end
 
 RunService.RenderStepped:Connect(function()
@@ -1077,13 +1095,12 @@ fireGunAtPosition = fireShootRemoteAtPosition
 
 local function installShootHook()
     if shared and shared.__MMV20_V19_SHOOTH0OK then return end
-    if shared then shared.__MMV20_V19_SHOOTH0OK = true end
     local mt = getrawmetatable and getrawmetatable(game)
     if not mt then return end
     local oldNamecall = mt.__namecall
     if not oldNamecall then return end
     pcall(setreadonly, mt, false)
-    mt.__namecall = newcclosure and newcclosure(function(self, ...)
+    local hookFn = function(self, ...)
         local method = getnamecallmethod and getnamecallmethod()
         if method == "FireServer" and not _silentFireGuard then
             local args = {...}
@@ -1116,8 +1133,13 @@ local function installShootHook()
             end
         end
         return oldNamecall(self, ...)
-    end) or oldNamecall
+    end
+    local wrapped = newcclosure and newcclosure(hookFn) or hookFn
+    local ok = pcall(function()
+        mt.__namecall = wrapped
+    end)
     pcall(setreadonly, mt, true)
+    if ok and shared then shared.__MMV20_V19_SHOOTH0OK = true end
 end
 task.defer(installShootHook)
 
@@ -1153,7 +1175,33 @@ local function restoreKnifeReach()
 end
 
 local function applyKnifeReach(knife, size)
-    return getKnifeHandle(knife)
+    local h = getKnifeHandle(knife)
+    if not h then return nil end
+    local reach = math.clamp(tonumber(size) or 18, 4, 80)
+    if not knifeReachCache[h] then
+        knifeReachCache[h] = {
+            size = h.Size,
+            transparency = h.Transparency,
+            ltm = h.LocalTransparencyModifier,
+            canTouch = h.CanTouch,
+            canCollide = h.CanCollide,
+            canQuery = h.CanQuery,
+            massless = h.Massless,
+            material = h.Material,
+            castShadow = h.CastShadow,
+        }
+    end
+    pcall(function()
+        h.Size = Vector3.new(reach, reach, reach)
+        h.Transparency = 1
+        h.LocalTransparencyModifier = 1
+        h.CanTouch = true
+        h.CanCollide = false
+        h.CanQuery = true
+        h.Massless = true
+        h.CastShadow = false
+    end)
+    return h
 end
 
 local function ensureKnifeEquipped()
@@ -1224,12 +1272,13 @@ end
 
 local function swingKnifeOnce(knife, targetChar, reachSize, pulses)
     if not knife then return false end
+    local touched = targetChar and pulseKnifeTouch(knife, targetChar, pulses)
     local ok = false
     pcall(function()
         knife:Activate()
         ok = true
     end)
-    return ok
+    return ok or touched
 end
 
 local function knifeAt(targetChar, blinkAssist, reachSize, pulses)
