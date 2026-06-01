@@ -1,4 +1,5 @@
-local VERSION = "2026-06-01-mm-scanner-ultra-safe-bootstrap"
+local VERSION = "2026-06-01-mm-scanner-passive-safe-v3"
+local ENABLE_OUTBOUND_HOOK = false
 
 local _type = type
 local _tostring = tostring
@@ -283,17 +284,12 @@ local function main()
     end)
 
     local startedAt = safeToString(timeNumber())
-    local filePath = (folderAvailable and (folder .. "/") or "") .. "scan_" .. placeId .. "_" .. startedAt .. ".log"
+    local filePath = "MMScanner_scan_" .. placeId .. "_" .. startedAt .. ".log"
 
     local function now()
-        if _type(DateTime) == "table" and DateTime.now then
-            local ok, value = safeCall(function()
-                return DateTime.now():ToIsoDate()
-            end)
-            if ok and value then
-                return value
-            end
-        end
+        -- Do not use DateTime.now():ToIsoDate() here.
+        -- In some executors, calling any namecall while a __namecall hook is forwarding
+        -- can corrupt the pending method and break remotes such as FireServer.
         if _type(_os) == "table" and callable(_os.date) then
             local ok, value = safeCall(_os.date, "!%Y-%m-%dT%H:%M:%SZ")
             if ok and value then
@@ -779,6 +775,14 @@ local function main()
     end
 
     local function installNamecallHook()
+        if ENABLE_OUTBOUND_HOOK ~= true then
+            logRecord({
+                event = "scanner_hook_skipped",
+                reason = "outbound hook disabled to avoid interfering with RemoteEvent/RemoteFunction calls"
+            })
+            return false
+        end
+
         local hookmetamethodFn = envFunction("hookmetamethod")
         local getnamecallmethodFn = envFunction("getnamecallmethod")
         if callable(hookmetamethodFn) and callable(getnamecallmethodFn) then
@@ -789,19 +793,20 @@ local function main()
                 safeCall(function()
                     method = getnamecallmethodFn()
                 end)
-                logOutbound(method, self, ...)
+
                 if callable(original) then
+                    if Scanner.active and not Scanner.inHook and (method == "FireServer" or method == "InvokeServer") and isRemote(self) then
+                        local argc = _select("#", ...)
+                        local rawArgs = { ... }
+                        local results = { original(self, ...) }
+                        protected("remote_outbound_after_forward", function()
+                            logOutbound(method, self, _unpack(rawArgs, 1, argc))
+                        end)
+                        return _unpack(results)
+                    end
                     return original(self, ...)
                 end
-                if method and self then
-                    local direct = nil
-                    safeCall(function()
-                        direct = self[method]
-                    end)
-                    if callable(direct) then
-                        return direct(self, ...)
-                    end
-                end
+
                 return nil
             end)
             local ok, result = safeCall(hookmetamethodFn, _game, "__namecall", replacement)
@@ -839,7 +844,15 @@ local function main()
             safeCall(function()
                 method = getnamecallmethodFn()
             end)
-            logOutbound(method, self, ...)
+            if Scanner.active and not Scanner.inHook and (method == "FireServer" or method == "InvokeServer") and isRemote(self) then
+                local argc = _select("#", ...)
+                local rawArgs = { ... }
+                local results = { original(self, ...) }
+                protected("remote_outbound_after_forward", function()
+                    logOutbound(method, self, _unpack(rawArgs, 1, argc))
+                end)
+                return _unpack(results)
+            end
             return original(self, ...)
         end)
         if callable(setreadonlyFn) then
@@ -927,7 +940,7 @@ local function main()
     end)
 
     flush()
-    writeText(statusPath, "running: " .. VERSION .. "\nfile: " .. filePath .. "\n")
+    writeText(statusPath, "running: " .. VERSION .. "\nmode: passive/no outbound hook\nfile: " .. filePath .. "\n")
     if folderAvailable then
         writeText(folder .. "/status.txt", "running: " .. VERSION .. "\nfile: " .. filePath .. "\n")
     end
