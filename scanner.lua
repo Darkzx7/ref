@@ -1,4 +1,33 @@
-local VERSION = "2026-06-01-passive-remote-scanner"
+local VERSION = "2026-06-01-passive-remote-scanner-bootcheck"
+
+local bootWritefile = nil
+pcall(function()
+    local env = (type(getgenv) == "function" and getgenv()) or _G
+    if env and type(env.writefile) == "function" then
+        bootWritefile = env.writefile
+    elseif type(writefile) == "function" then
+        bootWritefile = writefile
+    end
+end)
+
+if bootWritefile then
+    pcall(function()
+        bootWritefile("MMScanner_boot.txt", "scanner boot reached")
+    end)
+end
+
+local __mm_xpcall = xpcall
+if type(__mm_xpcall) ~= "function" then
+    __mm_xpcall = function(fn, handler)
+        local ok, result = pcall(fn)
+        if ok then
+            return true, result
+        end
+        return false, handler(result)
+    end
+end
+
+local __mm_ok, __mm_err = __mm_xpcall(function()
 
 local function globalFunction(name)
     local env = (type(getgenv) == "function" and getgenv()) or _G
@@ -726,3 +755,24 @@ spawnTask(function()
         flush()
     end
 end)
+
+end, function(err)
+    local message = tostring(err)
+    pcall(function()
+        if debug and debug.traceback then
+            message = debug.traceback(message)
+        end
+    end)
+    pcall(function()
+        if bootWritefile then
+            bootWritefile("MMScanner_crash.txt", message)
+        end
+    end)
+    return message
+end)
+
+if not __mm_ok and bootWritefile then
+    pcall(function()
+        bootWritefile("MMScanner_crash_last.txt", tostring(__mm_err))
+    end)
+end
