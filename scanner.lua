@@ -1,4 +1,4 @@
-local VERSION = "2026-06-01-passive-remote-scanner-bootcheck"
+local VERSION = "2026-06-01-passive-remote-scanner-bootcheck-fixed-nilcall"
 
 local bootWritefile = nil
 pcall(function()
@@ -86,7 +86,33 @@ env.__MM_REMOTE_SCANNER = Scanner
 
 local folder = "MMScanner"
 local placeId = tostring(game.PlaceId or "unknown")
-local startedAt = tostring((os and os.time and os.time()) or math.floor((tick and tick()) or 0))
+
+local function callable(value)
+    return type(value) == "function"
+end
+
+local function safeNumberTime()
+    if os and callable(os.time) then
+        local ok, value = pcall(os.time)
+        if ok and value then
+            return value
+        end
+    end
+
+    if callable(tick) then
+        local ok, value = pcall(tick)
+        if ok and value then
+            if math and callable(math.floor) then
+                return math.floor(value)
+            end
+            return value
+        end
+    end
+
+    return 0
+end
+
+local startedAt = tostring(safeNumberTime())
 local filePath = folder .. "/scan_" .. placeId .. "_" .. startedAt .. ".log"
 
 local writefileFn = globalFunction("writefile")
@@ -96,20 +122,122 @@ local newcclosureFn = globalFunction("newcclosure") or function(fn)
     return fn
 end
 
+local function packValues(...)
+    return {
+        n = select("#", ...),
+        ...
+    }
+end
+
+local function unpackValues(values, firstIndex)
+    firstIndex = firstIndex or 1
+    local unpackFn = (table and table.unpack) or unpack
+    if callable(unpackFn) then
+        return unpackFn(values, firstIndex, values.n or #values)
+    end
+    return values[firstIndex]
+end
+
+local function safeReturnCall(fn, ...)
+    if not callable(fn) then
+        return nil
+    end
+
+    local results = packValues(pcall(fn, ...))
+    if results[1] then
+        return unpackValues(results, 2)
+    end
+
+    return nil
+end
+
+local function safeWait(seconds)
+    if task and callable(task.wait) then
+        local ok, result = pcall(task.wait, seconds)
+        if ok then
+            return result
+        end
+    end
+
+    if callable(wait) then
+        local ok, result = pcall(wait, seconds)
+        if ok then
+            return result
+        end
+    end
+
+    return nil
+end
+
+local function safeSpawn(callback)
+    if not callable(callback) then
+        return
+    end
+
+    if task and callable(task.spawn) then
+        local ok = pcall(task.spawn, callback)
+        if ok then
+            return
+        end
+    end
+
+    if coroutine and callable(coroutine.wrap) then
+        local ok, runner = pcall(coroutine.wrap, callback)
+        if ok and callable(runner) then
+            local ran = pcall(runner)
+            if ran then
+                return
+            end
+        end
+    end
+
+    pcall(callback)
+end
+
+local function safeDefer(callback)
+    if not callable(callback) then
+        return
+    end
+
+    if task and callable(task.defer) then
+        local ok = pcall(task.defer, callback)
+        if ok then
+            return
+        end
+    end
+
+    safeSpawn(callback)
+end
+
 local function now()
     local ok, value = pcall(function()
-        if DateTime and DateTime.now then
-            return DateTime.now():ToIsoDate()
+        if DateTime and callable(DateTime.now) then
+            local current = DateTime.now()
+            if current and callable(current.ToIsoDate) then
+                return current:ToIsoDate()
+            end
         end
         return nil
     end)
     if ok and value then
         return value
     end
-    if os and os.date then
-        return os.date("!%Y-%m-%dT%H:%M:%SZ")
+
+    if os and callable(os.date) then
+        local dateOk, dateValue = pcall(os.date, "!%Y-%m-%dT%H:%M:%SZ")
+        if dateOk and dateValue then
+            return dateValue
+        end
     end
-    return tostring(tick and tick() or 0)
+
+    if callable(tick) then
+        local tickOk, tickValue = pcall(tick)
+        if tickOk and tickValue then
+            return tostring(tickValue)
+        end
+    end
+
+    return tostring(safeNumberTime())
 end
 
 local function fullName(instance)
@@ -493,21 +621,17 @@ local function scanRoot(root)
     if ok and type(descendants) == "table" then
         for index, instance in ipairs(descendants) do
             rememberRemote(instance)
-            if index % 250 == 0 and task and task.wait then
-                task.wait()
+            if index % 250 == 0 then
+                safeWait()
             end
         end
     end
 
     local signal = prop(root, "DescendantAdded")
     Scanner:Connect(signal, function(instance)
-        if task and task.defer then
-            task.defer(function()
-                rememberRemote(instance)
-            end)
-        else
+        safeDefer(function()
             rememberRemote(instance)
-        end
+        end)
     end)
 end
 
@@ -579,15 +703,15 @@ local function installNamecallHook()
                 Scanner.inHook = false
             end
 
-            if type(original) == "function" then
-                return original(self, ...)
+            if callable(original) then
+                return safeReturnCall(original, self, ...)
             end
             if method and self then
                 local ok, direct = pcall(function()
                     return self[method]
                 end)
-                if ok and type(direct) == "function" then
-                    return direct(self, ...)
+                if ok and callable(direct) then
+                    return safeReturnCall(direct, self, ...)
                 end
             end
             return nil
@@ -663,7 +787,7 @@ local function installNamecallHook()
             Scanner.inHook = false
         end
 
-        return original(self, ...)
+        return safeReturnCall(original, self, ...)
     end)
     if setreadonlyFn then
         pcall(function()
@@ -706,11 +830,7 @@ logRecord({
 })
 
 local function spawnTask(callback)
-    if task and task.spawn then
-        task.spawn(callback)
-    else
-        coroutine.wrap(callback)()
-    end
+    safeSpawn(callback)
 end
 
 spawnTask(function()
@@ -731,22 +851,14 @@ end)
 
 spawnTask(function()
     while Scanner.active do
-        if task and task.wait then
-            task.wait(2)
-        else
-            wait(2)
-        end
+        safeWait(2)
         flush()
     end
 end)
 
 spawnTask(function()
     while Scanner.active do
-        if task and task.wait then
-            task.wait(15)
-        else
-            wait(15)
-        end
+        safeWait(15)
         logRecord({
             event = "scanner_heartbeat",
             counts = Scanner.counts,
@@ -759,7 +871,7 @@ end)
 end, function(err)
     local message = tostring(err)
     pcall(function()
-        if debug and debug.traceback then
+        if debug and callable(debug.traceback) then
             message = debug.traceback(message)
         end
     end)
