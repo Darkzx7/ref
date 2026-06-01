@@ -1,12 +1,5 @@
 local VERSION = "2026-06-01-passive-remote-scanner"
 
-local function safe(fn, ...)
-    local args = { ... }
-    return pcall(function()
-        return fn(table.unpack(args))
-    end)
-end
-
 local function globalFunction(name)
     local env = (type(getgenv) == "function" and getgenv()) or _G
     local value = env and env[name]
@@ -64,7 +57,7 @@ env.__MM_REMOTE_SCANNER = Scanner
 
 local folder = "MMScanner"
 local placeId = tostring(game.PlaceId or "unknown")
-local startedAt = tostring(os.time and os.time() or math.floor(tick and tick() or 0))
+local startedAt = tostring((os and os.time and os.time()) or math.floor((tick and tick()) or 0))
 local filePath = folder .. "/scan_" .. placeId .. "_" .. startedAt .. ".log"
 
 local writefileFn = globalFunction("writefile")
@@ -77,12 +70,15 @@ end
 
 local function now()
     local ok, value = pcall(function()
-        return DateTime.now():ToIsoDate()
+        if DateTime and DateTime.now then
+            return DateTime.now():ToIsoDate()
+        end
+        return nil
     end)
-    if ok then
+    if ok and value then
         return value
     end
-    if os.date then
+    if os and os.date then
         return os.date("!%Y-%m-%dT%H:%M:%SZ")
     end
     return tostring(tick and tick() or 0)
@@ -540,7 +536,8 @@ local function installNamecallHook()
 
     if hookmetamethodFn and getnamecallmethodFn then
         local original
-        original = hookmetamethodFn(game, "__namecall", newcclosureFn(function(self, ...)
+        local replacement
+        replacement = newcclosureFn(function(self, ...)
             local method = nil
             pcall(function()
                 method = getnamecallmethodFn()
@@ -563,8 +560,32 @@ local function installNamecallHook()
                 Scanner.inHook = false
             end
 
-            return original(self, ...)
-        end))
+            if type(original) == "function" then
+                return original(self, ...)
+            end
+            if method and self then
+                local ok, direct = pcall(function()
+                    return self[method]
+                end)
+                if ok and type(direct) == "function" then
+                    return direct(self, ...)
+                end
+            end
+            return nil
+        end)
+
+        local ok, result = pcall(function()
+            return hookmetamethodFn(game, "__namecall", replacement)
+        end)
+        if not ok or type(result) ~= "function" then
+            logRecord({
+                event = "scanner_hook_failed",
+                method = "hookmetamethod",
+                reason = ok and "original_missing" or shortString(tostring(result), 300),
+            })
+            return false
+        end
+        original = result
 
         Scanner.namecallHook = "hookmetamethod"
         return true
@@ -586,6 +607,9 @@ local function installNamecallHook()
     end
 
     local original = mt.__namecall
+    if type(original) ~= "function" then
+        return false
+    end
     if setreadonlyFn then
         pcall(function()
             setreadonlyFn(mt, false)
