@@ -1,4 +1,4 @@
-local VERSION = "2026-06-01-mm-scanner-tester-v6"
+local VERSION = "2026-06-02-mm-scanner-tester-v7"
 local ENABLE_OUTBOUND_HOOK = true
 local ENABLE_TESTER_UI = true
 
@@ -1178,7 +1178,7 @@ local function installTester()
         selectedPart = "UpperTorso",
         partIndex = 1,
         predictionIndex = 3,
-        jumpIndex = 2,
+        jumpPrediction = true,
         cooldownIndex = 2,
         pingPrediction = true,
         manualSilent = false,
@@ -1187,7 +1187,6 @@ local function installTester()
 
     local partOptions = { "UpperTorso", "Head", "HumanoidRootPart", "Torso", "LowerTorso", "LeftUpperArm", "RightUpperArm" }
     local predictionOptions = { 0, 0.08, 0.12, 0.18, 0.25, 0.35 }
-    local jumpOptions = { 0, 0.35, 0.65, 1, 1.35 }
     local cooldownOptions = { 0.1, 0.25, 0.45, 0.75, 1.25 }
 
     local function testerLog(message)
@@ -1377,15 +1376,33 @@ local function installTester()
         end
         local ok, predicted = safeCall(function()
             local value = pos + (velocity * lead)
-            local jumpScale = jumpOptions[testerState.jumpIndex] or 0
-            if jumpScale > 0 and _math and callable(_math.abs) and _math.abs(velocity.Y) > 3 then
-                value = value + Vector3.new(0, velocity.Y * lead * jumpScale, 0)
+            if testerState.jumpPrediction == true and _math and callable(_math.abs) and _math.abs(velocity.Y) > 3 then
+                value = value + Vector3.new(0, velocity.Y * lead * 0.85, 0)
             end
             return value
         end)
         if ok and predicted then
             return predicted
         end
+        return pos
+    end
+
+    local function cframePosition(value)
+        local valueType = kind(value)
+        if valueType ~= "CFrame" then
+            return nil
+        end
+        local pos = nil
+        safeCall(function()
+            pos = value.Position
+        end)
+        if pos then
+            return pos
+        end
+        safeCall(function()
+            local components = { value:GetComponents() }
+            pos = Vector3.new(components[1], components[2], components[3])
+        end)
         return pos
     end
 
@@ -1428,10 +1445,67 @@ local function installTester()
         return nil
     end
 
-    local function nearestTarget()
+    local function isDescendantOf(instance, ancestor)
+        local ok, result = safeCall(function()
+            return instance and ancestor and instance:IsDescendantOf(ancestor)
+        end)
+        return ok and result == true
+    end
+
+    local function rayClear(originPos, targetPart, targetCharacter)
+        if not originPos or not targetPart then
+            return false
+        end
+
+        local targetPos = predictedPartPosition(targetPart) or partPosition(targetPart)
+        if not targetPos then
+            return false
+        end
+
+        local clear = true
+        safeCall(function()
+            local workspace = _game:GetService("Workspace")
+            if not workspace or not workspace.Raycast then
+                clear = true
+                return
+            end
+
+            local params = RaycastParams.new()
+            params.FilterType = Enum.RaycastFilterType.Blacklist
+            params.FilterDescendantsInstances = { getCharacter(LocalPlayer) }
+            params.IgnoreWater = true
+
+            local direction = targetPos - originPos
+            local result = workspace:Raycast(originPos, direction, params)
+            if result and result.Instance and not isDescendantOf(result.Instance, targetCharacter) then
+                clear = false
+            end
+        end)
+        return clear
+    end
+
+    local function bestPartForCharacter(character, originPos)
+        local preferred = getPart(character, testerState.selectedPart)
+        if preferred and (not originPos or rayClear(originPos, preferred, character)) then
+            return preferred
+        end
+
+        if originPos then
+            for _, name in _ipairs(partOptions) do
+                local part = findChild(character, name, false)
+                if part and rayClear(originPos, part, character) then
+                    return part
+                end
+            end
+        end
+
+        return preferred
+    end
+
+    local function nearestTarget(originPos)
         local myCharacter = getCharacter(LocalPlayer)
         local myPart = getPart(myCharacter, "HumanoidRootPart")
-        local myPos = myPart and partPosition(myPart)
+        local myPos = originPos or (myPart and partPosition(myPart))
         if not myPos then
             return nil, nil, "no local position"
         end
@@ -1439,7 +1513,7 @@ local function installTester()
         local lockedPlayer = selectedPlayer()
         if lockedPlayer then
             local lockedCharacter = getCharacter(lockedPlayer)
-            local lockedPart = getPart(lockedCharacter, testerState.selectedPart)
+            local lockedPart = bestPartForCharacter(lockedCharacter, myPos)
             if lockedPart then
                 return lockedPlayer, lockedPart, "target " .. safeToString(lockedPlayer.Name) .. " part " .. safeToString(lockedPart.Name)
             end
@@ -1452,7 +1526,7 @@ local function installTester()
         local bestDistance = 999999
         for _, player in _ipairs(players) do
             local character = getCharacter(player)
-            local part = getPart(character, testerState.selectedPart)
+            local part = bestPartForCharacter(character, myPos)
             local pos = part and partPosition(part)
             if pos then
                 local dist = distance(myPos, pos)
@@ -1515,8 +1589,8 @@ local function installTester()
         return tool, current, "ok"
     end
 
-    local function makeShotCFrames(originPart, targetPart)
-        local originPos = partPosition(originPart)
+    local function makeShotCFrames(originPart, targetPart, originOverride)
+        local originPos = originOverride or partPosition(originPart)
         local targetPos = predictedPartPosition(targetPart)
         if not originPos or not targetPos then
             return nil, nil, "missing positions"
@@ -1533,19 +1607,20 @@ local function installTester()
         return originCf, targetCf, "ok"
     end
 
-    local function buildGunShotCFrames()
+    local function buildGunShotCFrames(originalOriginCf)
         local tool, _, remoteStatus = findToolRemote("Gun", { "Shoot" })
         if not tool then
             return nil, nil, remoteStatus
         end
 
-        local _, targetPart, targetStatus = nearestTarget()
+        local handle = findChild(tool, "Handle", false) or getPart(getCharacter(LocalPlayer), "HumanoidRootPart")
+        local originOverride = cframePosition(originalOriginCf) or partPosition(handle)
+        local _, targetPart, targetStatus = nearestTarget(originOverride)
         if not targetPart then
             return nil, nil, targetStatus
         end
 
-        local handle = findChild(tool, "Handle", false) or getPart(getCharacter(LocalPlayer), "HumanoidRootPart")
-        local originCf, targetCf, cfStatus = makeShotCFrames(handle, targetPart)
+        local originCf, targetCf, cfStatus = makeShotCFrames(handle, targetPart, originOverride)
         if not originCf then
             return nil, nil, cfStatus
         end
@@ -1573,7 +1648,7 @@ local function installTester()
         local okFire, errFire = safeCall(function()
             remote:FireServer(originCf, targetCf)
         end)
-        testerLog(okFire and ("Shoot fired -> " .. safeToString(shotStatus) .. " pred=" .. safeToString(predictionSeconds()) .. " jump=" .. safeToString(jumpOptions[testerState.jumpIndex] or 0)) or ("Shoot failed: " .. safeToString(errFire)))
+        testerLog(okFire and ("Shoot fired -> " .. safeToString(shotStatus) .. " pred=" .. safeToString(predictionSeconds()) .. (testerState.jumpPrediction and " jump=on" or " jump=off")) or ("Shoot failed: " .. safeToString(errFire)))
         return okFire
     end
 
@@ -1660,11 +1735,11 @@ local function installTester()
     if _type(env) == "table" then
         env.__MM_TESTER = Tester
         env.__MM_TESTER_STATE = testerState
-        env.__MM_BUILD_SILENT_SHOT = function()
+        env.__MM_BUILD_SILENT_SHOT = function(remote, originalOriginCf)
             if testerState.manualSilent ~= true then
                 return nil, nil, "manual silent off"
             end
-            local originCf, targetCf, status = buildGunShotCFrames()
+            local originCf, targetCf, status = buildGunShotCFrames(originalOriginCf)
             if originCf and targetCf then
                 testerState.last = "Silent shot -> " .. safeToString(status)
             end
@@ -1687,7 +1762,7 @@ local function installTester()
             target = currentTargetText(),
             part = "Part: " .. safeToString(testerState.selectedPart),
             prediction = "Pred: " .. safeToString(predictionOptions[testerState.predictionIndex] or 0),
-            jump = "Jump: " .. safeToString(jumpOptions[testerState.jumpIndex] or 0),
+            jump = testerState.jumpPrediction and "Jump: ON" or "Jump: OFF",
             ping = testerState.pingPrediction and "Ping: on" or "Ping: off",
             silent = testerState.manualSilent and "Silent: manual ON" or "Silent: manual OFF",
             cooldown = "CD: " .. safeToString(cooldownOptions[testerState.cooldownIndex] or 0.25),
@@ -1747,14 +1822,11 @@ local function installTester()
         return predictionOptions[testerState.predictionIndex]
     end
 
-    function Tester.CycleJumpPrediction()
-        testerState.jumpIndex = (testerState.jumpIndex or 1) + 1
-        if testerState.jumpIndex > #jumpOptions then
-            testerState.jumpIndex = 1
-        end
-        testerLog("Jump prediction: " .. safeToString(jumpOptions[testerState.jumpIndex] or 0))
+    function Tester.ToggleJumpPrediction()
+        testerState.jumpPrediction = not testerState.jumpPrediction
+        testerLog(testerState.jumpPrediction and "Jump prediction on" or "Jump prediction off")
         refreshUi()
-        return jumpOptions[testerState.jumpIndex]
+        return testerState.jumpPrediction
     end
 
     function Tester.TogglePingPrediction()
@@ -1903,7 +1975,7 @@ local function installTester()
             makeStateButton(frame, "target", 36, Tester.CycleTarget)
             makeStateButton(frame, "part", 70, Tester.CyclePart)
             makeStateButton(frame, "prediction", 104, Tester.CyclePrediction)
-            makeStateButton(frame, "jump", 138, Tester.CycleJumpPrediction)
+            makeStateButton(frame, "jump", 138, Tester.ToggleJumpPrediction)
             makeStateButton(frame, "ping", 172, Tester.TogglePingPrediction)
             makeStateButton(frame, "silent", 206, Tester.ToggleManualSilent)
             makeStateButton(frame, "cooldown", 240, Tester.CycleCooldown)
