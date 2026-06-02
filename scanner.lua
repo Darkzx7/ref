@@ -1,5 +1,6 @@
-local VERSION = "2026-06-01-mm-scanner-weapon-outbound-v4"
+local VERSION = "2026-06-01-mm-scanner-tester-v5"
 local ENABLE_OUTBOUND_HOOK = true
+local ENABLE_TESTER_UI = true
 
 local _type = type
 local _tostring = tostring
@@ -88,6 +89,7 @@ local bootVisiblePath = "MMScanner_BOOT_REACHED.txt"
 local rootCrashPath = "MMScanner_crash_last.txt"
 local statusPath = "MMScanner_status.txt"
 local runningPath = "MMScanner_RUNNING.txt"
+local testerPath = "MMScanner_TESTER.txt"
 
 local function ensureBaseFolder()
     if not callable(makefolderFn) then
@@ -1101,3 +1103,409 @@ local ok, err = protected("main", main)
 if not ok then
     safeWarn("main failed; check MMScanner_crash_last.txt")
 end
+
+local function installTester()
+    if ENABLE_TESTER_UI ~= true then
+        return
+    end
+
+    local Players = nil
+    local LocalPlayer = nil
+    safeCall(function()
+        Players = _game:GetService("Players")
+        LocalPlayer = Players and Players.LocalPlayer
+    end)
+    if not Players or not LocalPlayer then
+        writeText(testerPath, "tester failed: players/localplayer unavailable\n")
+        return
+    end
+
+    local testerState = {
+        last = "ready",
+    }
+
+    local function testerLog(message)
+        message = safeToString(message)
+        testerState.last = message
+        writeText(testerPath, message .. "\n")
+        if folderAvailable then
+            writeText(folder .. "/TESTER.txt", message .. "\n")
+        end
+        showStatus(message, 4)
+    end
+
+    local function testerFullName(instance)
+        local value = nil
+        safeCall(function()
+            value = instance:GetFullName()
+        end)
+        return safeToString(value or instance)
+    end
+
+    local function getCharacter(player)
+        return player and (player.Character or nil)
+    end
+
+    local function getBackpack()
+        local backpack = nil
+        safeCall(function()
+            backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
+        end)
+        safeCall(function()
+            backpack = backpack or LocalPlayer:FindFirstChild("Backpack")
+        end)
+        return backpack
+    end
+
+    local function findChild(root, name, recursive)
+        if not root then
+            return nil
+        end
+        local result = nil
+        safeCall(function()
+            result = root:FindFirstChild(name, recursive == true)
+        end)
+        return result
+    end
+
+    local function isAlive(character)
+        if not character then
+            return false
+        end
+        local humanoid = findChild(character, "Humanoid", false)
+        if not humanoid then
+            return true
+        end
+        local health = 0
+        safeCall(function()
+            health = humanoid.Health
+        end)
+        return health > 0
+    end
+
+    local function getPart(character)
+        if not character then
+            return nil
+        end
+        local names = { "UpperTorso", "HumanoidRootPart", "Torso", "Head", "LeftUpperArm", "RightUpperArm" }
+        for _, name in _ipairs(names) do
+            local part = findChild(character, name, false)
+            if part then
+                return part
+            end
+        end
+        local children = {}
+        safeCall(function()
+            children = character:GetChildren()
+        end)
+        for _, child in _ipairs(children) do
+            local ok, isPart = safeCall(function()
+                return child:IsA("BasePart")
+            end)
+            if ok and isPart then
+                return child
+            end
+        end
+        return nil
+    end
+
+    local function partPosition(part)
+        local pos = nil
+        safeCall(function()
+            pos = part.Position
+        end)
+        return pos
+    end
+
+    local function distance(a, b)
+        local ok, result = safeCall(function()
+            return (a - b).Magnitude
+        end)
+        if ok and result then
+            return result
+        end
+        return 999999
+    end
+
+    local function nearestTarget()
+        local myCharacter = getCharacter(LocalPlayer)
+        local myPart = getPart(myCharacter)
+        local myPos = myPart and partPosition(myPart)
+        if not myPos then
+            return nil, nil, "no local position"
+        end
+
+        local players = {}
+        safeCall(function()
+            players = Players:GetPlayers()
+        end)
+
+        local bestPlayer = nil
+        local bestPart = nil
+        local bestDistance = 999999
+        for _, player in _ipairs(players) do
+            if player ~= LocalPlayer then
+                local character = getCharacter(player)
+                if isAlive(character) then
+                    local part = getPart(character)
+                    local pos = part and partPosition(part)
+                    if pos then
+                        local dist = distance(myPos, pos)
+                        if dist < bestDistance then
+                            bestDistance = dist
+                            bestPlayer = player
+                            bestPart = part
+                        end
+                    end
+                end
+            end
+        end
+
+        if not bestPart then
+            return nil, nil, "no target"
+        end
+        return bestPlayer, bestPart, "target " .. safeToString(bestPlayer.Name) .. " part " .. safeToString(bestPart.Name)
+    end
+
+    local function equipTool(name)
+        local character = getCharacter(LocalPlayer)
+        local backpack = getBackpack()
+        local tool = findChild(character, name, false) or findChild(backpack, name, false)
+        if not tool then
+            return nil, "missing " .. name
+        end
+
+        if character and tool.Parent ~= character then
+            local humanoid = findChild(character, "Humanoid", false)
+            if humanoid then
+                safeCall(function()
+                    humanoid:EquipTool(tool)
+                end)
+            end
+        end
+
+        return tool, "ok"
+    end
+
+    local function findToolRemote(toolName, remotePath)
+        local character = getCharacter(LocalPlayer)
+        local backpack = getBackpack()
+        local tool = findChild(character, toolName, false) or findChild(backpack, toolName, false)
+        if not tool then
+            tool = equipTool(toolName)
+        end
+        if not tool then
+            return nil, nil, "missing " .. toolName
+        end
+
+        local current = tool
+        for _, name in _ipairs(remotePath) do
+            current = findChild(current, name, false)
+            if not current then
+                local text = ""
+                safeCall(function()
+                    text = _table.concat(remotePath, ".")
+                end)
+                return tool, nil, "missing remote " .. safeToString(text)
+            end
+        end
+        return tool, current, "ok"
+    end
+
+    local function makeShotCFrames(originPart, targetPart)
+        local originPos = partPosition(originPart)
+        local targetPos = partPosition(targetPart)
+        if not originPos or not targetPos then
+            return nil, nil, "missing positions"
+        end
+        local originCf = nil
+        local targetCf = nil
+        local ok = safeCall(function()
+            originCf = CFrame.new(originPos, targetPos)
+            targetCf = CFrame.new(targetPos)
+        end)
+        if not ok or not originCf or not targetCf then
+            return nil, nil, "cframe build failed"
+        end
+        return originCf, targetCf, "ok"
+    end
+
+    local Tester = {}
+
+    function Tester.ShootTarget()
+        local tool, remote, remoteStatus = findToolRemote("Gun", { "Shoot" })
+        if not remote then
+            testerLog("Shoot failed: " .. safeToString(remoteStatus))
+            return false
+        end
+
+        local _, targetPart, targetStatus = nearestTarget()
+        if not targetPart then
+            testerLog("Shoot failed: " .. safeToString(targetStatus))
+            return false
+        end
+
+        local handle = findChild(tool, "Handle", false) or getPart(getCharacter(LocalPlayer))
+        local originCf, targetCf, cfStatus = makeShotCFrames(handle, targetPart)
+        if not originCf then
+            testerLog("Shoot failed: " .. safeToString(cfStatus))
+            return false
+        end
+
+        local okFire, errFire = safeCall(function()
+            remote:FireServer(originCf, targetCf)
+        end)
+        testerLog(okFire and ("Shoot fired -> " .. testerFullName(targetPart)) or ("Shoot failed: " .. safeToString(errFire)))
+        return okFire
+    end
+
+    function Tester.ThrowKnife()
+        local tool, remote, remoteStatus = findToolRemote("Knife", { "Events", "KnifeThrown" })
+        if not remote then
+            testerLog("Throw failed: " .. safeToString(remoteStatus))
+            return false
+        end
+
+        local _, targetPart, targetStatus = nearestTarget()
+        if not targetPart then
+            testerLog("Throw failed: " .. safeToString(targetStatus))
+            return false
+        end
+
+        local handle = findChild(tool, "Handle", false) or getPart(getCharacter(LocalPlayer))
+        local originCf, targetCf, cfStatus = makeShotCFrames(handle, targetPart)
+        if not originCf then
+            testerLog("Throw failed: " .. safeToString(cfStatus))
+            return false
+        end
+
+        local okFire, errFire = safeCall(function()
+            remote:FireServer(originCf, targetCf)
+        end)
+        testerLog(okFire and ("Knife thrown -> " .. testerFullName(targetPart)) or ("Throw failed: " .. safeToString(errFire)))
+        return okFire
+    end
+
+    function Tester.TouchTarget()
+        local _, remote, remoteStatus = findToolRemote("Knife", { "Events", "HandleTouched" })
+        if not remote then
+            testerLog("Touch failed: " .. safeToString(remoteStatus))
+            return false
+        end
+
+        local _, targetPart, targetStatus = nearestTarget()
+        if not targetPart then
+            testerLog("Touch failed: " .. safeToString(targetStatus))
+            return false
+        end
+
+        local okFire, errFire = safeCall(function()
+            remote:FireServer(targetPart)
+        end)
+        testerLog(okFire and ("Knife touch -> " .. testerFullName(targetPart)) or ("Touch failed: " .. safeToString(errFire)))
+        return okFire
+    end
+
+    function Tester.StabTarget()
+        local _, stabRemote, stabStatus = findToolRemote("Knife", { "Events", "KnifeStabbed" })
+        if not stabRemote then
+            testerLog("Stab failed: " .. safeToString(stabStatus))
+            return false
+        end
+
+        local okStab, errStab = safeCall(function()
+            stabRemote:FireServer()
+        end)
+        if not okStab then
+            testerLog("Stab failed: " .. safeToString(errStab))
+            return false
+        end
+
+        Tester.TouchTarget()
+        testerLog("Stab fired")
+        return true
+    end
+
+    local env = envTable()
+    if _type(env) == "table" then
+        env.__MM_TESTER = Tester
+    end
+
+    local function makeButton(parent, text, y, callback)
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(1, -12, 0, 30)
+        button.Position = UDim2.new(0, 6, 0, y)
+        button.BackgroundColor3 = Color3.fromRGB(36, 41, 48)
+        button.BorderSizePixel = 0
+        button.TextColor3 = Color3.fromRGB(245, 245, 245)
+        button.TextSize = 13
+        button.Font = Enum.Font.GothamSemibold
+        button.Text = text
+        button.Parent = parent
+
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(0, 6)
+        corner.Parent = button
+
+        button.MouseButton1Click:Connect(function()
+            protected("tester_button_" .. text, callback)
+        end)
+    end
+
+    local function createUi()
+        safeCall(function()
+            local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui") or LocalPlayer:WaitForChild("PlayerGui", 2)
+            if not playerGui then
+                testerLog("Tester ready: no PlayerGui")
+                return
+            end
+
+            local old = playerGui:FindFirstChild("MMWeaponTester")
+            if old then
+                old:Destroy()
+            end
+
+            local gui = Instance.new("ScreenGui")
+            gui.Name = "MMWeaponTester"
+            gui.ResetOnSpawn = false
+            gui.IgnoreGuiInset = true
+            gui.DisplayOrder = 999998
+
+            local frame = Instance.new("Frame")
+            frame.Name = "Panel"
+            frame.AnchorPoint = Vector2.new(1, 0.5)
+            frame.Position = UDim2.new(1, -14, 0.5, 0)
+            frame.Size = UDim2.new(0, 176, 0, 166)
+            frame.BackgroundColor3 = Color3.fromRGB(18, 20, 24)
+            frame.BackgroundTransparency = 0.06
+            frame.BorderSizePixel = 0
+            frame.Parent = gui
+
+            local frameCorner = Instance.new("UICorner")
+            frameCorner.CornerRadius = UDim.new(0, 8)
+            frameCorner.Parent = frame
+
+            local title = Instance.new("TextLabel")
+            title.Size = UDim2.new(1, -12, 0, 28)
+            title.Position = UDim2.new(0, 6, 0, 4)
+            title.BackgroundTransparency = 1
+            title.TextColor3 = Color3.fromRGB(210, 245, 220)
+            title.TextSize = 13
+            title.Font = Enum.Font.GothamBold
+            title.Text = "MM Weapon Tester"
+            title.Parent = frame
+
+            makeButton(frame, "Shoot Target", 36, Tester.ShootTarget)
+            makeButton(frame, "Throw Knife", 70, Tester.ThrowKnife)
+            makeButton(frame, "Stab Target", 104, Tester.StabTarget)
+            makeButton(frame, "Touch Target", 138, Tester.TouchTarget)
+
+            gui.Parent = playerGui
+            testerLog("Tester ready - buttons loaded")
+        end)
+    end
+
+    createUi()
+end
+
+protected("install_tester", installTester)
