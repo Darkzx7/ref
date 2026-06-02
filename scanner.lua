@@ -1122,7 +1122,19 @@ local function installTester()
 
     local testerState = {
         last = "ready",
+        targetIndex = 0,
+        selectedPlayerName = nil,
+        selectedPart = "UpperTorso",
+        partIndex = 1,
+        predictionIndex = 3,
+        cooldownIndex = 2,
+        pingPrediction = true,
+        lastAction = 0,
     }
+
+    local partOptions = { "UpperTorso", "Head", "HumanoidRootPart", "Torso", "LeftUpperArm", "RightUpperArm" }
+    local predictionOptions = { 0, 0.08, 0.12, 0.18, 0.25, 0.35 }
+    local cooldownOptions = { 0.1, 0.25, 0.45, 0.75, 1.25 }
 
     local function testerLog(message)
         message = safeToString(message)
@@ -1140,6 +1152,64 @@ local function installTester()
             value = instance:GetFullName()
         end)
         return safeToString(value or instance)
+    end
+
+    local function testerTime()
+        if _type(_os) == "table" and callable(_os.clock) then
+            local okClock, value = safeCall(_os.clock)
+            if okClock and value then
+                return value
+            end
+        end
+        if callable(tick) then
+            local okTick, value = safeCall(tick)
+            if okTick and value then
+                return value
+            end
+        end
+        return 0
+    end
+
+    local function canRunAction(name)
+        local nowValue = testerTime()
+        local cooldown = cooldownOptions[testerState.cooldownIndex] or 0.25
+        if nowValue - testerState.lastAction < cooldown then
+            testerLog(safeToString(name) .. " cooldown")
+            return false
+        end
+        testerState.lastAction = nowValue
+        return true
+    end
+
+    local function getPingSeconds()
+        local pingMs = 0
+        safeCall(function()
+            local stats = _game:GetService("Stats")
+            local network = stats and stats:FindFirstChild("Network")
+            local serverStats = network and network:FindFirstChild("ServerStatsItem")
+            local dataPing = serverStats and serverStats:FindFirstChild("Data Ping")
+            if dataPing and dataPing.GetValue then
+                pingMs = dataPing:GetValue()
+            end
+        end)
+        if _type(pingMs) ~= "number" then
+            pingMs = 0
+        end
+        if pingMs > 1000 then
+            pingMs = 1000
+        end
+        return pingMs / 1000
+    end
+
+    local function predictionSeconds()
+        local base = predictionOptions[testerState.predictionIndex] or 0
+        if testerState.pingPrediction then
+            base = base + (getPingSeconds() * 0.5)
+        end
+        if base > 0.65 then
+            base = 0.65
+        end
+        return base
     end
 
     local function getCharacter(player)
@@ -1183,11 +1253,19 @@ local function installTester()
         return health > 0
     end
 
-    local function getPart(character)
+    local function getPart(character, preferredName)
         if not character then
             return nil
         end
-        local names = { "UpperTorso", "HumanoidRootPart", "Torso", "Head", "LeftUpperArm", "RightUpperArm" }
+        local names = {}
+        if preferredName and preferredName ~= "" then
+            names[#names + 1] = preferredName
+        end
+        for _, name in _ipairs(partOptions) do
+            if name ~= preferredName then
+                names[#names + 1] = name
+            end
+        end
         for _, name in _ipairs(names) do
             local part = findChild(character, name, false)
             if part then
@@ -1217,6 +1295,41 @@ local function installTester()
         return pos
     end
 
+    local function partVelocity(part)
+        local velocity = nil
+        safeCall(function()
+            velocity = part.AssemblyLinearVelocity
+        end)
+        if not velocity then
+            safeCall(function()
+                velocity = part.Velocity
+            end)
+        end
+        return velocity
+    end
+
+    local function predictedPartPosition(part)
+        local pos = partPosition(part)
+        if not pos then
+            return nil
+        end
+        local lead = predictionSeconds()
+        if lead <= 0 then
+            return pos
+        end
+        local velocity = partVelocity(part)
+        if not velocity then
+            return pos
+        end
+        local ok, predicted = safeCall(function()
+            return pos + (velocity * lead)
+        end)
+        if ok and predicted then
+            return predicted
+        end
+        return pos
+    end
+
     local function distance(a, b)
         local ok, result = safeCall(function()
             return (a - b).Magnitude
@@ -1227,36 +1340,67 @@ local function installTester()
         return 999999
     end
 
+    local function getPlayersList()
+        local players = {}
+        safeCall(function()
+            players = Players:GetPlayers()
+        end)
+        local result = {}
+        for _, player in _ipairs(players) do
+            if player ~= LocalPlayer and isAlive(getCharacter(player)) then
+                result[#result + 1] = player
+            end
+        end
+        return result
+    end
+
+    local function selectedPlayer()
+        if not testerState.selectedPlayerName then
+            return nil
+        end
+        local players = getPlayersList()
+        for _, player in _ipairs(players) do
+            if safeToString(player.Name) == testerState.selectedPlayerName then
+                return player
+            end
+        end
+        testerState.selectedPlayerName = nil
+        testerState.targetIndex = 0
+        return nil
+    end
+
     local function nearestTarget()
         local myCharacter = getCharacter(LocalPlayer)
-        local myPart = getPart(myCharacter)
+        local myPart = getPart(myCharacter, "HumanoidRootPart")
         local myPos = myPart and partPosition(myPart)
         if not myPos then
             return nil, nil, "no local position"
         end
 
-        local players = {}
-        safeCall(function()
-            players = Players:GetPlayers()
-        end)
+        local lockedPlayer = selectedPlayer()
+        if lockedPlayer then
+            local lockedCharacter = getCharacter(lockedPlayer)
+            local lockedPart = getPart(lockedCharacter, testerState.selectedPart)
+            if lockedPart then
+                return lockedPlayer, lockedPart, "target " .. safeToString(lockedPlayer.Name) .. " part " .. safeToString(lockedPart.Name)
+            end
+            return nil, nil, "selected target missing part"
+        end
 
+        local players = getPlayersList()
         local bestPlayer = nil
         local bestPart = nil
         local bestDistance = 999999
         for _, player in _ipairs(players) do
-            if player ~= LocalPlayer then
-                local character = getCharacter(player)
-                if isAlive(character) then
-                    local part = getPart(character)
-                    local pos = part and partPosition(part)
-                    if pos then
-                        local dist = distance(myPos, pos)
-                        if dist < bestDistance then
-                            bestDistance = dist
-                            bestPlayer = player
-                            bestPart = part
-                        end
-                    end
+            local character = getCharacter(player)
+            local part = getPart(character, testerState.selectedPart)
+            local pos = part and partPosition(part)
+            if pos then
+                local dist = distance(myPos, pos)
+                if dist < bestDistance then
+                    bestDistance = dist
+                    bestPlayer = player
+                    bestPart = part
                 end
             end
         end
@@ -1314,7 +1458,7 @@ local function installTester()
 
     local function makeShotCFrames(originPart, targetPart)
         local originPos = partPosition(originPart)
-        local targetPos = partPosition(targetPart)
+        local targetPos = predictedPartPosition(targetPart)
         if not originPos or not targetPos then
             return nil, nil, "missing positions"
         end
@@ -1333,6 +1477,9 @@ local function installTester()
     local Tester = {}
 
     function Tester.ShootTarget()
+        if not canRunAction("Shoot") then
+            return false
+        end
         local tool, remote, remoteStatus = findToolRemote("Gun", { "Shoot" })
         if not remote then
             testerLog("Shoot failed: " .. safeToString(remoteStatus))
@@ -1355,11 +1502,14 @@ local function installTester()
         local okFire, errFire = safeCall(function()
             remote:FireServer(originCf, targetCf)
         end)
-        testerLog(okFire and ("Shoot fired -> " .. testerFullName(targetPart)) or ("Shoot failed: " .. safeToString(errFire)))
+        testerLog(okFire and ("Shoot fired -> " .. testerFullName(targetPart) .. " pred=" .. safeToString(predictionSeconds())) or ("Shoot failed: " .. safeToString(errFire)))
         return okFire
     end
 
     function Tester.ThrowKnife()
+        if not canRunAction("Throw") then
+            return false
+        end
         local tool, remote, remoteStatus = findToolRemote("Knife", { "Events", "KnifeThrown" })
         if not remote then
             testerLog("Throw failed: " .. safeToString(remoteStatus))
@@ -1382,11 +1532,14 @@ local function installTester()
         local okFire, errFire = safeCall(function()
             remote:FireServer(originCf, targetCf)
         end)
-        testerLog(okFire and ("Knife thrown -> " .. testerFullName(targetPart)) or ("Throw failed: " .. safeToString(errFire)))
+        testerLog(okFire and ("Knife thrown -> " .. testerFullName(targetPart) .. " pred=" .. safeToString(predictionSeconds())) or ("Throw failed: " .. safeToString(errFire)))
         return okFire
     end
 
     function Tester.TouchTarget()
+        if not canRunAction("Touch") then
+            return false
+        end
         local _, remote, remoteStatus = findToolRemote("Knife", { "Events", "HandleTouched" })
         if not remote then
             testerLog("Touch failed: " .. safeToString(remoteStatus))
@@ -1407,6 +1560,9 @@ local function installTester()
     end
 
     function Tester.StabTarget()
+        if not canRunAction("Stab") then
+            return false
+        end
         local _, stabRemote, stabStatus = findToolRemote("Knife", { "Events", "KnifeStabbed" })
         if not stabRemote then
             testerLog("Stab failed: " .. safeToString(stabStatus))
@@ -1421,7 +1577,10 @@ local function installTester()
             return false
         end
 
+        local oldLastAction = testerState.lastAction
+        testerState.lastAction = 0
         Tester.TouchTarget()
+        testerState.lastAction = oldLastAction
         testerLog("Stab fired")
         return true
     end
@@ -1429,6 +1588,97 @@ local function installTester()
     local env = envTable()
     if _type(env) == "table" then
         env.__MM_TESTER = Tester
+        env.__MM_TESTER_STATE = testerState
+    end
+
+    local stateLabels = {}
+
+    local function currentTargetText()
+        local player = selectedPlayer()
+        if player then
+            return "Target: " .. safeToString(player.Name)
+        end
+        return "Target: nearest"
+    end
+
+    local function refreshUi()
+        local labels = {
+            target = currentTargetText(),
+            part = "Part: " .. safeToString(testerState.selectedPart),
+            prediction = "Pred: " .. safeToString(predictionOptions[testerState.predictionIndex] or 0),
+            ping = testerState.pingPrediction and "Ping: on" or "Ping: off",
+            cooldown = "CD: " .. safeToString(cooldownOptions[testerState.cooldownIndex] or 0.25),
+        }
+        for key, text in _pairs(labels) do
+            local label = stateLabels[key]
+            if label then
+                safeCall(function()
+                    label.Text = text
+                end)
+            end
+        end
+    end
+
+    function Tester.CycleTarget()
+        local players = getPlayersList()
+        if #players == 0 then
+            testerState.targetIndex = 0
+            testerState.selectedPlayerName = nil
+            testerLog("Target: no players")
+            refreshUi()
+            return nil
+        end
+
+        testerState.targetIndex = (testerState.targetIndex or 0) + 1
+        if testerState.targetIndex > #players then
+            testerState.targetIndex = 0
+            testerState.selectedPlayerName = nil
+            testerLog("Target: nearest")
+        else
+            local player = players[testerState.targetIndex]
+            testerState.selectedPlayerName = safeToString(player.Name)
+            testerLog("Target: " .. testerState.selectedPlayerName)
+        end
+        refreshUi()
+        return testerState.selectedPlayerName
+    end
+
+    function Tester.CyclePart()
+        testerState.partIndex = (testerState.partIndex or 1) + 1
+        if testerState.partIndex > #partOptions then
+            testerState.partIndex = 1
+        end
+        testerState.selectedPart = partOptions[testerState.partIndex] or "UpperTorso"
+        testerLog("Part: " .. safeToString(testerState.selectedPart))
+        refreshUi()
+        return testerState.selectedPart
+    end
+
+    function Tester.CyclePrediction()
+        testerState.predictionIndex = (testerState.predictionIndex or 1) + 1
+        if testerState.predictionIndex > #predictionOptions then
+            testerState.predictionIndex = 1
+        end
+        testerLog("Prediction: " .. safeToString(predictionOptions[testerState.predictionIndex] or 0))
+        refreshUi()
+        return predictionOptions[testerState.predictionIndex]
+    end
+
+    function Tester.TogglePingPrediction()
+        testerState.pingPrediction = not testerState.pingPrediction
+        testerLog(testerState.pingPrediction and "Ping prediction on" or "Ping prediction off")
+        refreshUi()
+        return testerState.pingPrediction
+    end
+
+    function Tester.CycleCooldown()
+        testerState.cooldownIndex = (testerState.cooldownIndex or 1) + 1
+        if testerState.cooldownIndex > #cooldownOptions then
+            testerState.cooldownIndex = 1
+        end
+        testerLog("Cooldown: " .. safeToString(cooldownOptions[testerState.cooldownIndex] or 0.25))
+        refreshUi()
+        return cooldownOptions[testerState.cooldownIndex]
     end
 
     local function makeButton(parent, text, y, callback)
@@ -1450,6 +1700,14 @@ local function installTester()
         button.MouseButton1Click:Connect(function()
             protected("tester_button_" .. text, callback)
         end)
+
+        return button
+    end
+
+    local function makeStateButton(parent, key, y, callback)
+        local button = makeButton(parent, "", y, callback)
+        stateLabels[key] = button
+        return button
     end
 
     local function createUi()
@@ -1475,7 +1733,7 @@ local function installTester()
             frame.Name = "Panel"
             frame.AnchorPoint = Vector2.new(1, 0.5)
             frame.Position = UDim2.new(1, -14, 0.5, 0)
-            frame.Size = UDim2.new(0, 176, 0, 166)
+            frame.Size = UDim2.new(0, 190, 0, 346)
             frame.BackgroundColor3 = Color3.fromRGB(18, 20, 24)
             frame.BackgroundTransparency = 0.06
             frame.BorderSizePixel = 0
@@ -1495,12 +1753,19 @@ local function installTester()
             title.Text = "MM Weapon Tester"
             title.Parent = frame
 
-            makeButton(frame, "Shoot Target", 36, Tester.ShootTarget)
-            makeButton(frame, "Throw Knife", 70, Tester.ThrowKnife)
-            makeButton(frame, "Stab Target", 104, Tester.StabTarget)
-            makeButton(frame, "Touch Target", 138, Tester.TouchTarget)
+            makeStateButton(frame, "target", 36, Tester.CycleTarget)
+            makeStateButton(frame, "part", 70, Tester.CyclePart)
+            makeStateButton(frame, "prediction", 104, Tester.CyclePrediction)
+            makeStateButton(frame, "ping", 138, Tester.TogglePingPrediction)
+            makeStateButton(frame, "cooldown", 172, Tester.CycleCooldown)
+
+            makeButton(frame, "Shoot Target", 214, Tester.ShootTarget)
+            makeButton(frame, "Throw Knife", 248, Tester.ThrowKnife)
+            makeButton(frame, "Stab Target", 282, Tester.StabTarget)
+            makeButton(frame, "Touch Target", 316, Tester.TouchTarget)
 
             gui.Parent = playerGui
+            refreshUi()
             testerLog("Tester ready - buttons loaded")
         end)
     end
