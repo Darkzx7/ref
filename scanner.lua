@@ -1,4 +1,4 @@
-local VERSION = "2026-06-02-mm-scanner-tester-v8"
+local VERSION = "2026-06-02-mm-scanner-tester-v9"
 local ENABLE_OUTBOUND_HOOK = true
 local ENABLE_TESTER_UI = true
 
@@ -726,44 +726,6 @@ local function main()
         return false
     end
 
-    local function isGunShootRemote(remote, method)
-        if method ~= "FireServer" then
-            return false
-        end
-        local className = safeToString(prop(remote, "ClassName") or "")
-        local name = safeToString(prop(remote, "Name") or "")
-        if className ~= "RemoteEvent" or name ~= "Shoot" then
-            return false
-        end
-        local path = simpleRemotePath(remote)
-        return containsText(path, "gun")
-    end
-
-    local function maybeRewriteManualShot(remote, method, ...)
-        local argc = _select("#", ...)
-        local args = { ... }
-        if not isGunShootRemote(remote, method) then
-            return argc, args, false
-        end
-
-        local env = envTable()
-        local state = env and env.__MM_TESTER_STATE
-        local builder = env and env.__MM_BUILD_SILENT_SHOT
-        if _type(state) ~= "table" or state.manualSilent ~= true or not callable(builder) then
-            return argc, args, false
-        end
-
-        Scanner.inHook = true
-        local okBuild, originCf, targetCf = safeCall(builder, remote, args[1], args[2])
-        Scanner.inHook = false
-
-        if okBuild and originCf and targetCf then
-            return 2, { originCf, targetCf }, true
-        end
-
-        return argc, args, false
-    end
-
     local function inc(eventName)
         eventName = eventName or "unknown"
         Scanner.counts[eventName] = (Scanner.counts[eventName] or 0) + 1
@@ -984,20 +946,9 @@ local function main()
                     if Scanner.active and not Scanner.inHook and shouldCaptureOutbound(self, method) then
                         local argc = _select("#", ...)
                         local rawArgs = { ... }
-                        local callArgc, callArgs, rewritten = maybeRewriteManualShot(self, method, ...)
-                        local results
-                        if rewritten then
-                            results = { original(self, callArgs[1], callArgs[2]) }
-                        else
-                            results = { original(self, ...) }
-                        end
+                        local results = { original(self, ...) }
                         protected("remote_outbound_after_forward", function()
-                            if rewritten then
-                                logOutbound(method, self, callArgs[1], callArgs[2])
-                                logRecord({ event = "manual_silent_rewrite", remote = remoteInfo(self), args = packArgs(callArgs[1], callArgs[2]) })
-                            else
-                                logOutbound(method, self, _unpack(rawArgs, 1, argc))
-                            end
+                            logOutbound(method, self, _unpack(rawArgs, 1, argc))
                         end)
                         return _unpack(results)
                     end
@@ -1044,20 +995,9 @@ local function main()
             if Scanner.active and not Scanner.inHook and shouldCaptureOutbound(self, method) then
                 local argc = _select("#", ...)
                 local rawArgs = { ... }
-                local callArgc, callArgs, rewritten = maybeRewriteManualShot(self, method, ...)
-                local results
-                if rewritten then
-                    results = { original(self, callArgs[1], callArgs[2]) }
-                else
-                    results = { original(self, ...) }
-                end
+                local results = { original(self, ...) }
                 protected("remote_outbound_after_forward", function()
-                    if rewritten then
-                        logOutbound(method, self, callArgs[1], callArgs[2])
-                        logRecord({ event = "manual_silent_rewrite", remote = remoteInfo(self), args = packArgs(callArgs[1], callArgs[2]) })
-                    else
-                        logOutbound(method, self, _unpack(rawArgs, 1, argc))
-                    end
+                    logOutbound(method, self, _unpack(rawArgs, 1, argc))
                 end)
                 return _unpack(results)
             end
@@ -1191,6 +1131,7 @@ local function installTester()
         cooldownIndex = 2,
         pingPrediction = true,
         manualSilent = false,
+        manualSilentInputConnected = false,
         lastAction = 0,
     }
 
@@ -1396,25 +1337,6 @@ local function installTester()
         return pos
     end
 
-    local function cframePosition(value)
-        local valueType = kind(value)
-        if valueType ~= "CFrame" then
-            return nil
-        end
-        local pos = nil
-        safeCall(function()
-            pos = value.Position
-        end)
-        if pos then
-            return pos
-        end
-        safeCall(function()
-            local components = { value:GetComponents() }
-            pos = Vector3.new(components[1], components[2], components[3])
-        end)
-        return pos
-    end
-
     local function distance(a, b)
         local ok, result = safeCall(function()
             return (a - b).Magnitude
@@ -1454,67 +1376,10 @@ local function installTester()
         return nil
     end
 
-    local function isDescendantOf(instance, ancestor)
-        local ok, result = safeCall(function()
-            return instance and ancestor and instance:IsDescendantOf(ancestor)
-        end)
-        return ok and result == true
-    end
-
-    local function rayClear(originPos, targetPart, targetCharacter)
-        if not originPos or not targetPart then
-            return false
-        end
-
-        local targetPos = predictedPartPosition(targetPart) or partPosition(targetPart)
-        if not targetPos then
-            return false
-        end
-
-        local clear = true
-        safeCall(function()
-            local workspace = _game:GetService("Workspace")
-            if not workspace or not workspace.Raycast then
-                clear = true
-                return
-            end
-
-            local params = RaycastParams.new()
-            params.FilterType = Enum.RaycastFilterType.Blacklist
-            params.FilterDescendantsInstances = { getCharacter(LocalPlayer) }
-            params.IgnoreWater = true
-
-            local direction = targetPos - originPos
-            local result = workspace:Raycast(originPos, direction, params)
-            if result and result.Instance and not isDescendantOf(result.Instance, targetCharacter) then
-                clear = false
-            end
-        end)
-        return clear
-    end
-
-    local function bestPartForCharacter(character, originPos)
-        local preferred = getPart(character, testerState.selectedPart)
-        if preferred and (not originPos or rayClear(originPos, preferred, character)) then
-            return preferred
-        end
-
-        if originPos then
-            for _, name in _ipairs(partOptions) do
-                local part = findChild(character, name, false)
-                if part and rayClear(originPos, part, character) then
-                    return part
-                end
-            end
-        end
-
-        return preferred
-    end
-
-    local function nearestTarget(originPos)
+    local function nearestTarget()
         local myCharacter = getCharacter(LocalPlayer)
         local myPart = getPart(myCharacter, "HumanoidRootPart")
-        local myPos = originPos or (myPart and partPosition(myPart))
+        local myPos = myPart and partPosition(myPart)
         if not myPos then
             return nil, nil, "no local position"
         end
@@ -1522,7 +1387,7 @@ local function installTester()
         local lockedPlayer = selectedPlayer()
         if lockedPlayer then
             local lockedCharacter = getCharacter(lockedPlayer)
-            local lockedPart = bestPartForCharacter(lockedCharacter, myPos)
+            local lockedPart = getPart(lockedCharacter, testerState.selectedPart)
             if lockedPart then
                 return lockedPlayer, lockedPart, "target " .. safeToString(lockedPlayer.Name) .. " part " .. safeToString(lockedPart.Name)
             end
@@ -1535,7 +1400,7 @@ local function installTester()
         local bestDistance = 999999
         for _, player in _ipairs(players) do
             local character = getCharacter(player)
-            local part = bestPartForCharacter(character, myPos)
+            local part = getPart(character, testerState.selectedPart)
             local pos = part and partPosition(part)
             if pos then
                 local dist = distance(myPos, pos)
@@ -1616,20 +1481,19 @@ local function installTester()
         return originCf, targetCf, "ok"
     end
 
-    local function buildGunShotCFrames(originalOriginCf)
+    local function buildGunShotCFrames()
         local tool, _, remoteStatus = findToolRemote("Gun", { "Shoot" })
         if not tool then
             return nil, nil, remoteStatus
         end
 
-        local handle = findChild(tool, "Handle", false) or getPart(getCharacter(LocalPlayer), "HumanoidRootPart")
-        local originOverride = cframePosition(originalOriginCf) or partPosition(handle)
-        local _, targetPart, targetStatus = nearestTarget(originOverride)
+        local _, targetPart, targetStatus = nearestTarget()
         if not targetPart then
             return nil, nil, targetStatus
         end
 
-        local originCf, targetCf, cfStatus = makeShotCFrames(handle, targetPart, originOverride)
+        local handle = findChild(tool, "Handle", false) or getPart(getCharacter(LocalPlayer), "HumanoidRootPart")
+        local originCf, targetCf, cfStatus = makeShotCFrames(handle, targetPart)
         if not originCf then
             return nil, nil, cfStatus
         end
@@ -1744,15 +1608,8 @@ local function installTester()
     if _type(env) == "table" then
         env.__MM_TESTER = Tester
         env.__MM_TESTER_STATE = testerState
-        env.__MM_BUILD_SILENT_SHOT = function(remote, originalOriginCf)
-            if testerState.manualSilent ~= true then
-                return nil, nil, "manual silent off"
-            end
-            local originCf, targetCf, status = buildGunShotCFrames(originalOriginCf)
-            if originCf and targetCf then
-                testerState.last = "Silent shot -> " .. safeToString(status)
-            end
-            return originCf, targetCf, status
+        env.__MM_BUILD_SILENT_SHOT = function()
+            return nil, nil, "manual silent uses click driver"
         end
     end
 
@@ -1860,6 +1717,54 @@ local function installTester()
         testerLog("Cooldown: " .. safeToString(cooldownOptions[testerState.cooldownIndex] or 0.25))
         refreshUi()
         return cooldownOptions[testerState.cooldownIndex]
+    end
+
+    local function hasEquippedGun()
+        local character = getCharacter(LocalPlayer)
+        return findChild(character, "Gun", false) ~= nil
+    end
+
+    local function installManualSilentInput()
+        if testerState.manualSilentInputConnected then
+            return
+        end
+
+        safeCall(function()
+            local userInputService = _game:GetService("UserInputService")
+            if not userInputService or not userInputService.InputBegan then
+                return
+            end
+
+            local env = envTable()
+            if _type(env) == "table" and env.__MM_MANUAL_SILENT_CONNECTION then
+                safeCall(function()
+                    env.__MM_MANUAL_SILENT_CONNECTION:Disconnect()
+                end)
+                env.__MM_MANUAL_SILENT_CONNECTION = nil
+            end
+
+            testerState.manualSilentInputConnected = true
+            local connection = userInputService.InputBegan:Connect(function(input, gameProcessed)
+                if gameProcessed == true or testerState.manualSilent ~= true then
+                    return
+                end
+
+                local inputType = input and input.UserInputType
+                if inputType ~= Enum.UserInputType.MouseButton1 and inputType ~= Enum.UserInputType.Touch then
+                    return
+                end
+                if not hasEquippedGun() then
+                    return
+                end
+
+                protected("manual_silent_click", function()
+                    Tester.ShootTarget()
+                end)
+            end)
+            if _type(env) == "table" then
+                env.__MM_MANUAL_SILENT_CONNECTION = connection
+            end
+        end)
     end
 
     local function makeButton(parent, text, y, callback)
@@ -1995,6 +1900,7 @@ local function installTester()
             makeButton(frame, "Touch Target", 384, Tester.TouchTarget)
 
             gui.Parent = playerGui
+            installManualSilentInput()
             refreshUi()
             testerLog("Tester ready - buttons loaded")
         end)
