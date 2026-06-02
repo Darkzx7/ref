@@ -1,4 +1,4 @@
-local VERSION = "2026-06-01-mm-scanner-tester-v5"
+local VERSION = "2026-06-01-mm-scanner-tester-v6"
 local ENABLE_OUTBOUND_HOOK = true
 local ENABLE_TESTER_UI = true
 
@@ -726,6 +726,49 @@ local function main()
         return false
     end
 
+    local function isGunShootRemote(remote, method)
+        if method ~= "FireServer" then
+            return false
+        end
+        local className = safeToString(prop(remote, "ClassName") or "")
+        local name = safeToString(prop(remote, "Name") or "")
+        if className ~= "RemoteEvent" or name ~= "Shoot" then
+            return false
+        end
+        local path = simpleRemotePath(remote)
+        return containsText(path, "gun")
+    end
+
+    local function maybeRewriteManualShot(remote, method, ...)
+        local argc = _select("#", ...)
+        local args = { ... }
+        if not isGunShootRemote(remote, method) then
+            return argc, args, false
+        end
+
+        local env = envTable()
+        local state = env and env.__MM_TESTER_STATE
+        local builder = env and env.__MM_BUILD_SILENT_SHOT
+        if _type(state) ~= "table" or state.manualSilent ~= true or not callable(builder) then
+            return argc, args, false
+        end
+
+        Scanner.inHook = true
+        local okBuild, originCf, targetCf, reason = safeCall(builder, remote, _unpack(args, 1, argc))
+        Scanner.inHook = false
+
+        if okBuild and originCf and targetCf then
+            return 2, { originCf, targetCf }, true
+        end
+
+        logRecord({
+            event = "manual_silent_failed",
+            remote = remoteInfo(remote),
+            reason = safeToString(reason or originCf or "builder_failed"),
+        })
+        return argc, args, false
+    end
+
     local function inc(eventName)
         eventName = eventName or "unknown"
         Scanner.counts[eventName] = (Scanner.counts[eventName] or 0) + 1
@@ -946,9 +989,13 @@ local function main()
                     if Scanner.active and not Scanner.inHook and shouldCaptureOutbound(self, method) then
                         local argc = _select("#", ...)
                         local rawArgs = { ... }
-                        local results = { original(self, ...) }
+                        local callArgc, callArgs, rewritten = maybeRewriteManualShot(self, method, _unpack(rawArgs, 1, argc))
+                        local results = { original(self, _unpack(callArgs, 1, callArgc)) }
                         protected("remote_outbound_after_forward", function()
-                            logOutbound(method, self, _unpack(rawArgs, 1, argc))
+                            logOutbound(method, self, _unpack(callArgs, 1, callArgc))
+                            if rewritten then
+                                logRecord({ event = "manual_silent_rewrite", remote = remoteInfo(self), args = packArgs(_unpack(callArgs, 1, callArgc)) })
+                            end
                         end)
                         return _unpack(results)
                     end
@@ -995,9 +1042,13 @@ local function main()
             if Scanner.active and not Scanner.inHook and shouldCaptureOutbound(self, method) then
                 local argc = _select("#", ...)
                 local rawArgs = { ... }
-                local results = { original(self, ...) }
+                local callArgc, callArgs, rewritten = maybeRewriteManualShot(self, method, _unpack(rawArgs, 1, argc))
+                local results = { original(self, _unpack(callArgs, 1, callArgc)) }
                 protected("remote_outbound_after_forward", function()
-                    logOutbound(method, self, _unpack(rawArgs, 1, argc))
+                    logOutbound(method, self, _unpack(callArgs, 1, callArgc))
+                    if rewritten then
+                        logRecord({ event = "manual_silent_rewrite", remote = remoteInfo(self), args = packArgs(_unpack(callArgs, 1, callArgc)) })
+                    end
                 end)
                 return _unpack(results)
             end
@@ -1127,13 +1178,16 @@ local function installTester()
         selectedPart = "UpperTorso",
         partIndex = 1,
         predictionIndex = 3,
+        jumpIndex = 2,
         cooldownIndex = 2,
         pingPrediction = true,
+        manualSilent = false,
         lastAction = 0,
     }
 
-    local partOptions = { "UpperTorso", "Head", "HumanoidRootPart", "Torso", "LeftUpperArm", "RightUpperArm" }
+    local partOptions = { "UpperTorso", "Head", "HumanoidRootPart", "Torso", "LowerTorso", "LeftUpperArm", "RightUpperArm" }
     local predictionOptions = { 0, 0.08, 0.12, 0.18, 0.25, 0.35 }
+    local jumpOptions = { 0, 0.35, 0.65, 1, 1.35 }
     local cooldownOptions = { 0.1, 0.25, 0.45, 0.75, 1.25 }
 
     local function testerLog(message)
@@ -1322,7 +1376,12 @@ local function installTester()
             return pos
         end
         local ok, predicted = safeCall(function()
-            return pos + (velocity * lead)
+            local value = pos + (velocity * lead)
+            local jumpScale = jumpOptions[testerState.jumpIndex] or 0
+            if jumpScale > 0 and _math and callable(_math.abs) and _math.abs(velocity.Y) > 3 then
+                value = value + Vector3.new(0, velocity.Y * lead * jumpScale, 0)
+            end
+            return value
         end)
         if ok and predicted then
             return predicted
@@ -1474,6 +1533,25 @@ local function installTester()
         return originCf, targetCf, "ok"
     end
 
+    local function buildGunShotCFrames()
+        local tool, _, remoteStatus = findToolRemote("Gun", { "Shoot" })
+        if not tool then
+            return nil, nil, remoteStatus
+        end
+
+        local _, targetPart, targetStatus = nearestTarget()
+        if not targetPart then
+            return nil, nil, targetStatus
+        end
+
+        local handle = findChild(tool, "Handle", false) or getPart(getCharacter(LocalPlayer), "HumanoidRootPart")
+        local originCf, targetCf, cfStatus = makeShotCFrames(handle, targetPart)
+        if not originCf then
+            return nil, nil, cfStatus
+        end
+        return originCf, targetCf, testerFullName(targetPart)
+    end
+
     local Tester = {}
 
     function Tester.ShootTarget()
@@ -1486,23 +1564,16 @@ local function installTester()
             return false
         end
 
-        local _, targetPart, targetStatus = nearestTarget()
-        if not targetPart then
-            testerLog("Shoot failed: " .. safeToString(targetStatus))
-            return false
-        end
-
-        local handle = findChild(tool, "Handle", false) or getPart(getCharacter(LocalPlayer))
-        local originCf, targetCf, cfStatus = makeShotCFrames(handle, targetPart)
+        local originCf, targetCf, shotStatus = buildGunShotCFrames()
         if not originCf then
-            testerLog("Shoot failed: " .. safeToString(cfStatus))
+            testerLog("Shoot failed: " .. safeToString(shotStatus))
             return false
         end
 
         local okFire, errFire = safeCall(function()
             remote:FireServer(originCf, targetCf)
         end)
-        testerLog(okFire and ("Shoot fired -> " .. testerFullName(targetPart) .. " pred=" .. safeToString(predictionSeconds())) or ("Shoot failed: " .. safeToString(errFire)))
+        testerLog(okFire and ("Shoot fired -> " .. safeToString(shotStatus) .. " pred=" .. safeToString(predictionSeconds()) .. " jump=" .. safeToString(jumpOptions[testerState.jumpIndex] or 0)) or ("Shoot failed: " .. safeToString(errFire)))
         return okFire
     end
 
@@ -1589,6 +1660,16 @@ local function installTester()
     if _type(env) == "table" then
         env.__MM_TESTER = Tester
         env.__MM_TESTER_STATE = testerState
+        env.__MM_BUILD_SILENT_SHOT = function()
+            if testerState.manualSilent ~= true then
+                return nil, nil, "manual silent off"
+            end
+            local originCf, targetCf, status = buildGunShotCFrames()
+            if originCf and targetCf then
+                testerState.last = "Silent shot -> " .. safeToString(status)
+            end
+            return originCf, targetCf, status
+        end
     end
 
     local stateLabels = {}
@@ -1606,7 +1687,9 @@ local function installTester()
             target = currentTargetText(),
             part = "Part: " .. safeToString(testerState.selectedPart),
             prediction = "Pred: " .. safeToString(predictionOptions[testerState.predictionIndex] or 0),
+            jump = "Jump: " .. safeToString(jumpOptions[testerState.jumpIndex] or 0),
             ping = testerState.pingPrediction and "Ping: on" or "Ping: off",
+            silent = testerState.manualSilent and "Silent: manual ON" or "Silent: manual OFF",
             cooldown = "CD: " .. safeToString(cooldownOptions[testerState.cooldownIndex] or 0.25),
         }
         for key, text in _pairs(labels) do
@@ -1664,11 +1747,28 @@ local function installTester()
         return predictionOptions[testerState.predictionIndex]
     end
 
+    function Tester.CycleJumpPrediction()
+        testerState.jumpIndex = (testerState.jumpIndex or 1) + 1
+        if testerState.jumpIndex > #jumpOptions then
+            testerState.jumpIndex = 1
+        end
+        testerLog("Jump prediction: " .. safeToString(jumpOptions[testerState.jumpIndex] or 0))
+        refreshUi()
+        return jumpOptions[testerState.jumpIndex]
+    end
+
     function Tester.TogglePingPrediction()
         testerState.pingPrediction = not testerState.pingPrediction
         testerLog(testerState.pingPrediction and "Ping prediction on" or "Ping prediction off")
         refreshUi()
         return testerState.pingPrediction
+    end
+
+    function Tester.ToggleManualSilent()
+        testerState.manualSilent = not testerState.manualSilent
+        testerLog(testerState.manualSilent and "Manual silent on" or "Manual silent off")
+        refreshUi()
+        return testerState.manualSilent
     end
 
     function Tester.CycleCooldown()
@@ -1733,10 +1833,11 @@ local function installTester()
             frame.Name = "Panel"
             frame.AnchorPoint = Vector2.new(1, 0.5)
             frame.Position = UDim2.new(1, -14, 0.5, 0)
-            frame.Size = UDim2.new(0, 190, 0, 346)
+            frame.Size = UDim2.new(0, 202, 0, 414)
             frame.BackgroundColor3 = Color3.fromRGB(18, 20, 24)
             frame.BackgroundTransparency = 0.06
             frame.BorderSizePixel = 0
+            frame.Active = true
             frame.Parent = gui
 
             local frameCorner = Instance.new("UICorner")
@@ -1753,16 +1854,64 @@ local function installTester()
             title.Text = "MM Weapon Tester"
             title.Parent = frame
 
+            safeCall(function()
+                local userInputService = _game:GetService("UserInputService")
+                local dragging = false
+                local dragInput = nil
+                local dragStart = nil
+                local startPos = nil
+
+                local function updateDrag(input)
+                    if not dragging or not dragStart or not startPos then
+                        return
+                    end
+                    local delta = input.Position - dragStart
+                    frame.Position = UDim2.new(
+                        startPos.X.Scale,
+                        startPos.X.Offset + delta.X,
+                        startPos.Y.Scale,
+                        startPos.Y.Offset + delta.Y
+                    )
+                end
+
+                title.InputBegan:Connect(function(input)
+                    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                        dragging = true
+                        dragStart = input.Position
+                        startPos = frame.Position
+                        input.Changed:Connect(function()
+                            if input.UserInputState == Enum.UserInputState.End then
+                                dragging = false
+                            end
+                        end)
+                    end
+                end)
+
+                title.InputChanged:Connect(function(input)
+                    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+                        dragInput = input
+                    end
+                end)
+
+                userInputService.InputChanged:Connect(function(input)
+                    if input == dragInput then
+                        updateDrag(input)
+                    end
+                end)
+            end)
+
             makeStateButton(frame, "target", 36, Tester.CycleTarget)
             makeStateButton(frame, "part", 70, Tester.CyclePart)
             makeStateButton(frame, "prediction", 104, Tester.CyclePrediction)
-            makeStateButton(frame, "ping", 138, Tester.TogglePingPrediction)
-            makeStateButton(frame, "cooldown", 172, Tester.CycleCooldown)
+            makeStateButton(frame, "jump", 138, Tester.CycleJumpPrediction)
+            makeStateButton(frame, "ping", 172, Tester.TogglePingPrediction)
+            makeStateButton(frame, "silent", 206, Tester.ToggleManualSilent)
+            makeStateButton(frame, "cooldown", 240, Tester.CycleCooldown)
 
-            makeButton(frame, "Shoot Target", 214, Tester.ShootTarget)
-            makeButton(frame, "Throw Knife", 248, Tester.ThrowKnife)
-            makeButton(frame, "Stab Target", 282, Tester.StabTarget)
-            makeButton(frame, "Touch Target", 316, Tester.TouchTarget)
+            makeButton(frame, "Shoot Target", 282, Tester.ShootTarget)
+            makeButton(frame, "Throw Knife", 316, Tester.ThrowKnife)
+            makeButton(frame, "Stab Target", 350, Tester.StabTarget)
+            makeButton(frame, "Touch Target", 384, Tester.TouchTarget)
 
             gui.Parent = playerGui
             refreshUi()
