@@ -1,4 +1,4 @@
-local VERSION = "2026-06-02-mm-scanner-tester-v7"
+local VERSION = "2026-06-02-mm-scanner-tester-v8"
 local ENABLE_OUTBOUND_HOOK = true
 local ENABLE_TESTER_UI = true
 
@@ -754,18 +754,13 @@ local function main()
         end
 
         Scanner.inHook = true
-        local okBuild, originCf, targetCf, reason = safeCall(builder, remote, _unpack(args, 1, argc))
+        local okBuild, originCf, targetCf = safeCall(builder, remote, args[1], args[2])
         Scanner.inHook = false
 
         if okBuild and originCf and targetCf then
             return 2, { originCf, targetCf }, true
         end
 
-        logRecord({
-            event = "manual_silent_failed",
-            remote = remoteInfo(remote),
-            reason = safeToString(reason or originCf or "builder_failed"),
-        })
         return argc, args, false
     end
 
@@ -989,12 +984,19 @@ local function main()
                     if Scanner.active and not Scanner.inHook and shouldCaptureOutbound(self, method) then
                         local argc = _select("#", ...)
                         local rawArgs = { ... }
-                        local callArgc, callArgs, rewritten = maybeRewriteManualShot(self, method, _unpack(rawArgs, 1, argc))
-                        local results = { original(self, _unpack(callArgs, 1, callArgc)) }
+                        local callArgc, callArgs, rewritten = maybeRewriteManualShot(self, method, ...)
+                        local results
+                        if rewritten then
+                            results = { original(self, callArgs[1], callArgs[2]) }
+                        else
+                            results = { original(self, ...) }
+                        end
                         protected("remote_outbound_after_forward", function()
-                            logOutbound(method, self, _unpack(callArgs, 1, callArgc))
                             if rewritten then
-                                logRecord({ event = "manual_silent_rewrite", remote = remoteInfo(self), args = packArgs(_unpack(callArgs, 1, callArgc)) })
+                                logOutbound(method, self, callArgs[1], callArgs[2])
+                                logRecord({ event = "manual_silent_rewrite", remote = remoteInfo(self), args = packArgs(callArgs[1], callArgs[2]) })
+                            else
+                                logOutbound(method, self, _unpack(rawArgs, 1, argc))
                             end
                         end)
                         return _unpack(results)
@@ -1042,12 +1044,19 @@ local function main()
             if Scanner.active and not Scanner.inHook and shouldCaptureOutbound(self, method) then
                 local argc = _select("#", ...)
                 local rawArgs = { ... }
-                local callArgc, callArgs, rewritten = maybeRewriteManualShot(self, method, _unpack(rawArgs, 1, argc))
-                local results = { original(self, _unpack(callArgs, 1, callArgc)) }
+                local callArgc, callArgs, rewritten = maybeRewriteManualShot(self, method, ...)
+                local results
+                if rewritten then
+                    results = { original(self, callArgs[1], callArgs[2]) }
+                else
+                    results = { original(self, ...) }
+                end
                 protected("remote_outbound_after_forward", function()
-                    logOutbound(method, self, _unpack(callArgs, 1, callArgc))
                     if rewritten then
-                        logRecord({ event = "manual_silent_rewrite", remote = remoteInfo(self), args = packArgs(_unpack(callArgs, 1, callArgc)) })
+                        logOutbound(method, self, callArgs[1], callArgs[2])
+                        logRecord({ event = "manual_silent_rewrite", remote = remoteInfo(self), args = packArgs(callArgs[1], callArgs[2]) })
+                    else
+                        logOutbound(method, self, _unpack(rawArgs, 1, argc))
                     end
                 end)
                 return _unpack(results)
