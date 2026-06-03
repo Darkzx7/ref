@@ -1,5 +1,5 @@
 -- ref_universal | Murder Mystery tester
--- v2026-06-03-v23-v22-lower-coin-and-map-stage
+-- v2026-06-03-v24-stage-hold-lower-sweep
 
 local Players          = game:GetService("Players")
 local TweenService     = game:GetService("TweenService")
@@ -158,6 +158,8 @@ local State = {
     _coinIgnoreUntil   = {},
     _coinLieForward    = nil,
     _coinStageAnchor   = nil,
+    _coinStageHoldConn = nil,
+    _coinStageSavedRootAnchored = nil,
     coinCount          = 0,
     coinLimit          = 40,
     coinStatus         = "Idle",
@@ -216,7 +218,54 @@ local function clearRuntimeForRoot(root)
     destroyChild(root, "_GDBP")
     destroyChild(root, "_GDBG")
 end
+
+local function releaseCoinStageHold()
+    safeDisconnect(State._coinStageHoldConn)
+    State._coinStageHoldConn = nil
+    local root = getRoot()
+    if root and State._coinStageSavedRootAnchored ~= nil then
+        _pcall(function()
+            root.Anchored = State._coinStageSavedRootAnchored
+            root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+        end)
+    end
+    State._coinStageSavedRootAnchored = nil
+end
+
+local function startCoinStageHold()
+    local root = getRoot()
+    if not root or not State._coinStageCF then return false end
+    if State._coinStageSavedRootAnchored == nil then
+        local old = false
+        _pcall(function() old = root.Anchored end)
+        State._coinStageSavedRootAnchored = old
+    end
+    local function holdOnce()
+        local r = getRoot()
+        local cf = State._coinStageCF
+        if not r or not cf then return end
+        _pcall(function()
+            r.Anchored = true
+            r.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            r.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+            r.CFrame = cf + Vector3.new(0, 3.6, 0)
+        end)
+    end
+    holdOnce()
+    if State._coinStageHoldConn then return true end
+    State._coinStageHoldConn = trackConn(RunService.Stepped:Connect(function()
+        if (not Alive) or (not State.coinCollect) or (State.currentPhase ~= "Loading Map" and State.currentPhase ~= "Role Select") or (not State._coinStagePlatform) or (not State._coinStagePlatform.Parent) then
+            releaseCoinStageHold()
+            return
+        end
+        holdOnce()
+    end))
+    return true
+end
+
 local function restoreCoinPhysics()
+    -- Coin physics restore must not release staging hold; stage hold is controlled by platform cleanup.
     local hadCoinPhysics = State._coinLockConn ~= nil
         or State._coinDesiredCF ~= nil
         or State._coinSavedHumanoid ~= nil
@@ -463,6 +512,7 @@ local function setCoinCFrame(cf)
 end
 
 local function destroyCoinStagePlatform()
+    releaseCoinStageHold()
     local p = State._coinStagePlatform
     State._coinStagePlatform = nil
     State._coinStageCF = nil
@@ -1123,7 +1173,7 @@ end
 
 local function touchCoinSweep(root, target)
     if not root or not target or not target.Parent then return end
-    State.coinStatus = State._coinCloseBoost and "Close coin boost" or "Collecting lowest underside"
+    State.coinStatus = State._coinCloseBoost and "Close coin boost+" or "Collecting extra-low underside"
     fireTouchCoin(target)
     fireTouchCoinWithParts(target)
 
@@ -1131,7 +1181,7 @@ local function touchCoinSweep(root, target)
     local sizeY = 1.5
     _pcall(function() sizeY = math.max(target.Size.Y, 1.5) end)
     local under = math.max(State._coinUnderOffset or 3.85, sizeY * 1.42)
-    local passSpeed = coinSpeedStuds(State.coinSpeed) * (State._coinCloseBoost and 1.58 or 1.45)
+    local passSpeed = coinSpeedStuds(State.coinSpeed) * (State._coinCloseBoost and 1.82 or 1.45)
 
     local forward = getCoinLieForward()
     local side = forward:Cross(Vector3.new(0, 1, 0))
@@ -1139,20 +1189,20 @@ local function touchCoinSweep(root, target)
     side = side.Unit
 
     -- Lower touch sweep: stay below the coin, brush the lower/center hitbox, and avoid rising above the coin.
-    local lowPeak = -0.12
+    local lowPeak = -0.34
     local path = {
         pos + Vector3.new(0, -under, 0),
         pos + Vector3.new(0, -under * 0.80, 0),
         pos + Vector3.new(0, -under * 0.58, 0),
-        pos + Vector3.new(0, -1.30, 0),
-        pos + Vector3.new(0, -0.92, 0),
-        pos + Vector3.new(0, -0.50, 0),
+        pos + Vector3.new(0, -1.46, 0),
+        pos + Vector3.new(0, -1.10, 0),
+        pos + Vector3.new(0, -0.72, 0),
         pos + Vector3.new(0,  lowPeak, 0),
-        pos + forward * 0.46 + Vector3.new(0, -0.42, 0),
-        pos - forward * 0.46 + Vector3.new(0, -0.42, 0),
-        pos + side * 0.42 + Vector3.new(0, -0.46, 0),
-        pos - side * 0.42 + Vector3.new(0, -0.46, 0),
-        pos + Vector3.new(0, -0.94, 0),
+        pos + forward * 0.46 + Vector3.new(0, -0.64, 0),
+        pos - forward * 0.46 + Vector3.new(0, -0.64, 0),
+        pos + side * 0.42 + Vector3.new(0, -0.68, 0),
+        pos - side * 0.42 + Vector3.new(0, -0.68, 0),
+        pos + Vector3.new(0, -1.16, 0),
     }
 
     for i, p in ipairs(path) do
@@ -1340,15 +1390,11 @@ local function createCoinStagePlatformAt(platformPos, anchor)
     State._coinStageAnchor = anchor
     trackObject(platform)
 
-    _pcall(function()
-        root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-        root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-        State._coinHadPhysicalMove = true
-        root.CFrame = platform.CFrame + Vector3.new(0, 3.6, 0)
-    end)
+    State._coinHadPhysicalMove = true
+    startCoinStageHold()
 
     State._coinDidInitialStage = true
-    State.coinStatus = "Staged below map"
+    State.coinStatus = "Staged below map - held"
     return true
 end
 
@@ -1358,17 +1404,10 @@ local function prepareCoinStagePlatform(force)
     if not root then return false end
 
     if State._coinStagePlatform and State._coinStagePlatform.Parent then
-        local cf = State._coinStageCF
-        if cf then
-            _pcall(function()
-                root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-                root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-                State._coinHadPhysicalMove = true
-                root.CFrame = cf + Vector3.new(0, 3.6, 0)
-            end)
-        end
+        State._coinHadPhysicalMove = true
+        startCoinStageHold()
         State._coinDidInitialStage = true
-        State.coinStatus = "Staged below map"
+        State.coinStatus = "Staged below map - held"
         return true
     end
 
@@ -1505,11 +1544,11 @@ local function floatToCoin(target, speed)
         local okClose, closeDist = _pcall(function()
             return (previousTarget.Position - target.Position).Magnitude
         end)
-        if okClose and closeDist and closeDist <= 15 then
+        if okClose and closeDist and closeDist <= 22 then
             closeBoost = true
         end
     end
-    if startDist <= 12 and not State._coinFirstApproach then
+    if startDist <= 16 and not State._coinFirstApproach then
         closeBoost = true
     end
     if State._coinFirstApproach then
@@ -1517,7 +1556,7 @@ local function floatToCoin(target, speed)
     end
     State._coinCloseBoost = closeBoost
     if closeBoost then
-        moveSpeed = moveSpeed * 1.14
+        moveSpeed = moveSpeed * 1.32
     end
     State._coinLastTarget = target
 
@@ -1530,8 +1569,8 @@ local function floatToCoin(target, speed)
     -- First coin after enabling should enter smoothly, not snap across the map.
     local firstFactor = State._coinFirstApproach and 0.52 or 1
     local approachSpeed = math.max(45, moveSpeed * firstFactor)
-    local approachMax = State._coinFirstApproach and 1.55 or 0.95
-    State.coinStatus = State._coinFirstApproach and "Smooth first coin entry" or (closeBoost and "Close coin boost" or "Moving lowest under nearest coin")
+    local approachMax = State._coinFirstApproach and 1.55 or (closeBoost and 0.42 or 0.95)
+    State.coinStatus = State._coinFirstApproach and "Smooth first coin entry" or (closeBoost and "Close coin boost+" or "Moving extra-low under nearest coin")
     moveCoinRootDirect(approach, approachSpeed, math.clamp(startDist / math.max(approachSpeed, 1) + 0.16, 0.20, approachMax))
     State._coinFirstApproach = false
 
@@ -1690,10 +1729,8 @@ local function primeCoinEntry(reason)
 end
 
 local function suspendCoinMovementOnRoundEnd()
-    local hadPhysicalMove = State._coinHadPhysicalMove == true
-        or hasCoinPhysicsActive()
-        or State._coinStagePlatform ~= nil
-    local returnCF = hadPhysicalMove and findCoinReturnCFrame() or nil
+    -- Round-end signals can arrive while the server is moving characters.
+    -- Do not teleport/reposition here; only release our controllers and let the game place the player.
     suspendCoinMovement("Round ended - grounded wait", false)
     State._coinEntryPrime = 0
     State._coinIgnoreUntil = {}
@@ -1701,16 +1738,6 @@ local function suspendCoinMovementOnRoundEnd()
     State._coinStartedInLobby = true
     State._coinFirstApproach = true
     State._coinCloseBoost = false
-
-    local root = getRoot()
-    if hadPhysicalMove and root and returnCF then
-        _pcall(function()
-            root.Anchored = false
-            root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-            root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-            root.CFrame = returnCF
-        end)
-    end
     State._coinHadPhysicalMove = false
 end
 
