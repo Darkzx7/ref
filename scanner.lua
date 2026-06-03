@@ -116,7 +116,7 @@ local State = {
     lastAction         = 0,
     manualSilent       = false,
     coinCollect        = false,
-    coinSpeed          = 50,
+    coinSpeed          = 5,
     collecting         = false,
     espOn              = false,
     roles              = {},
@@ -568,38 +568,33 @@ local function floatToCoin(target, speed)
     local root = getRoot()
     if not root or not target or not target.Parent then return end
 
-    local bp = trackObject(Instance.new("BodyPosition"))
-    bp.Name     = "_CBP"
-    bp.MaxForce = Vector3.new(1e5, 1e5, 1e5)
-    bp.P        = 1e4
-    bp.D        = 400
-    bp.Position = target.Position
-    bp.Parent   = root
+    speed = tonumber(speed) or 5
+    speed = math.clamp(speed, 1, 9)
 
-    local bg = trackObject(Instance.new("BodyGyro"))
-    bg.Name     = "_CBG"
-    bg.MaxTorque = Vector3.new(0, 0, 0)
-    bg.Parent   = root
-
-    local timeout = (root.Position - target.Position).Magnitude / math.max(speed, 1) + 3
+    local timeout = math.clamp((root.Position - target.Position).Magnitude / math.max(speed, 1) + 4, 4, 35)
     local elapsed = 0
+    local stepTime = 0.035
 
     while Alive and elapsed < timeout and State.coinCollect and target and target.Parent do
-        _wait(0.05)
-        elapsed = elapsed + 0.05
         local r = getRoot()
         if not r then break end
-        if (target.Position - r.Position).Magnitude < 2.5 then break end
-        bp.Position = target.Position
-    end
 
-    local r2 = getRoot()
-    if r2 then
-        destroyChild(r2, "_CBP")
-        destroyChild(r2, "_CBG")
+        local targetPos = target.Position + Vector3.new(0, 0.35, 0)
+        local delta = targetPos - r.Position
+        local dist = delta.Magnitude
+        if dist < 2.4 then break end
+
+        local move = math.min(dist, speed * stepTime)
+        local nextPos = r.Position + delta.Unit * move
+
+        _pcall(function()
+            r.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            r.CFrame = CFrame.new(nextPos) * CFrame.Angles(math.rad(90), 0, 0)
+        end)
+
+        _wait(stepTime)
+        elapsed = elapsed + stepTime
     end
-    _pcall(function() bp:Destroy() end)
-    _pcall(function() bg:Destroy() end)
 end
 
 local function startCoinCollect()
@@ -791,6 +786,16 @@ local function enableEsp()
     end))
 end
 
+local function resetAllRoles()
+    for _, p in ipairs(Players:GetPlayers()) do
+        State.roles[p.Name] = "?"
+        if State.espOn then
+            updateEspLabel(p.Name)
+        end
+    end
+    State.localRole = nil
+end
+
 local function setRoleForPlayer(pname, role)
     if type(role) ~= "string" or role == "" then return end
     if type(pname) ~= "string" or pname == "" then
@@ -798,7 +803,7 @@ local function setRoleForPlayer(pname, role)
     end
     State.roles[pname] = role
     if pname == LocalPlayer.Name then
-        State.localRole = role
+        State.localRole = role ~= "?" and role or nil
     end
     if State.espOn then
         updateEspLabel(pname)
@@ -825,7 +830,10 @@ local function parsePlayerDataPayload(value, fallbackName, depth)
         pname = playerNameFromUserId(value.UserId or value.userId)
     end
 
-    if type(role) == "string" then
+    local isDead = value.Dead == true or value.dead == true or value.IsDead == true
+    if isDead then
+        setRoleForPlayer(pname, "?")
+    elseif State.currentPhase ~= "Lobby" and type(role) == "string" then
         setRoleForPlayer(pname, role)
     end
 
@@ -874,6 +882,7 @@ local function listenRoundSignals()
         State.lastWinnerRole = nil
         State.lastCreditedPlayer = nil
         State.coinCount = 0
+        resetAllRoles()
     end)
 
     bindRemoteEvent({"Remotes","Gameplay","RoleSelect"}, function(...)
@@ -910,6 +919,8 @@ local function listenRoundSignals()
         State.currentPhase = "Lobby"
         State.lastLobbySignal = signal
         State.lastRoundSignal = signal
+        State.localRole = nil
+        resetAllRoles()
     end
 
     bindRemoteEvent({"Remotes","Gameplay","RoundEndFade"}, function() markLobby("RoundEndFade") end)
@@ -935,6 +946,26 @@ local function listenRoundSignals()
         if type(args[2]) == "number" then State.coinCount = args[2] end
         if type(args[3]) == "number" then State.coinLimit = args[3] end
     end)
+end
+
+local function listenPlayerRespawns()
+    local function bindPlayer(player)
+        if not player then return end
+        trackConn(player.CharacterAdded:Connect(function()
+            if not Alive then return end
+            if State.currentPhase == "Round" or State.currentPhase == "Ending" then
+                setRoleForPlayer(player.Name, "?")
+            end
+        end))
+    end
+
+    for _, p in ipairs(Players:GetPlayers()) do
+        bindPlayer(p)
+    end
+
+    trackConn(Players.PlayerAdded:Connect(function(p)
+        bindPlayer(p)
+    end))
 end
 -- ─── GUN DROP COLLECT ──────────────────────────────────────────────────────────
 -- GunDrop: Workspace.<Mapa>.GunDrop, classe Part, pickup por contato físico
@@ -1035,10 +1066,16 @@ function RefLib.Window(title)
     gui.Parent         = playerGui
 
     -- frame principal
+    local camera = workspace.CurrentCamera
+    local viewport = camera and camera.ViewportSize or Vector2.new(800, 600)
+    local winW = math.clamp(math.floor(viewport.X * 0.86), 300, 360)
+    local winH = math.clamp(math.floor(viewport.Y * 0.72), 390, 500)
+    local barH = 44
+
     local frame = Instance.new("Frame")
     frame.Name                   = "Main"
-    frame.Size                   = UDim2.new(0, 228, 0, 620)
-    frame.Position               = UDim2.new(0, 14, 0.5, -310)
+    frame.Size                   = UDim2.new(0, winW, 0, winH)
+    frame.Position               = UDim2.new(0, 14, 0.5, -math.floor(winH / 2))
     frame.BackgroundColor3       = Color3.fromRGB(14,15,18)
     frame.BackgroundTransparency = 0.05
     frame.BorderSizePixel        = 0
@@ -1058,7 +1095,7 @@ function RefLib.Window(title)
     -- barra de título
     local bar = Instance.new("Frame")
     bar.Name             = "Bar"
-    bar.Size             = UDim2.new(1,0,0,36)
+    bar.Size             = UDim2.new(1,0,0,barH)
     bar.BackgroundColor3 = Color3.fromRGB(20,22,28)
     bar.BorderSizePixel  = 0
     bar.ZIndex           = 4
@@ -1078,8 +1115,8 @@ function RefLib.Window(title)
     bPatch.Parent           = bar
 
     local titleLbl = Instance.new("TextLabel")
-    titleLbl.Size               = UDim2.new(1,-80,1,0)
-    titleLbl.Position           = UDim2.new(0,12,0,0)
+    titleLbl.Size               = UDim2.new(1,-112,1,0)
+    titleLbl.Position           = UDim2.new(0,14,0,0)
     titleLbl.BackgroundTransparency = 1
     titleLbl.Text               = title
     titleLbl.TextColor3         = Color3.fromRGB(200,212,232)
@@ -1091,30 +1128,50 @@ function RefLib.Window(title)
 
     -- botão minimizar
     local minimized = false
-    local fullSize  = UDim2.new(0,228,0,620)
-    local miniSize  = UDim2.new(0,228,0,36)
+    local fullSize  = UDim2.new(0, winW, 0, winH)
+    local miniSize  = UDim2.new(0, winW, 0, barH)
 
     local minBtn = Instance.new("TextButton")
-    minBtn.Size               = UDim2.new(0,28,0,24)
-    minBtn.Position           = UDim2.new(1,-34,0.5,-12)
+    minBtn.Size               = UDim2.new(0,36,0,30)
+    minBtn.Position           = UDim2.new(1,-82,0.5,-15)
     minBtn.BackgroundColor3   = Color3.fromRGB(40,44,55)
     minBtn.BorderSizePixel    = 0
     minBtn.Text               = "─"
     minBtn.TextColor3         = Color3.fromRGB(180,190,210)
-    minBtn.TextSize           = 13
+    minBtn.TextSize           = 16
     minBtn.Font               = Enum.Font.GothamBold
     minBtn.ZIndex             = 6
     minBtn.Parent             = bar
 
     local minCorner = Instance.new("UICorner")
-    minCorner.CornerRadius = UDim.new(0,5)
+    minCorner.CornerRadius = UDim.new(0,7)
     minCorner.Parent = minBtn
+
+    local closeBtn = Instance.new("TextButton")
+    closeBtn.Size               = UDim2.new(0,36,0,30)
+    closeBtn.Position           = UDim2.new(1,-42,0.5,-15)
+    closeBtn.BackgroundColor3   = Color3.fromRGB(44,34,42)
+    closeBtn.BorderSizePixel    = 0
+    closeBtn.Text               = "×"
+    closeBtn.TextColor3         = Color3.fromRGB(220,190,205)
+    closeBtn.TextSize           = 18
+    closeBtn.Font               = Enum.Font.GothamBold
+    closeBtn.ZIndex             = 6
+    closeBtn.Parent             = bar
+
+    local closeCorner = Instance.new("UICorner")
+    closeCorner.CornerRadius = UDim.new(0,7)
+    closeCorner.Parent = closeBtn
+
+    trackConn(closeBtn.MouseButton1Click:Connect(function()
+        cleanup()
+    end))
 
     -- scroll de conteúdo
     local scroll = Instance.new("ScrollingFrame")
     scroll.Name                  = "Content"
-    scroll.Size                  = UDim2.new(1,0,1,-40)
-    scroll.Position              = UDim2.new(0,0,0,40)
+    scroll.Size                  = UDim2.new(1,0,1,-(barH + 6))
+    scroll.Position              = UDim2.new(0,0,0,barH + 6)
     scroll.BackgroundTransparency = 1
     scroll.BorderSizePixel       = 0
     scroll.ScrollBarThickness    = 0
@@ -1178,7 +1235,7 @@ function RefLib.Window(title)
 
     function W:Section(label)
         local s = Instance.new("TextLabel")
-        s.Size                   = UDim2.new(1,-16,0,20)
+        s.Size                   = UDim2.new(1,-18,0,22)
         s.BackgroundTransparency = 1
         s.Text                   = label
         s.TextColor3             = Color3.fromRGB(100,115,140)
@@ -1196,7 +1253,7 @@ function RefLib.Window(title)
         local offPos  = UDim2.new(0,2,0.5,-7)
 
         local holder = Instance.new("Frame")
-        holder.Size             = UDim2.new(1,-16,0,36)
+        holder.Size             = UDim2.new(1,-18,0,40)
         holder.BackgroundColor3 = Color3.fromRGB(22,25,31)
         holder.BorderSizePixel  = 0
         holder.Parent           = scroll
@@ -1261,7 +1318,7 @@ function RefLib.Window(title)
         local val = math.clamp(default or min, min, max)
 
         local holder = Instance.new("Frame")
-        holder.Size             = UDim2.new(1,-16,0,54)
+        holder.Size             = UDim2.new(1,-18,0,60)
         holder.BackgroundColor3 = Color3.fromRGB(22,25,31)
         holder.BorderSizePixel  = 0
         holder.Parent           = scroll
@@ -1280,7 +1337,7 @@ function RefLib.Window(title)
 
         local rail = Instance.new("Frame")
         rail.Size             = UDim2.new(1,-20,0,6)
-        rail.Position         = UDim2.new(0,10,0,38)
+        rail.Position         = UDim2.new(0,10,0,43)
         rail.BackgroundColor3 = Color3.fromRGB(40,44,54)
         rail.BorderSizePixel  = 0
         rail.Parent           = holder
@@ -1339,7 +1396,7 @@ function RefLib.Window(title)
 
     function W:Button(label, callback)
         local btn = Instance.new("TextButton")
-        btn.Size             = UDim2.new(1,-16,0,34)
+        btn.Size             = UDim2.new(1,-18,0,38)
         btn.BackgroundColor3 = Color3.fromRGB(34,38,50)
         btn.BorderSizePixel  = 0
         btn.Text             = label
@@ -1356,7 +1413,7 @@ function RefLib.Window(title)
 
     function W:Label(text)
         local lbl = Instance.new("TextLabel")
-        lbl.Size               = UDim2.new(1,-16,0,28)
+        lbl.Size               = UDim2.new(1,-18,0,32)
         lbl.BackgroundTransparency = 1
         lbl.Text               = text
         lbl.TextColor3         = Color3.fromRGB(130,140,160)
@@ -1371,7 +1428,7 @@ function RefLib.Window(title)
     function W:CycleButton(label, options, startIndex, callback)
         local idx = startIndex or 1
         local btn = Instance.new("TextButton")
-        btn.Size             = UDim2.new(1,-16,0,34)
+        btn.Size             = UDim2.new(1,-18,0,38)
         btn.BackgroundColor3 = Color3.fromRGB(28,32,42)
         btn.BorderSizePixel  = 0
         btn.Text             = label..": "..tostring(options[idx])
@@ -1451,7 +1508,7 @@ W:Toggle("Coin Collect", false, function(v)
     if v then startCoinCollect() else stopCoinCollect() end
 end)
 
-W:Slider("Speed", 10, 200, 50, function(v)
+W:Slider("Speed", 1, 9, 5, function(v)
     State.coinSpeed = v
 end)
 
@@ -1486,7 +1543,7 @@ _spawn(function()
         if State.espOn then parts[#parts+1] = "esp" end
         if State.gunDropOn then parts[#parts+1] = "gundrop" end
         local activeText = #parts > 0 and ("Active: "..table.concat(parts, ", ")) or "Inactive"
-        local localRole = State.localRole or State.roles[LocalPlayer.Name] or "?"
+        local localRole = State.currentPhase == "Lobby" and "?" or (State.localRole or State.roles[LocalPlayer.Name] or "?")
         local endText = ""
         if State.lastEndReason then
             endText = " | End: "..tostring(State.lastEndReason)
@@ -1502,4 +1559,5 @@ end)
 
 listenRoles()
 listenRoundSignals()
+listenPlayerRespawns()
 installManualSilent()
