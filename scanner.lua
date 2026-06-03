@@ -1,5 +1,5 @@
 -- ref_universal | Murder Mystery tester
--- v2026-06-03-r4
+-- v2026-06-03-r6
 
 local Players          = game:GetService("Players")
 local TweenService     = game:GetService("TweenService")
@@ -116,7 +116,7 @@ local State = {
     lastAction         = 0,
     manualSilent       = false,
     coinCollect        = false,
-    coinSpeed          = 2,
+    coinSpeed          = 3,
     collecting         = false,
     espOn              = false,
     roles              = {},
@@ -137,6 +137,8 @@ local State = {
     lastGunDropStatus  = "Missing",
     lastGunDropPath    = "None",
     lastGunDropDistance = "N/A",
+    _lastGiveWeaponAt  = 0,
+    _lastGiveWeaponName = "None",
     _roleRefreshRunning = false,
     currentPhase       = "Unknown",
     lastRoundSignal    = "None",
@@ -308,6 +310,10 @@ local function isAlive(char)
     if not hum then return true end
     local h = 0; _pcall(function() h = hum.Health end)
     return h > 0
+end
+
+local function isLocalAlive()
+    return isAlive(getChar())
 end
 
 local function partPos(part)
@@ -641,10 +647,12 @@ local function findCoins(allowFar)
 end
 
 local function coinSpeedStuds(speed)
-    speed = tonumber(speed) or 2
-    speed = math.clamp(speed, 1, 5)
-    local map = { 1.15, 1.75, 2.45, 3.25, 4.15 }
-    return map[speed] or 1.75
+    -- Slider value is not raw BodyPosition force. It maps to controlled studs/second.
+    -- 1 is still usable, 6 is quick without becoming instant teleport.
+    speed = tonumber(speed) or 3
+    speed = math.clamp(speed, 1, 6)
+    local map = { 10, 15, 21, 28, 36, 45 }
+    return map[speed] or 21
 end
 
 local function lyingCoinCFrame(pos, lookAt)
@@ -699,17 +707,45 @@ local function noclipLoop()
     end))
 end
 
+local function fireTouchCoin(target)
+    if not target or not target.Parent then return false end
+    local char = getChar()
+    if not char then return false end
+    local touchFn = nil
+    _pcall(function()
+        if type(firetouchinterest) == "function" then
+            touchFn = firetouchinterest
+        end
+    end)
+    if not touchFn then return false end
+
+    local fired = false
+    for _, part in ipairs(char:GetDescendants()) do
+        if part:IsA("BasePart") then
+            _pcall(function()
+                touchFn(part, target, 0)
+                _wait(0.008)
+                touchFn(part, target, 1)
+                fired = true
+            end)
+        end
+    end
+    return fired
+end
+
 local function touchCoinSweep(root, target)
     if not root or not target or not target.Parent then return end
+    fireTouchCoin(target)
     local offsets = {
-        Vector3.new(0, -2.25, 0),
-        Vector3.new(0, -1.75, 0),
-        Vector3.new(0, -1.15, 0),
-        Vector3.new(0.8, -1.65, 0),
-        Vector3.new(-0.8, -1.65, 0),
-        Vector3.new(0, -1.65, 0.8),
-        Vector3.new(0, -1.65, -0.8),
+        Vector3.new(0, -1.35, 0),
+        Vector3.new(0, -0.95, 0),
         Vector3.new(0, -0.55, 0),
+        Vector3.new(0, -0.15, 0),
+        Vector3.new(0.75, -0.75, 0),
+        Vector3.new(-0.75, -0.75, 0),
+        Vector3.new(0, -0.75, 0.75),
+        Vector3.new(0, -0.75, -0.75),
+        Vector3.new(0, 0.25, 0),
     }
     for _, off in ipairs(offsets) do
         if not Alive or not State.coinCollect or not target.Parent then break end
@@ -718,7 +754,8 @@ local function touchCoinSweep(root, target)
             root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
             root.CFrame = lyingCoinCFrame(target.Position + off, target.Position)
         end)
-        _wait(0.025)
+        fireTouchCoin(target)
+        _wait(0.018)
     end
 end
 
@@ -727,8 +764,8 @@ local function floatToCoin(target, speed)
     if not root or not target or not target.Parent then return end
     if not isCoinCollectPhase() then return end
 
-    speed = tonumber(speed) or 2
-    speed = math.clamp(speed, 1, 5)
+    speed = tonumber(speed) or 3
+    speed = math.clamp(speed, 1, 6)
     local moveSpeed = coinSpeedStuds(speed)
     local allowEntryStage = (State._coinEntryPrime or 0) > testerTime()
 
@@ -743,7 +780,7 @@ local function floatToCoin(target, speed)
         _pcall(function()
             root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
             root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-            root.CFrame = lyingCoinCFrame(target.Position + Vector3.new(0, -2.35, 0), target.Position)
+            root.CFrame = lyingCoinCFrame(target.Position + Vector3.new(0, -1.05, 0), target.Position)
         end)
         _wait(0.18)
         root = getRoot()
@@ -751,15 +788,15 @@ local function floatToCoin(target, speed)
         startDist = (root.Position - target.Position).Magnitude
     end
 
-    local timeout = math.clamp(startDist / math.max(moveSpeed, 0.5) + 3, 3.5, 35)
+    local timeout = math.clamp(startDist / math.max(moveSpeed, 1) + 2, 2.5, 18)
     local elapsed = 0
-    local stepTime = 0.065
+    local stepTime = 0.035
 
     while Alive and elapsed < timeout and State.coinCollect and target and target.Parent and isCoinCollectPhase() do
         local r = getRoot()
         if not r then break end
 
-        local targetPos = target.Position + Vector3.new(0, -1.75, 0)
+        local targetPos = target.Position + Vector3.new(0, -0.95, 0)
         local cur = r.Position
         if cur.Y < -65 then
             State.coinStatus = "Void guard"
@@ -774,7 +811,8 @@ local function floatToCoin(target, speed)
 
         local delta = targetPos - cur
         local dist = delta.Magnitude
-        if dist < 1.55 then
+        if dist < 2.35 then
+            State.coinStatus = "Touching coin"
             touchCoinSweep(r, target)
             break
         end
@@ -792,6 +830,9 @@ local function floatToCoin(target, speed)
             r.CFrame = lyingCoinCFrame(nextPos, target.Position)
         end)
 
+        if dist < 7 then
+            fireTouchCoin(target)
+        end
         _wait(stepTime)
         elapsed = elapsed + stepTime
     end
@@ -872,7 +913,7 @@ local function primeCoinEntry(reason)
             _pcall(function()
                 root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
                 root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-                root.CFrame = lyingCoinCFrame(root.Position + Vector3.new(0, 2.25, 0), root.Position + root.CFrame.LookVector)
+                root.CFrame = lyingCoinCFrame(root.Position + Vector3.new(0, 0.65, 0), root.Position + root.CFrame.LookVector)
             end)
         end
     end)
@@ -1247,11 +1288,21 @@ local function listenRoundSignals()
 
     bindRemoteEvent({"Remotes","Gameplay","GiveWeapon"}, function(...)
         State.lastRoundSignal = "GiveWeapon"
+        State._lastGiveWeaponAt = testerTime()
+        State._lastGiveWeaponName = "Unknown"
         if State.currentPhase == "Unknown" or State.currentPhase == "Lobby" or State.currentPhase == "Role Select" then
             State.currentPhase = "Round"
         end
         for _, v in ipairs({...}) do
+            if type(v) == "string" then
+                State._lastGiveWeaponName = v
+            elseif type(v) == "table" then
+                State._lastGiveWeaponName = tostring(v.Weapon or v.Tool or v.Name or State._lastGiveWeaponName)
+            end
             parsePlayerDataPayload(v, nil, 0)
+        end
+        if State.gunDropOn and isLocalAlive() and findTool("Gun") ~= nil then
+            State.lastGunDropStatus = "GiveWeapon"
         end
         refreshRolesBurst("GiveWeapon")
         if State.coinCollect then primeCoinEntry(State.lastRoundSignal) end
@@ -1393,6 +1444,49 @@ local function findGunDrop()
         end
     end
     return nil
+end
+
+local function canCollectGunDrop()
+    if not State.gunDropOn then return false, "Off" end
+    if not isLocalAlive() then return false, "Dead" end
+    if State.currentPhase == "Lobby" or State.currentPhase == "Ending" or State.currentPhase == "Loading Map" then
+        return false, "Waiting for round"
+    end
+    return true, "OK"
+end
+
+local function hasGunTool()
+    return findTool("Gun") ~= nil
+end
+
+local function tryGiveWeaponRequest(gd)
+    local remote = getRemote({"Remotes","Gameplay","GiveWeapon"})
+    if not remote then return false end
+    local okAny = false
+    if remote:IsA("RemoteFunction") then
+        local tries = {
+            function() return remote:InvokeServer("Gun") end,
+            function() return remote:InvokeServer("Gun", gd) end,
+            function() return remote:InvokeServer(gd) end,
+        }
+        for _, fn in ipairs(tries) do
+            local ok = _pcall(fn)
+            okAny = okAny or ok
+            if hasGunTool() then return true end
+        end
+    elseif remote:IsA("RemoteEvent") then
+        local tries = {
+            function() remote:FireServer("Gun") end,
+            function() remote:FireServer("Gun", gd) end,
+            function() remote:FireServer(gd) end,
+        }
+        for _, fn in ipairs(tries) do
+            local ok = _pcall(fn)
+            okAny = okAny or ok
+            if hasGunTool() then return true end
+        end
+    end
+    return okAny
 end
 
 local function updateGunDropState(gd)
@@ -1597,9 +1691,20 @@ end
 
 local function collectGunDrop(gd)
     if not gd or not gd.Parent then return false end
+    local can, why = canCollectGunDrop()
+    if not can then
+        State.lastGunDropStatus = why
+        return false
+    end
+
     State.lastGunDropStatus = "Collecting"
     State.lastGunDropPath = getObjectPath(gd)
     ensureGunDropEsp(gd)
+
+    if hasGunTool() then
+        State.lastGunDropStatus = "Already armed"
+        return true
+    end
 
     local char = getChar()
     if char then
@@ -1610,7 +1715,14 @@ local function collectGunDrop(gd)
         end
     end
 
+    local giveStart = State._lastGiveWeaponAt or 0
+
     fireTouchGunDrop(gd)
+    tryGiveWeaponRequest(gd)
+    if hasGunTool() or (State._lastGiveWeaponAt or 0) > giveStart then
+        State.lastGunDropStatus = "GiveWeapon"
+        return true
+    end
     if not (gd and gd.Parent) then
         State.lastGunDropStatus = "Collected"
         return true
@@ -1619,14 +1731,21 @@ local function collectGunDrop(gd)
     moveNearGunDrop(gd)
 
     local attempts = 0
-    while Alive and State.gunDropOn and gd and gd.Parent and attempts < 7 do
+    while Alive and State.gunDropOn and gd and gd.Parent and attempts < 9 do
+        local okNow = canCollectGunDrop()
+        if not okNow then break end
         attempts = attempts + 1
         fireTouchGunDrop(gd)
         hardTouchGunDrop(gd)
-        _wait(0.12)
+        tryGiveWeaponRequest(gd)
+        if hasGunTool() or (State._lastGiveWeaponAt or 0) > giveStart then
+            State.lastGunDropStatus = "GiveWeapon"
+            return true
+        end
+        _wait(0.1)
     end
 
-    local collected = not (gd and gd.Parent)
+    local collected = not (gd and gd.Parent) or hasGunTool() or (State._lastGiveWeaponAt or 0) > giveStart
     State.lastGunDropStatus = collected and "Collected" or "Touched"
     return collected
 end
@@ -1646,7 +1765,8 @@ local function startGunDropWatch()
         if gd then
             _spawn(function()
                 _wait(0.08)
-                if Alive and State.gunDropOn and gd and gd.Parent then
+                local can = canCollectGunDrop()
+                if Alive and State.gunDropOn and can and gd and gd.Parent then
                     updateGunDropState(gd)
                     collectGunDrop(gd)
                 end
@@ -1658,11 +1778,13 @@ local function startGunDropWatch()
         while Alive and State.gunDropOn do
             local gd = findGunDrop()
             updateGunDropState(gd)
-            if gd then
+            local can, why = canCollectGunDrop()
+            if gd and can then
                 collectGunDrop(gd)
-                _wait(0.25)
+                _wait(0.22)
             else
-                _wait(0.65)
+                if not can then State.lastGunDropStatus = why end
+                _wait(0.45)
             end
         end
         State._gunDropWatch = false
@@ -2140,7 +2262,7 @@ State._coinToggle = W:Toggle("Coin Collect", false, function(v)
     if v then startCoinCollect() else stopCoinCollect() end
 end)
 
-W:Slider("Speed", 1, 5, 2, function(v)
+W:Slider("Speed", 1, 6, 3, function(v)
     State.coinSpeed = v
 end)
 
@@ -2214,7 +2336,7 @@ _spawn(function()
             statusLbl.Text = activeText
             phaseLbl.Text = "Phase: "..tostring(State.currentPhase or "Unknown").." | Signal: "..tostring(State.lastRoundSignal or "None")..endText
             dataLbl.Text = "Role: "..tostring(localRole).." | Coins: "..tostring(State.coinCount or 0).."/"..tostring(State.coinLimit or 40).." | Coin: "..tostring(State.coinStatus or "Idle")
-            gunDropLbl.Text = "GunDrop: "..tostring(State.lastGunDropStatus or "Missing").." | "..tostring(State.lastGunDropDistance or "N/A")
+            gunDropLbl.Text = "GunDrop: "..tostring(State.lastGunDropStatus or "Missing").." | "..tostring(State.lastGunDropDistance or "N/A").." | GiveWeapon: "..tostring(State._lastGiveWeaponName or "None")
         end)
     end
 end)
