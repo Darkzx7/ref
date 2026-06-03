@@ -1,4 +1,4 @@
-local VERSION = "2026-06-03-mm-scan-passive-state-v2"
+local VERSION = "2026-06-03-mm-scan-passive-state-v3"
 local MAX_FILE_BYTES = 4500000
 local FLUSH_EVERY = 50
 
@@ -1193,18 +1193,6 @@ local function main()
         if root then
             return root, "coin_server_ancestor"
         end
-
-        local path = pathText(instance)
-        local lowerPath = stringLower(path)
-        local name = stringLower(prop(instance, "Name") or "")
-        if stringFind(lowerPath, "coincontainer") then
-            return nil, nil
-        end
-        if containsAny(lowerPath, coinTerms) and (isA(instance, "BasePart") or isA(instance, "Model")) then
-            if name ~= "decal" and name ~= "weldconstraint" and name ~= "touchinterest" then
-                return instance, "coin_object_fallback"
-            end
-        end
         return nil, nil
     end
 
@@ -1428,7 +1416,7 @@ local function main()
             remoteFiring = false,
         },
         focus = {
-            "coin_server_deduped",
+            "coin_server_only_deduped",
             "gundrop_deduped",
             "round_state",
             "player_data_role_summary",
