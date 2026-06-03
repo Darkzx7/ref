@@ -1,5 +1,5 @@
 -- ref_universal | Murder Mystery tester
--- v2026-06-03-v21-coin-even-lower-sweep
+-- v2026-06-03-v22-lower-coin-and-map-stage
 
 local Players          = game:GetService("Players")
 local TweenService     = game:GetService("TweenService")
@@ -168,8 +168,8 @@ local State = {
     _coinDidInitialStage = false,
     _coinHadPhysicalMove = false,
     _coinFirstApproach  = false,
-    _coinUnderOffset    = 3.55,
-    _coinApproachExtra   = 1.35,
+    _coinUnderOffset    = 3.85,
+    _coinApproachExtra   = 1.75,
     _coinCloseBoost      = false,
     _returningLobby    = false,
     lastEndReason      = nil,
@@ -1123,14 +1123,14 @@ end
 
 local function touchCoinSweep(root, target)
     if not root or not target or not target.Parent then return end
-    State.coinStatus = State._coinCloseBoost and "Close coin boost" or "Collecting lower underside"
+    State.coinStatus = State._coinCloseBoost and "Close coin boost" or "Collecting lowest underside"
     fireTouchCoin(target)
     fireTouchCoinWithParts(target)
 
     local pos = target.Position
     local sizeY = 1.5
     _pcall(function() sizeY = math.max(target.Size.Y, 1.5) end)
-    local under = math.max(State._coinUnderOffset or 3.55, sizeY * 1.30)
+    local under = math.max(State._coinUnderOffset or 3.85, sizeY * 1.42)
     local passSpeed = coinSpeedStuds(State.coinSpeed) * (State._coinCloseBoost and 1.58 or 1.45)
 
     local forward = getCoinLieForward()
@@ -1139,20 +1139,20 @@ local function touchCoinSweep(root, target)
     side = side.Unit
 
     -- Lower touch sweep: stay below the coin, brush the lower/center hitbox, and avoid rising above the coin.
-    local lowPeak = math.min(sizeY * 0.08, 0.14)
+    local lowPeak = math.min(sizeY * 0.035, 0.07)
     local path = {
         pos + Vector3.new(0, -under, 0),
-        pos + Vector3.new(0, -under * 0.76, 0),
-        pos + Vector3.new(0, -under * 0.48, 0),
-        pos + Vector3.new(0, -0.95, 0),
-        pos + Vector3.new(0, -0.55, 0),
-        pos + Vector3.new(0, -0.18, 0),
+        pos + Vector3.new(0, -under * 0.78, 0),
+        pos + Vector3.new(0, -under * 0.52, 0),
+        pos + Vector3.new(0, -1.12, 0),
+        pos + Vector3.new(0, -0.72, 0),
+        pos + Vector3.new(0, -0.32, 0),
         pos + Vector3.new(0,  lowPeak, 0),
-        pos + forward * 0.46 + Vector3.new(0, -0.12, 0),
-        pos - forward * 0.46 + Vector3.new(0, -0.12, 0),
-        pos + side * 0.42 + Vector3.new(0, -0.15, 0),
-        pos - side * 0.42 + Vector3.new(0, -0.15, 0),
-        pos + Vector3.new(0, -0.58, 0),
+        pos + forward * 0.46 + Vector3.new(0, -0.24, 0),
+        pos - forward * 0.46 + Vector3.new(0, -0.24, 0),
+        pos + side * 0.42 + Vector3.new(0, -0.28, 0),
+        pos - side * 0.42 + Vector3.new(0, -0.28, 0),
+        pos + Vector3.new(0, -0.78, 0),
     }
 
     for i, p in ipairs(path) do
@@ -1295,6 +1295,63 @@ local function raycastFloorNear(pos, maxAbove)
     return nil
 end
 
+
+local function getStageFloorBelowRoot()
+    local root = getRoot()
+    if not root then return nil, nil end
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Blacklist
+    local blacklist = {}
+    local char = getChar()
+    if char then blacklist[#blacklist + 1] = char end
+    if State._coinStagePlatform then blacklist[#blacklist + 1] = State._coinStagePlatform end
+    params.FilterDescendantsInstances = blacklist
+
+    local result = nil
+    _pcall(function()
+        result = workspace:Raycast(root.Position + Vector3.new(0, 12, 0), Vector3.new(0, -180, 0), params)
+    end)
+    if not result or not result.Position or not result.Instance then return nil, nil end
+
+    local path = string.lower(getObjectPath(result.Instance))
+    if path:find("lobby", 1, true) then return nil, nil end
+    if result.Position.Y < -120 then return nil, nil end
+    return result.Position, result.Instance
+end
+
+local function createCoinStagePlatformAt(platformPos, anchor)
+    local root = getRoot()
+    if not root then return false end
+
+    local platform = Instance.new("Part")
+    platform.Name = "_REF_COIN_STAGE_PLATFORM"
+    platform.Anchored = true
+    platform.CanCollide = true
+    platform.CanTouch = false
+    platform.Size = Vector3.new(72, 1.4, 72)
+    platform.Material = Enum.Material.SmoothPlastic
+    platform.Color = Color3.fromRGB(135, 95, 255)
+    platform.Transparency = 1
+    platform.CFrame = CFrame.new(platformPos)
+    platform.Parent = workspace
+
+    State._coinStagePlatform = platform
+    State._coinStageCF = platform.CFrame
+    State._coinStageAnchor = anchor
+    trackObject(platform)
+
+    _pcall(function()
+        root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+        State._coinHadPhysicalMove = true
+        root.CFrame = platform.CFrame + Vector3.new(0, 3.6, 0)
+    end)
+
+    State._coinDidInitialStage = true
+    State.coinStatus = "Staged below map"
+    return true
+end
+
 local function prepareCoinStagePlatform(force)
     if not Alive or not State.coinCollect or ((not force) and not isCoinStagePhase()) then return false end
     local root = getRoot()
@@ -1319,6 +1376,14 @@ local function prepareCoinStagePlatform(force)
 
     local bucket = getBestCoinGroupForStage()
     if not bucket or not bucket.coins or #bucket.coins == 0 then
+        local floorPos = nil
+        local floorInst = nil
+        floorPos, floorInst = getStageFloorBelowRoot()
+        if floorPos then
+            local stageY = floorPos.Y - 42
+            if stageY < -145 then stageY = -145 end
+            return createCoinStagePlatformAt(Vector3.new(root.Position.X, stageY, root.Position.Z), floorInst)
+        end
         State.coinStatus = "Armed - waiting for map"
         return false
     end
@@ -1345,33 +1410,7 @@ local function prepareCoinStagePlatform(force)
 
     local platformPos = Vector3.new(coin.Position.X, stageY, coin.Position.Z)
 
-    local platform = Instance.new("Part")
-    platform.Name = "_REF_COIN_STAGE_PLATFORM"
-    platform.Anchored = true
-    platform.CanCollide = true
-    platform.CanTouch = false
-    platform.Size = Vector3.new(68, 1.4, 68)
-    platform.Material = Enum.Material.SmoothPlastic
-    platform.Color = Color3.fromRGB(135, 95, 255)
-    platform.Transparency = 1
-    platform.CFrame = CFrame.new(platformPos)
-    platform.Parent = workspace
-
-    State._coinStagePlatform = platform
-    State._coinStageCF = platform.CFrame
-    State._coinStageAnchor = coin
-    trackObject(platform)
-
-    _pcall(function()
-        root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-        root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-        State._coinHadPhysicalMove = true
-        root.CFrame = platform.CFrame + Vector3.new(0, 3.6, 0)
-    end)
-
-    State._coinDidInitialStage = true
-    State.coinStatus = "Staged below map"
-    return true
+    return createCoinStagePlatformAt(platformPos, coin)
 end
 
 local function findCoinReturnCFrame()
@@ -1484,7 +1523,7 @@ local function floatToCoin(target, speed)
 
     local sizeY = 1.5
     _pcall(function() sizeY = math.max(target.Size.Y, 1.5) end)
-    local under = math.max(State._coinUnderOffset or 3.55, sizeY * 1.30)
+    local under = math.max(State._coinUnderOffset or 3.85, sizeY * 1.42)
     local approachUnder = under + (State._coinApproachExtra or 1.35)
     local approach = target.Position + Vector3.new(0, -approachUnder, 0)
 
@@ -1492,7 +1531,7 @@ local function floatToCoin(target, speed)
     local firstFactor = State._coinFirstApproach and 0.52 or 1
     local approachSpeed = math.max(45, moveSpeed * firstFactor)
     local approachMax = State._coinFirstApproach and 1.55 or 0.95
-    State.coinStatus = State._coinFirstApproach and "Smooth first coin entry" or (closeBoost and "Close coin boost" or "Moving low under nearest coin")
+    State.coinStatus = State._coinFirstApproach and "Smooth first coin entry" or (closeBoost and "Close coin boost" or "Moving lowest under nearest coin")
     moveCoinRootDirect(approach, approachSpeed, math.clamp(startDist / math.max(approachSpeed, 1) + 0.16, 0.20, approachMax))
     State._coinFirstApproach = false
 
@@ -1529,7 +1568,8 @@ local function suspendCoinMovement(statusText, keepStage)
 end
 
 local function detectRoundFromNearbyCoins()
-    if State.currentPhase ~= "Unknown" and State.currentPhase ~= "Role Select" then return false end
+    -- Do not convert Role Select/Loading Map to Round here; those phases are used for below-map staging.
+    if State.currentPhase ~= "Unknown" then return false end
     if State.localDead == true or not isLocalAlive() then return false end
     local coin, dist = getNearestCoin(true, true)
     if coin and dist and dist < 380 then
@@ -1575,12 +1615,6 @@ local function startCoinCollect()
                     local allowFar = (State._coinEntryPrime or 0) > testerTime()
                     local coin = getNearestCoin(allowFar, false)
                     if coin and coin.Parent then
-                        if State._coinStartedInLobby and not State._coinDidInitialStage then
-                            if prepareCoinStagePlatform(true) then
-                                _wait(0.20)
-                            end
-                            State._coinDidInitialStage = true
-                        end
                         if State._coinStagePlatform then
                             destroyCoinStagePlatform()
                         end
@@ -3072,7 +3106,8 @@ State._coinToggle = W:Toggle("Coin Collect", false, function(v)
         State._coinDidInitialStage = false
         State._coinHadPhysicalMove = false
         State._coinFirstApproach = true
-        State._coinUnderOffset = 3.55
+        State._coinUnderOffset = 3.85
+        State._coinApproachExtra = 1.75
         rememberSafeCFrame(true)
         startCoinCollect()
     else
