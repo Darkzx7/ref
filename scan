@@ -1,4 +1,4 @@
-local VERSION = "2026-06-03-mm-scan-passive-state-v5"
+local VERSION = "2026-06-03-mm-scan-passive-state-v6"
 local MAX_FILE_BYTES = 4500000
 local FLUSH_EVERY = 50
 
@@ -226,7 +226,10 @@ local function main()
             coinsSeen = 0,
             gunDropsSeen = 0,
             valueStatesSeen = 0,
+            currentPhase = "unknown",
             lastRoundState = "unknown",
+            lastLobbySignal = "unknown",
+            lastRoundEndReason = "unknown",
             lastRoleSignal = "unknown",
             lastLocalRole = "unknown",
             lastLocalWeapon = "unknown",
@@ -827,7 +830,8 @@ local function main()
     local coinTerms = { "coin", "coincontainer", "coin_server", "currency", "token", "cash", "money", "candy" }
     local gunDropTerms = { "gundrop", "gun drop", "droppedgun", "dropped gun", "dropgun", "gunpickup" }
     local roundStartTerms = { "roundstart", "round_start", "gamestart", "matchstart", "giveweapon", "roleselect" }
-    local roundEndTerms = { "roundend", "round_end", "victoryscreen", "winner", "murdererdied", "clear1v1", "cancelled1v1" }
+    local roundEndTerms = { "roundend", "round_end", "roundendfade", "victoryscreen", "defeatscreen", "losescreen", "winner", "murdererdied", "clear1v1", "cancelled1v1" }
+    local lobbyEndTerms = { "victoryscreen", "defeatscreen", "losescreen", "roundendfade" }
     local roleTerms = { "role", "roleselect", "playerdatachanged", "murder", "sheriff", "innocent", "hero", "giveweapon" }
 
     local function pathText(instance)
@@ -959,14 +963,44 @@ local function main()
         return isA(instance, "RemoteEvent") or isA(instance, "RemoteFunction")
     end
 
+    local function setPhase(phase, source, reason, packedArgs)
+        if not phase or phase == "" then
+            return
+        end
+        if Scan.summary.currentPhase ~= phase then
+            Scan.summary.currentPhase = phase
+            logRecord({
+                event = "phase_signal",
+                phase = phase,
+                source = source,
+                reason = reason,
+                args = packedArgs,
+            })
+        else
+            Scan.summary.currentPhase = phase
+        end
+    end
+
     local function inferRoundFromRemote(remote, packedArgs)
         local path = pathText(remote)
         if containsAny(path, roundStartTerms) then
             Scan.summary.lastRoundState = "started_or_role_assignment"
             logRecord({ event = "round_state_signal", state = Scan.summary.lastRoundState, source = instanceInfo(remote), args = packedArgs })
+            if stringFind(path, "RoleSelect") then
+                setPhase("role_select", instanceInfo(remote), "role_select_signal", packedArgs)
+            elseif stringFind(path, "RoundStart") or stringFind(path, "GiveWeapon") then
+                setPhase("in_round", instanceInfo(remote), "round_start_signal", packedArgs)
+            end
         elseif containsAny(path, roundEndTerms) then
             Scan.summary.lastRoundState = "ended_or_transition"
             logRecord({ event = "round_state_signal", state = Scan.summary.lastRoundState, source = instanceInfo(remote), args = packedArgs })
+            if containsAny(path, lobbyEndTerms) then
+                Scan.summary.lastLobbySignal = path
+                setPhase("lobby", instanceInfo(remote), "round_end_lobby_signal", packedArgs)
+            elseif stringFind(path, "Clear1v1") or stringFind(path, "Cancelled1v1") then
+                Scan.summary.lastLobbySignal = path
+                setPhase("lobby_transition", instanceInfo(remote), "round_transition_signal", packedArgs)
+            end
         end
         if containsAny(path, roleTerms) then
             Scan.summary.lastRoleSignal = path
@@ -1059,11 +1093,16 @@ local function main()
             return
         end
 
-        if stringFind(path, "VictoryScreen") then
+        if containsAny(path, { "victoryscreen", "defeatscreen", "losescreen" }) then
             Scan.summary.lastRoundState = "ended_or_transition"
+            Scan.summary.lastLobbySignal = path
+            Scan.summary.lastRoundEndReason = safeToString(rawArg(rawArgs, 3) or "unknown")
+            setPhase("lobby", instanceInfo(remote), "end_screen", packedArgs)
             logRecord({
                 event = "round_end_summary",
                 source = instanceInfo(remote),
+                phase = Scan.summary.currentPhase,
+                lobbyOnly = true,
                 didLocalWin = primitiveSummary(rawArg(rawArgs, 1)),
                 winningRole = primitiveSummary(rawArg(rawArgs, 2)),
                 reason = primitiveSummary(rawArg(rawArgs, 3)),
@@ -1076,9 +1115,11 @@ local function main()
 
         if stringFind(path, "RoundEndFade") or stringFind(path, "Clear1v1") or stringFind(path, "Cancelled1v1") then
             Scan.summary.lastRoundState = "ended_or_transition"
+            Scan.summary.lastLobbySignal = path
             logRecord({
                 event = "round_transition_signal",
                 state = Scan.summary.lastRoundState,
+                phase = Scan.summary.currentPhase,
                 source = instanceInfo(remote),
                 args = packedArgs,
             })
@@ -1415,7 +1456,10 @@ local function main()
             .. "\ncoinsSeen: " .. safeToString(Scan.summary.coinsSeen)
             .. "\ngunDropsSeen: " .. safeToString(Scan.summary.gunDropsSeen)
             .. "\nvalueStatesSeen: " .. safeToString(Scan.summary.valueStatesSeen)
+            .. "\ncurrentPhase: " .. safeToString(Scan.summary.currentPhase)
             .. "\nlastRoundState: " .. safeToString(Scan.summary.lastRoundState)
+            .. "\nlastLobbySignal: " .. safeToString(Scan.summary.lastLobbySignal)
+            .. "\nlastRoundEndReason: " .. safeToString(Scan.summary.lastRoundEndReason)
             .. "\nlastRoleSignal: " .. safeToString(Scan.summary.lastRoleSignal)
             .. "\nlastLocalRole: " .. safeToString(Scan.summary.lastLocalRole)
             .. "\nlastLocalWeapon: " .. safeToString(Scan.summary.lastLocalWeapon)
@@ -1473,6 +1517,7 @@ local function main()
             "coin_server_only_deduped",
             "gundrop_deduped",
             "round_state",
+            "phase_lobby_detection",
             "player_data_role_summary",
             "give_weapon_local_role",
             "remote_names",
