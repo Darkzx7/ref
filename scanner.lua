@@ -1,5 +1,5 @@
 -- ref_universal | Murder Mystery tester
--- v2026-06-03
+-- v2026-06-03-r3
 
 local Players          = game:GetService("Players")
 local TweenService     = game:GetService("TweenService")
@@ -128,8 +128,16 @@ local State = {
     _manualConn        = nil,
     _noclipConn        = nil,
     gunDropOn          = false,
+    gunDropEspOn       = false,
     _gunDropWatch      = false,
     _gunDropConn       = nil,
+    _gunDropEsp        = nil,
+    _gunDropEspConn    = nil,
+    _gunDropEspLoop    = false,
+    lastGunDropStatus  = "Missing",
+    lastGunDropPath    = "None",
+    lastGunDropDistance = "N/A",
+    _roleRefreshRunning = false,
     currentPhase       = "Unknown",
     lastRoundSignal    = "None",
     lastLobbySignal    = "None",
@@ -181,11 +189,23 @@ local function clearRuntimeForRoot(root)
     destroyChild(root, "_GDBG")
 end
 
+local function getObjectPath(obj)
+    if not obj then return "None" end
+    local names = {}
+    local cur = obj
+    while cur and cur ~= game do
+        table.insert(names, 1, cur.Name)
+        cur = cur.Parent
+    end
+    return table.concat(names, ".")
+end
+
 local function cleanup()
     Alive = false
     State.manualSilent = false
     State.coinCollect = false
     State.gunDropOn = false
+    State.gunDropEspOn = false
     State.espOn = false
 
     for _, conn in ipairs(Connections) do
@@ -214,6 +234,13 @@ local function cleanup()
     for k in pairs(State.espCharConns) do
         State.espCharConns[k] = nil
     end
+
+    safeDestroy(State._gunDropEsp)
+    State._gunDropEsp = nil
+    safeDisconnect(State._gunDropConn)
+    State._gunDropConn = nil
+    safeDisconnect(State._gunDropEspConn)
+    State._gunDropEspConn = nil
 
     local root = getRoot()
     clearRuntimeForRoot(root)
@@ -874,8 +901,64 @@ local function bindRemoteEvent(path, callback)
     return nil
 end
 
+local function parseReturnedPlayerData(result)
+    if type(result) == "table" then
+        parsePlayerDataPayload(result, nil, 0)
+        return true
+    end
+    return false
+end
+
+local function refreshCurrentPlayerData()
+    if not Alive then return false end
+    local got = false
+
+    local gameplay = getRemote({"Remotes","Gameplay","GetCurrentPlayerData"})
+    if gameplay then
+        if gameplay:IsA("RemoteFunction") then
+            local ok, result = _pcall(function()
+                return gameplay:InvokeServer()
+            end)
+            if ok then got = parseReturnedPlayerData(result) or got end
+        elseif gameplay:IsA("RemoteEvent") then
+            _pcall(function() gameplay:FireServer() end)
+        end
+    end
+
+    local extras = getRemote({"Remotes","Extras","GetPlayerData"})
+    if extras then
+        if extras:IsA("RemoteFunction") then
+            local ok, result = _pcall(function()
+                return extras:InvokeServer()
+            end)
+            if ok then got = parseReturnedPlayerData(result) or got end
+        elseif extras:IsA("RemoteEvent") then
+            _pcall(function() extras:FireServer() end)
+        end
+    end
+
+    return got
+end
+
+local function refreshRolesBurst(reason)
+    if State._roleRefreshRunning then
+        refreshCurrentPlayerData()
+        return
+    end
+    State._roleRefreshRunning = true
+    _spawn(function()
+        for i = 1, 14 do
+            if not Alive then break end
+            if State.currentPhase == "Lobby" then break end
+            refreshCurrentPlayerData()
+            _wait(i <= 6 and 0.25 or 0.6)
+        end
+        State._roleRefreshRunning = false
+    end)
+end
+
 local function listenRoundSignals()
-    bindRemoteEvent({"Remotes","Gameplay","RoundStart"}, function()
+    bindRemoteEvent({"Remotes","Gameplay","RoundStart"}, function(...)
         State.currentPhase = "Round"
         State.lastRoundSignal = "RoundStart"
         State.lastEndReason = nil
@@ -883,6 +966,10 @@ local function listenRoundSignals()
         State.lastCreditedPlayer = nil
         State.coinCount = 0
         resetAllRoles()
+        for _, v in ipairs({...}) do
+            parsePlayerDataPayload(v, nil, 0)
+        end
+        refreshRolesBurst("RoundStart")
     end)
 
     bindRemoteEvent({"Remotes","Gameplay","RoleSelect"}, function(...)
@@ -891,13 +978,46 @@ local function listenRoundSignals()
         for _, v in ipairs({...}) do
             parsePlayerDataPayload(v, nil, 0)
         end
+        refreshRolesBurst("RoleSelect")
     end)
 
-    bindRemoteEvent({"Remotes","Gameplay","GiveWeapon"}, function()
+    bindRemoteEvent({"Remotes","Gameplay","GiveWeapon"}, function(...)
         State.lastRoundSignal = "GiveWeapon"
-        if State.currentPhase == "Unknown" or State.currentPhase == "Lobby" then
+        if State.currentPhase == "Unknown" or State.currentPhase == "Lobby" or State.currentPhase == "Role Select" then
             State.currentPhase = "Round"
         end
+        for _, v in ipairs({...}) do
+            parsePlayerDataPayload(v, nil, 0)
+        end
+        refreshRolesBurst("GiveWeapon")
+    end)
+
+    bindRemoteEvent({"Remotes","Gameplay","LoadingMap"}, function(...)
+        State.currentPhase = "Loading Map"
+        State.lastRoundSignal = "LoadingMap"
+        resetAllRoles()
+        for _, v in ipairs({...}) do
+            parsePlayerDataPayload(v, nil, 0)
+        end
+        refreshRolesBurst("LoadingMap")
+    end)
+
+    bindRemoteEvent({"Remotes","Gameplay","ShowRoleSelect"}, function(...)
+        State.currentPhase = "Role Select"
+        State.lastRoundSignal = "ShowRoleSelect"
+        for _, v in ipairs({...}) do
+            parsePlayerDataPayload(v, nil, 0)
+        end
+        refreshRolesBurst("ShowRoleSelect")
+    end)
+
+    bindRemoteEvent({"Remotes","Gameplay","ShowRoleSelectNew"}, function(...)
+        State.currentPhase = "Role Select"
+        State.lastRoundSignal = "ShowRoleSelectNew"
+        for _, v in ipairs({...}) do
+            parsePlayerDataPayload(v, nil, 0)
+        end
+        refreshRolesBurst("ShowRoleSelectNew")
     end)
 
     bindRemoteEvent({"Remotes","Gameplay","VictoryScreen"}, function(...)
@@ -967,74 +1087,303 @@ local function listenPlayerRespawns()
         bindPlayer(p)
     end))
 end
--- ─── GUN DROP COLLECT ──────────────────────────────────────────────────────────
+-- ─── GUN DROP COLLECT / ESP ───────────────────────────────────────────────────
 -- GunDrop: Workspace.<Mapa>.GunDrop, classe Part, pickup por contato físico
 
-local function findGunDrop()
-    for _, obj in ipairs(workspace:GetDescendants()) do
-        if obj.Name == "GunDrop" and obj:IsA("BasePart") then return obj end
+local function getGunDropPart(obj)
+    if not obj then return nil end
+    if obj.Name == "GunDrop" and obj:IsA("BasePart") then return obj end
+    if obj.Name == "GunDrop" and obj:IsA("Model") then
+        return obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart", true)
     end
     return nil
 end
 
-local function walkToGunDrop(gd)
+local function findGunDrop()
+    local desc = nil
+    _pcall(function() desc = workspace:GetDescendants() end)
+    if not desc then return nil end
+    for _, obj in ipairs(desc) do
+        local part = getGunDropPart(obj)
+        if part and part.Parent then
+            return part
+        end
+    end
+    return nil
+end
+
+local function updateGunDropState(gd)
+    if gd and gd.Parent then
+        State.lastGunDropStatus = "Found"
+        State.lastGunDropPath = getObjectPath(gd)
+        local root = getRoot()
+        if root then
+            local ok, dist = _pcall(function()
+                return math.floor((root.Position - gd.Position).Magnitude + 0.5)
+            end)
+            State.lastGunDropDistance = ok and tostring(dist).." studs" or "N/A"
+        else
+            State.lastGunDropDistance = "N/A"
+        end
+    else
+        State.lastGunDropStatus = "Missing"
+        State.lastGunDropPath = "None"
+        State.lastGunDropDistance = "N/A"
+    end
+end
+
+local function clearGunDropEsp()
+    safeDestroy(State._gunDropEsp)
+    State._gunDropEsp = nil
+end
+
+local function ensureGunDropEsp(gd)
+    if not State.gunDropEspOn then
+        clearGunDropEsp()
+        return
+    end
+    if not gd or not gd.Parent then
+        clearGunDropEsp()
+        return
+    end
+
+    local gui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    if not gui then return end
+
+    local bb = State._gunDropEsp
+    if not bb or not bb.Parent then
+        bb = Instance.new("BillboardGui")
+        bb.Name = "REF_GunDrop_ESP"
+        bb.Size = UDim2.new(0, 128, 0, 38)
+        bb.StudsOffset = Vector3.new(0, 2.7, 0)
+        bb.AlwaysOnTop = true
+        bb.ResetOnSpawn = false
+        bb.Parent = gui
+        State._gunDropEsp = bb
+
+        local frame = Instance.new("Frame")
+        frame.Name = "Card"
+        frame.Size = UDim2.new(1, 0, 1, 0)
+        frame.BackgroundColor3 = Color3.fromRGB(14, 15, 18)
+        frame.BackgroundTransparency = 0.18
+        frame.BorderSizePixel = 0
+        frame.Parent = bb
+
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(0, 7)
+        corner.Parent = frame
+
+        local stroke = Instance.new("UIStroke")
+        stroke.Color = Color3.fromRGB(255, 205, 85)
+        stroke.Thickness = 1
+        stroke.Transparency = 0.15
+        stroke.Parent = frame
+
+        local label = Instance.new("TextLabel")
+        label.Name = "Label"
+        label.Size = UDim2.new(1, -8, 1, 0)
+        label.Position = UDim2.new(0, 4, 0, 0)
+        label.BackgroundTransparency = 1
+        label.Text = "GunDrop"
+        label.TextColor3 = Color3.fromRGB(255, 215, 95)
+        label.TextSize = 13
+        label.TextScaled = true
+        label.Font = Enum.Font.GothamBold
+        label.Parent = frame
+    end
+
+    bb.Adornee = gd
+end
+
+local function startGunDropEsp()
+    if State._gunDropEspLoop then return end
+    State._gunDropEspLoop = true
+    safeDisconnect(State._gunDropEspConn)
+    State._gunDropEspConn = trackConn(workspace.DescendantAdded:Connect(function(inst)
+        if not Alive or not State.gunDropEspOn then return end
+        local gd = getGunDropPart(inst)
+        if gd then
+            updateGunDropState(gd)
+            ensureGunDropEsp(gd)
+        end
+    end))
+
+    _spawn(function()
+        while Alive and State.gunDropEspOn do
+            local gd = findGunDrop()
+            updateGunDropState(gd)
+            ensureGunDropEsp(gd)
+            _wait(0.45)
+        end
+        State._gunDropEspLoop = false
+        clearGunDropEsp()
+    end)
+end
+
+local function stopGunDropEsp()
+    State.gunDropEspOn = false
+    State._gunDropEspLoop = false
+    safeDisconnect(State._gunDropEspConn)
+    State._gunDropEspConn = nil
+    clearGunDropEsp()
+end
+
+local function fireTouchGunDrop(gd)
+    if not gd or not gd.Parent then return false end
+    local char = getChar()
+    if not char then return false end
+    local fired = false
+
+    local touchFn = nil
+    _pcall(function()
+        if type(firetouchinterest) == "function" then
+            touchFn = firetouchinterest
+        end
+    end)
+
+    if touchFn then
+        for _, part in ipairs(char:GetDescendants()) do
+            if part:IsA("BasePart") then
+                _pcall(function()
+                    touchFn(part, gd, 0)
+                    _wait(0.015)
+                    touchFn(part, gd, 1)
+                    fired = true
+                end)
+            end
+        end
+    end
+
+    return fired
+end
+
+local function hardTouchGunDrop(gd)
+    local root = getRoot()
+    if not root or not gd or not gd.Parent then return false end
+
+    local offsets = {
+        Vector3.new(0, 2.4, 0),
+        Vector3.new(0, 1.25, 0),
+        Vector3.new(0, 0.25, 0),
+        Vector3.new(1.6, 1.25, 0),
+        Vector3.new(-1.6, 1.25, 0),
+        Vector3.new(0, 1.25, 1.6),
+        Vector3.new(0, 1.25, -1.6),
+    }
+
+    for _, offset in ipairs(offsets) do
+        if not Alive or not State.gunDropOn or not gd or not gd.Parent then break end
+        _pcall(function()
+            root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+            root.CFrame = CFrame.new(gd.Position + offset)
+        end)
+        fireTouchGunDrop(gd)
+        _wait(0.07)
+    end
+
+    return not (gd and gd.Parent)
+end
+
+local function moveNearGunDrop(gd)
     local root = getRoot()
     if not root or not gd or not gd.Parent then return end
 
-    local bp = trackObject(Instance.new("BodyPosition"))
-    bp.Name     = "_GDBP"
-    bp.MaxForce = Vector3.new(1e5,1e5,1e5)
-    bp.P        = 8000
-    bp.D        = 500
-    bp.Position = gd.Position
-    bp.Parent   = root
+    local started = testerTime()
+    local maxTime = 7
+    local speed = 85
 
-    local bg = trackObject(Instance.new("BodyGyro"))
-    bg.Name      = "_GDBG"
-    bg.MaxTorque = Vector3.new(1e5,1e5,1e5)
-    bg.P         = 8000
-    bg.CFrame    = CFrame.new(root.Position, gd.Position)
-    bg.Parent    = root
-
-    local elapsed = 0
-    while Alive and elapsed < 10 and State.gunDropOn and gd and gd.Parent do
-        _wait(0.05)
-        elapsed = elapsed + 0.05
+    while Alive and State.gunDropOn and gd and gd.Parent and testerTime() - started < maxTime do
         local r = getRoot()
         if not r then break end
-        if (gd.Position - r.Position).Magnitude < 4 then break end
-        bp.Position = gd.Position
-        bg.CFrame   = CFrame.new(r.Position, gd.Position)
+        local targetPos = gd.Position + Vector3.new(0, 2.15, 0)
+        local delta = targetPos - r.Position
+        local dist = delta.Magnitude
+        if dist <= 3.2 then break end
+        local stepTime = 0.035
+        local move = math.min(dist, speed * stepTime)
+        local nextPos = r.Position + delta.Unit * move
+        _pcall(function()
+            r.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            r.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+            r.CFrame = CFrame.new(nextPos)
+        end)
+        _wait(stepTime)
+    end
+end
+
+local function collectGunDrop(gd)
+    if not gd or not gd.Parent then return false end
+    State.lastGunDropStatus = "Collecting"
+    State.lastGunDropPath = getObjectPath(gd)
+    ensureGunDropEsp(gd)
+
+    local char = getChar()
+    if char then
+        for _, part in ipairs(char:GetDescendants()) do
+            if part:IsA("BasePart") then
+                _pcall(function() part.CanCollide = false end)
+            end
+        end
     end
 
-    local r2 = getRoot()
-    if r2 then destroyChild(r2,"_GDBP"); destroyChild(r2,"_GDBG") end
-    _pcall(function() bp:Destroy() end)
-    _pcall(function() bg:Destroy() end)
+    fireTouchGunDrop(gd)
+    if not (gd and gd.Parent) then
+        State.lastGunDropStatus = "Collected"
+        return true
+    end
+
+    moveNearGunDrop(gd)
+
+    local attempts = 0
+    while Alive and State.gunDropOn and gd and gd.Parent and attempts < 7 do
+        attempts = attempts + 1
+        fireTouchGunDrop(gd)
+        hardTouchGunDrop(gd)
+        _wait(0.12)
+    end
+
+    local collected = not (gd and gd.Parent)
+    State.lastGunDropStatus = collected and "Collected" or "Touched"
+    return collected
 end
 
 local function startGunDropWatch()
     if State._gunDropWatch then return end
     State._gunDropWatch = true
-    _spawn(function()
-        while Alive and State.gunDropOn do
-            local gd = findGunDrop()
-            if gd then walkToGunDrop(gd) end
-            _wait(1.5)
-        end
-        State._gunDropWatch = false
-    end)
+
+    if State.gunDropEspOn then
+        startGunDropEsp()
+    end
+
     safeDisconnect(State._gunDropConn)
     State._gunDropConn = trackConn(workspace.DescendantAdded:Connect(function(inst)
-        if Alive and inst.Name == "GunDrop" and inst:IsA("BasePart") and State.gunDropOn then
+        if not Alive or not State.gunDropOn then return end
+        local gd = getGunDropPart(inst)
+        if gd then
             _spawn(function()
-                _wait(0.15)
-                if Alive and State.gunDropOn then
-                    walkToGunDrop(inst)
+                _wait(0.08)
+                if Alive and State.gunDropOn and gd and gd.Parent then
+                    updateGunDropState(gd)
+                    collectGunDrop(gd)
                 end
             end)
         end
     end))
+
+    _spawn(function()
+        while Alive and State.gunDropOn do
+            local gd = findGunDrop()
+            updateGunDropState(gd)
+            if gd then
+                collectGunDrop(gd)
+                _wait(0.25)
+            else
+                _wait(0.65)
+            end
+        end
+        State._gunDropWatch = false
+    end)
 end
 
 local function stopGunDropWatch()
@@ -1518,22 +1867,51 @@ W:Section("  ESP")
 
 W:Toggle("Role ESP", false, function(v)
     State.espOn = v
-    if v then enableEsp() else disableEsp() end
+    if v then
+        enableEsp()
+        refreshRolesBurst("RoleESP")
+    else
+        disableEsp()
+    end
+end)
+
+W:Button("Refresh Roles", function()
+    if State.currentPhase == "Lobby" then
+        resetAllRoles()
+    else
+        refreshRolesBurst("Manual")
+    end
 end)
 
 W:Label("Murderer=Red  Sheriff=Blue  Hero=Yellow  Innocent=Green")
 
 W:Section("  GUN DROP")
 
+W:Toggle("GunDrop ESP", false, function(v)
+    State.gunDropEspOn = v
+    if v then startGunDropEsp() else stopGunDropEsp() end
+end)
+
 W:Toggle("Auto Collect GunDrop", false, function(v)
     State.gunDropOn = v
     if v then startGunDropWatch() else stopGunDropWatch() end
+end)
+
+W:Button("Collect GunDrop Now", function()
+    local gd = findGunDrop()
+    updateGunDropState(gd)
+    if gd then
+        _spawn(function()
+            collectGunDrop(gd)
+        end)
+    end
 end)
 
 W:Section("  STATUS")
 local statusLbl = W:Label("Ready.")
 local phaseLbl = W:Label("Phase: Unknown")
 local dataLbl = W:Label("Role: ? | Coins: 0/40")
+local gunDropLbl = W:Label("GunDrop: Missing | N/A")
 
 _spawn(function()
     while Alive and W.gui and W.gui.Parent do
@@ -1542,6 +1920,7 @@ _spawn(function()
         if State.coinCollect then parts[#parts+1] = "coins" end
         if State.espOn then parts[#parts+1] = "esp" end
         if State.gunDropOn then parts[#parts+1] = "gundrop" end
+        if State.gunDropEspOn then parts[#parts+1] = "gundrop esp" end
         local activeText = #parts > 0 and ("Active: "..table.concat(parts, ", ")) or "Inactive"
         local localRole = State.currentPhase == "Lobby" and "?" or (State.localRole or State.roles[LocalPlayer.Name] or "?")
         local endText = ""
@@ -1552,6 +1931,7 @@ _spawn(function()
             statusLbl.Text = activeText
             phaseLbl.Text = "Phase: "..tostring(State.currentPhase or "Unknown").." | Signal: "..tostring(State.lastRoundSignal or "None")..endText
             dataLbl.Text = "Role: "..tostring(localRole).." | Coins: "..tostring(State.coinCount or 0).."/"..tostring(State.coinLimit or 40)
+            gunDropLbl.Text = "GunDrop: "..tostring(State.lastGunDropStatus or "Missing").." | "..tostring(State.lastGunDropDistance or "N/A")
         end)
     end
 end)
@@ -1561,3 +1941,9 @@ listenRoles()
 listenRoundSignals()
 listenPlayerRespawns()
 installManualSilent()
+_spawn(function()
+    _wait(0.5)
+    if Alive and State.currentPhase ~= "Lobby" then
+        refreshRolesBurst("Init")
+    end
+end)
