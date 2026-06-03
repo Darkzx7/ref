@@ -1,5 +1,5 @@
 -- ref_universal | Murder Mystery tester
--- v2026-06-03-v20-coin-lower-sweep
+-- v2026-06-03-v21-coin-even-lower-sweep
 
 local Players          = game:GetService("Players")
 local TweenService     = game:GetService("TweenService")
@@ -1123,7 +1123,7 @@ end
 
 local function touchCoinSweep(root, target)
     if not root or not target or not target.Parent then return end
-    State.coinStatus = State._coinCloseBoost and "Close coin boost" or "Collecting low underside"
+    State.coinStatus = State._coinCloseBoost and "Close coin boost" or "Collecting lower underside"
     fireTouchCoin(target)
     fireTouchCoinWithParts(target)
 
@@ -1138,21 +1138,21 @@ local function touchCoinSweep(root, target)
     if side.Magnitude < 0.05 then side = Vector3.new(1, 0, 0) end
     side = side.Unit
 
-    -- Low touch sweep: stay under the coin, cross the lower/center hitbox, and avoid lifting too high.
-    -- The highest point is just above the coin center instead of over the top.
-    local lowPeak = math.min(sizeY * 0.22, 0.34)
+    -- Lower touch sweep: stay below the coin, brush the lower/center hitbox, and avoid rising above the coin.
+    local lowPeak = math.min(sizeY * 0.08, 0.14)
     local path = {
         pos + Vector3.new(0, -under, 0),
-        pos + Vector3.new(0, -under * 0.70, 0),
-        pos + Vector3.new(0, -under * 0.38, 0),
-        pos + Vector3.new(0, -0.72, 0),
-        pos + Vector3.new(0, -0.28, 0),
+        pos + Vector3.new(0, -under * 0.76, 0),
+        pos + Vector3.new(0, -under * 0.48, 0),
+        pos + Vector3.new(0, -0.95, 0),
+        pos + Vector3.new(0, -0.55, 0),
+        pos + Vector3.new(0, -0.18, 0),
         pos + Vector3.new(0,  lowPeak, 0),
-        pos + forward * 0.46 + Vector3.new(0, 0.08, 0),
-        pos - forward * 0.46 + Vector3.new(0, 0.08, 0),
-        pos + side * 0.42 + Vector3.new(0, 0.06, 0),
-        pos - side * 0.42 + Vector3.new(0, 0.06, 0),
-        pos + Vector3.new(0, -0.34, 0),
+        pos + forward * 0.46 + Vector3.new(0, -0.12, 0),
+        pos - forward * 0.46 + Vector3.new(0, -0.12, 0),
+        pos + side * 0.42 + Vector3.new(0, -0.15, 0),
+        pos - side * 0.42 + Vector3.new(0, -0.15, 0),
+        pos + Vector3.new(0, -0.58, 0),
     }
 
     for i, p in ipairs(path) do
