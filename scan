@@ -1,4 +1,4 @@
-local VERSION = "2026-06-02-mm-scan-passive-state-v1"
+local VERSION = "2026-06-03-mm-scan-passive-state-v2"
 local MAX_FILE_BYTES = 4500000
 local FLUSH_EVERY = 50
 
@@ -215,6 +215,8 @@ local function main()
         watchedAttributes = callable(_setmetatable) and _setmetatable({}, weakKeys) or {},
         coinObjects = callable(_setmetatable) and _setmetatable({}, weakKeys) or {},
         gunDropObjects = callable(_setmetatable) and _setmetatable({}, weakKeys) or {},
+        coinRemovedObjects = callable(_setmetatable) and _setmetatable({}, weakKeys) or {},
+        gunDropRemovedObjects = callable(_setmetatable) and _setmetatable({}, weakKeys) or {},
         scannedRoots = callable(_setmetatable) and _setmetatable({}, weakKeys) or {},
         summary = {
             coinsSeen = 0,
@@ -222,6 +224,11 @@ local function main()
             valueStatesSeen = 0,
             lastRoundState = "unknown",
             lastRoleSignal = "unknown",
+            lastLocalRole = "unknown",
+            lastLocalWeapon = "unknown",
+            lastCoinCount = "unknown",
+            lastCoinLimit = "unknown",
+            lastRoles = {},
         },
     }
     env.__MM_PASSIVE_SCAN = Scan
@@ -554,6 +561,181 @@ local function main()
         }
     end
 
+    local roleFieldTerms = {
+        "role", "murder", "sheriff", "innocent", "hero", "dead", "alive", "weapon",
+        "gun", "knife", "has", "team", "round", "escaped", "killer", "victim",
+        "coins", "bag", "xp", "level", "prestige", "perk", "effect", "victory",
+    }
+
+    local function primitiveSummary(value)
+        local valueType = kind(value)
+        if value == nil then
+            return { type = "nil" }
+        end
+        if valueType == "boolean" or valueType == "number" then
+            return { type = valueType, value = value }
+        end
+        if valueType == "string" then
+            return { type = "string", value = shortString(value, 200), length = #value }
+        end
+        if valueType == "Instance" then
+            return instanceInfo(value)
+        end
+        if valueType == "Vector3" or valueType == "CFrame" or valueType == "Color3" or valueType == "EnumItem" then
+            return serialize(value)
+        end
+        return nil
+    end
+
+    local function roleFromText(value)
+        local lower = stringLower(value or "")
+        if stringFind(lower, "murder") then
+            return "Murderer"
+        end
+        if stringFind(lower, "sheriff") then
+            return "Sheriff"
+        end
+        if stringFind(lower, "innocent") then
+            return "Innocent"
+        end
+        if stringFind(lower, "hero") then
+            return "Hero"
+        end
+        return nil
+    end
+
+    local function weaponRole(value)
+        local lower = stringLower(value or "")
+        if lower == "knife" then
+            return "Murderer"
+        end
+        if lower == "gun" then
+            return "Sheriff"
+        end
+        return nil
+    end
+
+    local function importantKey(key)
+        return containsAny(safeToString(key), roleFieldTerms)
+    end
+
+    local function tableKeys(tbl, limit)
+        local keys = {}
+        limit = limit or 40
+        if _type(tbl) ~= "table" then
+            return keys
+        end
+        for key in _pairs(tbl) do
+            if #keys >= limit then
+                break
+            end
+            keys[#keys + 1] = shortString(key, 80)
+        end
+        if _type(_table) == "table" and callable(_table.sort) then
+            safeCall(_table.sort, keys)
+        end
+        return keys
+    end
+
+    local function compactImportantFields(tbl, depth)
+        depth = depth or 0
+        if _type(tbl) ~= "table" then
+            return primitiveSummary(tbl) or { type = kind(tbl), value = shortString(tbl, 120) }
+        end
+        if depth > 2 then
+            return { type = "table", count = tableCount(tbl), truncated = "summary-depth" }
+        end
+
+        local fields = {}
+        local added = 0
+        for key, item in _pairs(tbl) do
+            local keyText = safeToString(key)
+            local scalar = primitiveSummary(item)
+            local roleMatch = scalar and scalar.value and roleFromText(scalar.value)
+            if importantKey(keyText) or roleMatch then
+                if scalar then
+                    fields[keyText] = scalar
+                else
+                    fields[keyText] = compactImportantFields(item, depth + 1)
+                end
+                added = added + 1
+                if added >= 30 then
+                    break
+                end
+            elseif _type(item) == "table" and depth < 1 then
+                local nested = compactImportantFields(item, depth + 1)
+                if nested and nested.fields and tableCount(nested.fields) > 0 then
+                    fields[keyText] = nested
+                    added = added + 1
+                end
+            end
+        end
+
+        return { type = "table", count = tableCount(tbl), keys = tableKeys(tbl, 35), fields = fields }
+    end
+
+    local function findRoleInTable(tbl, depth)
+        depth = depth or 0
+        if _type(tbl) ~= "table" or depth > 3 then
+            return nil
+        end
+        for key, item in _pairs(tbl) do
+            local keyText = safeToString(key)
+            if _type(item) == "string" then
+                local role = roleFromText(item)
+                if role and (importantKey(keyText) or roleFromText(keyText) or keyText == "Role") then
+                    return role
+                end
+            elseif _type(item) == "table" then
+                local role = findRoleInTable(item, depth + 1)
+                if role then
+                    return role
+                end
+            end
+        end
+        return nil
+    end
+
+    local function summarizePlayerData(data)
+        local summary = {
+            playerCount = tableCount(data),
+            players = {},
+            murderer = nil,
+            sheriff = nil,
+            hero = nil,
+            localPlayer = nil,
+        }
+        if _type(data) ~= "table" then
+            summary.raw = primitiveSummary(data) or serialize(data)
+            return summary
+        end
+
+        local localName = LocalPlayer and safeToString(prop(LocalPlayer, "Name") or "") or ""
+        for playerName, playerData in _pairs(data) do
+            local nameText = safeToString(playerName)
+            local role = findRoleInTable(playerData)
+            local entry = {
+                name = nameText,
+                role = role or "unknown",
+                data = compactImportantFields(playerData),
+            }
+            if #summary.players < 30 then
+                summary.players[#summary.players + 1] = entry
+            end
+            if role == "Murderer" then
+                summary.murderer = nameText
+            elseif role == "Sheriff" then
+                summary.sheriff = nameText
+            elseif role == "Hero" then
+                summary.hero = nameText
+            end
+            if localName ~= "" and nameText == localName then
+                summary.localPlayer = entry
+            end
+        end
+        return summary
+    end
+
     local function inc(eventName)
         eventName = eventName or "unknown"
         Scan.counts[eventName] = (Scan.counts[eventName] or 0) + 1
@@ -646,20 +828,6 @@ local function main()
         return fullName(instance)
     end
 
-    local function isPlayerOwnedPath(path)
-        local lower = stringLower(path)
-        if stringFind(lower, "players.") then
-            return true
-        end
-        if LocalPlayer then
-            local name = stringLower(safeToString(prop(LocalPlayer, "Name") or ""))
-            if name ~= "" and stringFind(lower, "workspace." .. name .. ".") then
-                return true
-            end
-        end
-        return false
-    end
-
     local function inWorkspace(instance)
         if instance == Workspace then
             return true
@@ -668,6 +836,58 @@ local function main()
             return Workspace and instance:IsDescendantOf(Workspace)
         end)
         return ok and result == true
+    end
+
+    local function parentOf(instance)
+        return prop(instance, "Parent")
+    end
+
+    local function findChild(root, name, recursive)
+        if not root then
+            return nil
+        end
+        local result = nil
+        safeCall(function()
+            result = root:FindFirstChild(name, recursive == true)
+        end)
+        return result
+    end
+
+    local function ancestorNamed(instance, wantedName)
+        local wanted = stringLower(wantedName or "")
+        local current = instance
+        local limit = 0
+        while current and limit < 40 do
+            local currentName = stringLower(prop(current, "Name") or "")
+            if currentName == wanted then
+                return current
+            end
+            if current == Workspace then
+                return nil
+            end
+            current = parentOf(current)
+            limit = limit + 1
+        end
+        return nil
+    end
+
+    local function directChildInfos(root, limit)
+        local children = {}
+        limit = limit or 12
+        safeCall(function()
+            children = root:GetChildren()
+        end)
+        local result = {}
+        for _, child in _ipairs(children) do
+            if #result >= limit then
+                break
+            end
+            result[#result + 1] = {
+                class = safeToString(prop(child, "ClassName") or "Unknown"),
+                name = safeToString(prop(child, "Name") or "Unknown"),
+            }
+        end
+        return result
     end
 
     local function objectPosition(instance)
@@ -740,6 +960,96 @@ local function main()
         end
     end
 
+    local function rawArg(rawArgs, index)
+        if _type(rawArgs) ~= "table" then
+            return nil
+        end
+        return rawArgs[index]
+    end
+
+    local function logSpecialInbound(remote, packedArgs, rawArgs)
+        local path = pathText(remote)
+
+        if stringFind(path, "PlayerDataChanged") then
+            local playerSummary = summarizePlayerData(rawArg(rawArgs, 1))
+            Scan.summary.lastRoleSignal = path
+            Scan.summary.lastRoles = {
+                murderer = playerSummary.murderer,
+                sheriff = playerSummary.sheriff,
+                hero = playerSummary.hero,
+                localPlayer = playerSummary.localPlayer,
+            }
+            logRecord({
+                event = "player_data_summary",
+                source = instanceInfo(remote),
+                summary = playerSummary,
+            })
+            return
+        end
+
+        if stringFind(path, "GiveWeapon") then
+            local weapon = rawArg(rawArgs, 1)
+            local weaponText = safeToString(weapon or "")
+            local role = weaponRole(weaponText)
+            Scan.summary.lastLocalWeapon = weaponText
+            if role then
+                Scan.summary.lastLocalRole = role
+            end
+            Scan.summary.lastRoundState = "started_or_role_assignment"
+            logRecord({
+                event = "give_weapon_signal",
+                source = instanceInfo(remote),
+                weapon = primitiveSummary(weapon),
+                inferredLocalRole = role or "unknown",
+                args = packedArgs,
+            })
+            return
+        end
+
+        if stringFind(path, "CoinCollected") then
+            local coinType = rawArg(rawArgs, 1)
+            local currentCount = rawArg(rawArgs, 2)
+            local coinLimit = rawArg(rawArgs, 3)
+            Scan.summary.lastCoinCount = currentCount or "unknown"
+            Scan.summary.lastCoinLimit = coinLimit or "unknown"
+            logRecord({
+                event = "coin_collected_signal",
+                source = instanceInfo(remote),
+                coinType = primitiveSummary(coinType),
+                currentCount = primitiveSummary(currentCount),
+                coinLimit = primitiveSummary(coinLimit),
+                metadata = serialize(rawArg(rawArgs, 4)),
+            })
+            return
+        end
+
+        if stringFind(path, "VictoryScreen") then
+            Scan.summary.lastRoundState = "ended_or_transition"
+            logRecord({
+                event = "round_end_summary",
+                source = instanceInfo(remote),
+                didLocalWin = primitiveSummary(rawArg(rawArgs, 1)),
+                winningRole = primitiveSummary(rawArg(rawArgs, 2)),
+                reason = primitiveSummary(rawArg(rawArgs, 3)),
+                creditedPlayer = primitiveSummary(rawArg(rawArgs, 4)),
+                roundNumber = primitiveSummary(rawArg(rawArgs, 5)),
+                args = packedArgs,
+            })
+            return
+        end
+
+        if stringFind(path, "RoundEndFade") or stringFind(path, "Clear1v1") or stringFind(path, "Cancelled1v1") then
+            Scan.summary.lastRoundState = "ended_or_transition"
+            logRecord({
+                event = "round_transition_signal",
+                state = Scan.summary.lastRoundState,
+                source = instanceInfo(remote),
+                args = packedArgs,
+            })
+            return
+        end
+    end
+
     local function attachInbound(remote)
         if Scan.inboundRemotes[remote] or not isA(remote, "RemoteEvent") then
             return
@@ -748,9 +1058,12 @@ local function main()
         local signal = prop(remote, "OnClientEvent")
         Scan:Connect(signal, function(...)
             protected("remote_inbound", function(...)
+                local rawArgs = { ... }
+                rawArgs.n = _select("#", ...)
                 local packed = packArgs(...)
                 logRecord({ event = "remote_inbound", method = "OnClientEvent", remote = instanceInfo(remote), tags = tagsForPath(pathText(remote)), args = packed })
                 inferRoundFromRemote(remote, packed)
+                logSpecialInbound(remote, packed, rawArgs)
             end, ...)
         end)
     end
@@ -843,33 +1156,104 @@ local function main()
         end
     end
 
-    local function classifyWorldObject(instance)
+    local function positionFromDescendant(root, childName)
+        local child = findChild(root, childName, true)
+        if child then
+            return objectPosition(child)
+        end
+        return nil
+    end
+
+    local function hasDescendantNamed(root, childName)
+        return findChild(root, childName, true) ~= nil
+    end
+
+    local function mapNameFor(instance)
+        local current = instance
+        local previous = nil
+        local limit = 0
+        while current and current ~= Workspace and limit < 40 do
+            previous = current
+            current = parentOf(current)
+            limit = limit + 1
+        end
+        if previous and previous ~= instance then
+            return safeToString(prop(previous, "Name") or "")
+        end
+        local parent = parentOf(instance)
+        return parent and safeToString(prop(parent, "Name") or "") or "unknown"
+    end
+
+    local function canonicalCoinRoot(instance)
         if not inWorkspace(instance) then
-            return
+            return nil, nil
+        end
+
+        local root = ancestorNamed(instance, "Coin_Server")
+        if root then
+            return root, "coin_server_ancestor"
         end
 
         local path = pathText(instance)
         local lowerPath = stringLower(path)
         local name = stringLower(prop(instance, "Name") or "")
-        local isCoin = containsAny(lowerPath, coinTerms)
-        local isGunDrop = containsAny(lowerPath, gunDropTerms)
-        local isLooseGunCandidate = name == "gun" and stringFind(lowerPath, "workspace.") and not isPlayerOwnedPath(path)
+        if stringFind(lowerPath, "coincontainer") then
+            return nil, nil
+        end
+        if containsAny(lowerPath, coinTerms) and (isA(instance, "BasePart") or isA(instance, "Model")) then
+            if name ~= "decal" and name ~= "weldconstraint" and name ~= "touchinterest" then
+                return instance, "coin_object_fallback"
+            end
+        end
+        return nil, nil
+    end
 
-        if isCoin and not Scan.coinObjects[instance] then
-            Scan.coinObjects[instance] = true
-            Scan.summary.coinsSeen = Scan.summary.coinsSeen + 1
-            logRecord({ event = "coin_object_discovered", object = instanceInfo(instance), position = objectPosition(instance), attributes = attributesInfo(instance), reason = "name_or_path_match" })
+    local function canonicalGunDropRoot(instance)
+        if not inWorkspace(instance) then
+            return nil, nil
+        end
+        local root = ancestorNamed(instance, "GunDrop")
+        if root then
+            return root, "gundrop_ancestor"
+        end
+        return nil, nil
+    end
+
+    local function classifyWorldObject(instance)
+        if not inWorkspace(instance) then
+            return
         end
 
-        if (isGunDrop or isLooseGunCandidate) and not Scan.gunDropObjects[instance] then
-            Scan.gunDropObjects[instance] = true
+        local coinRoot, coinReason = canonicalCoinRoot(instance)
+        if coinRoot and not Scan.coinObjects[coinRoot] then
+            Scan.coinObjects[coinRoot] = true
+            Scan.coinRemovedObjects[coinRoot] = nil
+            Scan.summary.coinsSeen = Scan.summary.coinsSeen + 1
+            logRecord({
+                event = "coin_object_discovered",
+                object = instanceInfo(coinRoot),
+                map = mapNameFor(coinRoot),
+                position = positionFromDescendant(coinRoot, "MainCoin") or objectPosition(coinRoot),
+                hasTouchInterest = hasDescendantNamed(coinRoot, "TouchInterest"),
+                attributes = attributesInfo(coinRoot),
+                reason = coinReason,
+            })
+        end
+
+        local gunDropRoot, gunDropReason = canonicalGunDropRoot(instance)
+        if gunDropRoot and not Scan.gunDropObjects[gunDropRoot] then
+            Scan.gunDropObjects[gunDropRoot] = true
+            Scan.gunDropRemovedObjects[gunDropRoot] = nil
             Scan.summary.gunDropsSeen = Scan.summary.gunDropsSeen + 1
             logRecord({
-                event = isGunDrop and "gun_drop_object_discovered" or "gun_drop_candidate_discovered",
-                object = instanceInfo(instance),
-                position = objectPosition(instance),
-                attributes = attributesInfo(instance),
-                reason = isGunDrop and "drop_name_or_path_match" or "loose_workspace_gun_candidate",
+                event = "gun_drop_object_discovered",
+                object = instanceInfo(gunDropRoot),
+                map = mapNameFor(gunDropRoot),
+                position = objectPosition(gunDropRoot),
+                hasTouchInterest = hasDescendantNamed(gunDropRoot, "TouchInterest"),
+                children = directChildInfos(gunDropRoot, 12),
+                attributes = attributesInfo(gunDropRoot),
+                reason = gunDropReason,
             })
         end
     end
@@ -949,11 +1333,15 @@ local function main()
         local removingSignal = prop(root, "DescendantRemoving")
         Scan:Connect(removingSignal, function(instance)
             protected("descendant_removing", function()
-                if Scan.coinObjects[instance] then
-                    logRecord({ event = "coin_object_removed", object = instanceInfo(instance) })
+                local coinRoot = canonicalCoinRoot(instance)
+                if coinRoot and Scan.coinObjects[coinRoot] and not Scan.coinRemovedObjects[coinRoot] then
+                    Scan.coinRemovedObjects[coinRoot] = true
+                    logRecord({ event = "coin_object_removed", object = instanceInfo(coinRoot), map = mapNameFor(coinRoot), position = positionFromDescendant(coinRoot, "MainCoin") or objectPosition(coinRoot) })
                 end
-                if Scan.gunDropObjects[instance] then
-                    logRecord({ event = "gun_drop_object_removed", object = instanceInfo(instance) })
+                local gunDropRoot = canonicalGunDropRoot(instance)
+                if gunDropRoot and Scan.gunDropObjects[gunDropRoot] and not Scan.gunDropRemovedObjects[gunDropRoot] then
+                    Scan.gunDropRemovedObjects[gunDropRoot] = true
+                    logRecord({ event = "gun_drop_object_removed", object = instanceInfo(gunDropRoot), map = mapNameFor(gunDropRoot), position = objectPosition(gunDropRoot) })
                 end
             end)
         end)
@@ -989,6 +1377,9 @@ local function main()
             .. "\nvalueStatesSeen: " .. safeToString(Scan.summary.valueStatesSeen)
             .. "\nlastRoundState: " .. safeToString(Scan.summary.lastRoundState)
             .. "\nlastRoleSignal: " .. safeToString(Scan.summary.lastRoleSignal)
+            .. "\nlastLocalRole: " .. safeToString(Scan.summary.lastLocalRole)
+            .. "\nlastLocalWeapon: " .. safeToString(Scan.summary.lastLocalWeapon)
+            .. "\nlastCoinCount: " .. safeToString(Scan.summary.lastCoinCount) .. "/" .. safeToString(Scan.summary.lastCoinLimit)
             .. "\n"
         writeText(statusPath, text)
         if folderAvailable then
@@ -1037,10 +1428,11 @@ local function main()
             remoteFiring = false,
         },
         focus = {
-            "coins",
-            "gun_drops",
+            "coin_server_deduped",
+            "gundrop_deduped",
             "round_state",
-            "roles",
+            "player_data_role_summary",
+            "give_weapon_local_role",
             "remote_names",
             "inbound_events",
         },
