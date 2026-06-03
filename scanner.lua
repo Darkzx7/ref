@@ -1,5 +1,5 @@
 -- ref_universal | Murder Mystery tester
--- v2026-06-03-v10-r9
+-- v2026-06-03-v13-coin-touch-pass
 
 local Players          = game:GetService("Players")
 local TweenService     = game:GetService("TweenService")
@@ -734,10 +734,14 @@ end
 -- ─── COIN COLLECT ──────────────────────────────────────────────────────────────
 
 local function getCoinPart(obj)
-    if not obj or obj.Name ~= "Coin_Server" then return nil end
+    if not obj then return nil end
+    local nm = tostring(obj.Name or "")
+    if nm ~= "Coin_Server" and not nm:find("Coin_Server", 1, true) then return nil end
     if obj:IsA("BasePart") then return obj end
-    if obj:IsA("Model") then
-        return obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart", true)
+    if obj:IsA("Model") or obj:IsA("Folder") then
+        local pp = nil
+        _pcall(function() pp = obj.PrimaryPart end)
+        return pp or obj:FindFirstChildWhichIsA("BasePart", true)
     end
     return nil
 end
@@ -751,10 +755,12 @@ local function getTopWorkspaceChild(obj)
 end
 
 local function isCoinCollectPhase()
+    -- Coin collect must be blocked in lobby/ending, but it cannot depend only on role data.
+    -- If the script is executed after the round already started, RoleSelect/PlayerDataChanged may be missed,
+    -- so requiring localRole here makes the collector never move.
     if State.currentPhase ~= "Round" then return false end
     if State.localDead == true then return false end
-    local role = State.localRole or State.roles[LocalPlayer.Name]
-    if not role or role == "?" then return false end
+    if not isLocalAlive() then return false end
     return true
 end
 
@@ -856,8 +862,9 @@ end
 local function coinSpeedStuds(speed)
     speed = tonumber(speed) or 4
     speed = math.clamp(speed, 1, 6)
-    local map = { 140, 205, 285, 380, 500, 650 }
-    return map[speed] or 380
+    -- Real travel speed. V11 was too conservative once every coin also performed a sweep.
+    local map = { 360, 520, 720, 920, 1150, 1450 }
+    return map[speed] or 620
 end
 
 local function getCoinLieForward()
@@ -957,7 +964,6 @@ local function fireTouchCoin(target)
         if part:IsA("BasePart") then
             _pcall(function()
                 touchFn(part, target, 0)
-                _wait(0.008)
                 touchFn(part, target, 1)
                 fired = true
             end)
@@ -966,35 +972,118 @@ local function fireTouchCoin(target)
     return fired
 end
 
+local function getCharacterTouchParts()
+    local parts = {}
+    local char = getChar()
+    if not char then return parts end
+    local preferred = {"HumanoidRootPart", "UpperTorso", "LowerTorso", "Torso", "Head"}
+    local seen = {}
+    for _, name in ipairs(preferred) do
+        local part = char:FindFirstChild(name)
+        if part and part:IsA("BasePart") and not seen[part] then
+            seen[part] = true
+            parts[#parts + 1] = part
+        end
+    end
+    for _, obj in ipairs(char:GetDescendants()) do
+        if obj:IsA("BasePart") and not seen[obj] then
+            seen[obj] = true
+            parts[#parts + 1] = obj
+            if #parts >= 12 then break end
+        end
+    end
+    return parts
+end
+
+local function fireTouchCoinWithParts(target)
+    if not target or not target.Parent then return false end
+    local touchFn = nil
+    _pcall(function()
+        if type(firetouchinterest) == "function" then
+            touchFn = firetouchinterest
+        end
+    end)
+    if not touchFn then return false end
+
+    local fired = false
+    for _, part in ipairs(getCharacterTouchParts()) do
+        if part and part.Parent then
+            _pcall(function()
+                touchFn(part, target, 0)
+                touchFn(part, target, 1)
+                fired = true
+            end)
+        end
+    end
+    return fired
+end
+
+local function physicalCoinContactPulse(target, cf)
+    local root = getRoot()
+    if not root or not target or not target.Parent or not isCoinCollectPhase() then return end
+    State.coinStatus = "Physical coin contact"
+    _pcall(function()
+        root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+        root.CFrame = cf
+        root.Anchored = false
+    end)
+    fireTouchCoinWithParts(target)
+    _pcall(function() RunService.Heartbeat:Wait() end)
+    fireTouchCoinWithParts(target)
+    _pcall(function() RunService.Heartbeat:Wait() end)
+    _pcall(function()
+        root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+        root.Anchored = true
+        root.CFrame = cf
+    end)
+    setCoinCFrame(cf)
+end
+
 local function touchCoinSweep(root, target)
     if not root or not target or not target.Parent then return end
-    State.coinStatus = "Sweeping coin"
+    State.coinStatus = "Passing through coin"
     fireTouchCoin(target)
+    fireTouchCoinWithParts(target)
 
-    local offsets = {
-        Vector3.new(0, -3.20, 0),
-        Vector3.new(0, -2.55, 0),
-        Vector3.new(0, -1.95, 0),
-        Vector3.new(0, -1.35, 0),
-        Vector3.new(0, -0.75, 0),
-        Vector3.new(0, -0.20, 0),
-        Vector3.new(0,  0.35, 0),
-        Vector3.new(0.55, -0.65, 0),
-        Vector3.new(-0.55, -0.65, 0),
-        Vector3.new(0, -0.65, 0.55),
-        Vector3.new(0, -0.65, -0.55),
-        Vector3.new(0, -1.15, 0),
+    local pos = target.Position
+    local forward = getCoinLieForward()
+    local side = forward:Cross(Vector3.new(0, 1, 0))
+    if side.Magnitude < 0.05 then side = Vector3.new(1, 0, 0) end
+    side = side.Unit
+
+    local path = {
+        pos + Vector3.new(0, -2.60, 0),
+        pos + Vector3.new(0, -1.75, 0),
+        pos + Vector3.new(0, -0.95, 0),
+        pos + Vector3.new(0, -0.25, 0),
+        pos + Vector3.new(0,  0.35, 0),
+        pos + Vector3.new(0,  0.95, 0),
+        pos + Vector3.new(0,  1.55, 0),
+        pos + side * 0.85 + Vector3.new(0, 0.20, 0),
+        pos - side * 0.85 + Vector3.new(0, 0.20, 0),
+        pos + forward * 0.85 + Vector3.new(0, 0.20, 0),
+        pos - forward * 0.85 + Vector3.new(0, 0.20, 0),
+        pos + Vector3.new(0,  0.45, 0),
     }
 
-    for _, off in ipairs(offsets) do
-        if not Alive or not State.coinCollect or not target.Parent then break end
-        setCoinCFrame(lyingCoinCFrame(target.Position + off))
+    for i, p in ipairs(path) do
+        if not Alive or not State.coinCollect or not target.Parent or not isCoinCollectPhase() then break end
+        local cf = lyingCoinCFrame(p)
+        setCoinCFrame(cf)
         fireTouchCoin(target)
-        _wait(0.003)
+        fireTouchCoinWithParts(target)
+        if i == 5 or i == 6 or i == 7 then
+            physicalCoinContactPulse(target, cf)
+        else
+            _pcall(function() RunService.Heartbeat:Wait() end)
+        end
     end
 
     fireTouchCoin(target)
-    State._coinIgnoreUntil[target] = testerTime() + 0.035
+    fireTouchCoinWithParts(target)
+    State._coinIgnoreUntil[target] = testerTime() + 0.004
 end
 
 local function getNearestCoin(allowFar, ignorePhase)
@@ -1229,7 +1318,7 @@ local function moveCoinRootDirect(goalPos, moveSpeed, maxTime)
     if not root or typeof(goalPos) ~= "Vector3" then return false end
     local startPos = root.Position
     local dist = (goalPos - startPos).Magnitude
-    local duration = math.clamp(dist / math.max(moveSpeed, 1), 0.018, maxTime or 1.15)
+    local duration = math.clamp(dist / math.max(moveSpeed, 1), 0.008, maxTime or 0.58)
     local started = testerTime()
 
     while Alive and State.coinCollect and isCoinCollectPhase() do
@@ -1237,7 +1326,9 @@ local function moveCoinRootDirect(goalPos, moveSpeed, maxTime)
         if not r then return false end
         local elapsed = testerTime() - started
         local a = duration <= 0 and 1 or math.clamp(elapsed / duration, 0, 1)
-        local pos = startPos:Lerp(goalPos, a)
+        -- Smoothstep keeps the visual smooth but still direct; no pathing/route calculation.
+        local eased = a * a * (3 - 2 * a)
+        local pos = startPos:Lerp(goalPos, eased)
         setCoinCFrame(lyingCoinCFrame(pos))
         if a >= 1 then break end
         _pcall(function() RunService.Heartbeat:Wait() end)
@@ -1269,14 +1360,14 @@ local function floatToCoin(target, speed)
     beginCoinPhysicsLock()
     State._coinLastTarget = target
 
-    local under = target.Position + Vector3.new(0, -2.85, 0)
+    local approach = target.Position + Vector3.new(0, -1.85, 0)
     State.coinStatus = "Moving to coin"
-    moveCoinRootDirect(under, moveSpeed, 1.10)
+    moveCoinRootDirect(approach, moveSpeed, 0.42)
 
     if not Alive or not State.coinCollect or not target.Parent or not isCoinCollectPhase() then return end
 
-    local closer = target.Position + Vector3.new(0, -1.45, 0)
-    moveCoinRootDirect(closer, moveSpeed * 1.35, 0.32)
+    local centerPass = target.Position + Vector3.new(0, 0.15, 0)
+    moveCoinRootDirect(centerPass, moveSpeed * 1.85, 0.10)
 
     if not Alive or not State.coinCollect or not target.Parent or not isCoinCollectPhase() then return end
     touchCoinSweep(getRoot(), target)
@@ -1290,11 +1381,28 @@ local function hasCoinPhysicsActive()
         or State._coinSavedRootAnchored ~= nil
 end
 
+local function detectRoundFromNearbyCoins()
+    if State.currentPhase ~= "Unknown" and State.currentPhase ~= "Role Select" then return false end
+    if State.localDead == true or not isLocalAlive() then return false end
+    local coin, dist = getNearestCoin(true, true)
+    if coin and dist and dist < 380 then
+        State.currentPhase = "Round"
+        State.lastRoundSignal = "CoinFallback"
+        State.coinStatus = "Round detected by coins"
+        return true
+    end
+    return false
+end
+
 local function startCoinCollect()
     if State.collecting then return end
     State.collecting = true
     _spawn(function()
         while Alive and State.coinCollect do
+            if not isCoinCollectPhase() then
+                detectRoundFromNearbyCoins()
+            end
+
             if not isCoinCollectPhase() then
                 if hasCoinPhysicsActive() then
                     restoreCoinPhysics()
@@ -1310,11 +1418,11 @@ local function startCoinCollect()
                 else
                     State.coinStatus = "Waiting for round"
                 end
-                _wait(0.10)
+                _wait(0.05)
             else
                 if State._coinStartedInLobby and not State._coinDidInitialStage then
                     if prepareCoinStagePlatform(true) then
-                        _wait(0.18)
+                        _wait(0.45)
                     end
                     State._coinDidInitialStage = true
                 end
@@ -1339,7 +1447,7 @@ local function startCoinCollect()
                     floatToCoin(coin, State.coinSpeed)
                 else
                     State.coinStatus = "No coins"
-                    _wait(0.015)
+                    _wait(0.002)
                 end
             end
         end
