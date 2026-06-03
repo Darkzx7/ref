@@ -1,5 +1,5 @@
 -- ref_universal | Murder Mystery tester
--- v2026-06-03-v19-coin-lower-route-close-boost-no-lobby-tp
+-- v2026-06-03-v20-coin-lower-sweep
 
 local Players          = game:GetService("Players")
 local TweenService     = game:GetService("TweenService")
@@ -1123,7 +1123,7 @@ end
 
 local function touchCoinSweep(root, target)
     if not root or not target or not target.Parent then return end
-    State.coinStatus = State._coinCloseBoost and "Close coin boost" or "Collecting from deeper underside"
+    State.coinStatus = State._coinCloseBoost and "Close coin boost" or "Collecting low underside"
     fireTouchCoin(target)
     fireTouchCoinWithParts(target)
 
@@ -1138,20 +1138,21 @@ local function touchCoinSweep(root, target)
     if side.Magnitude < 0.05 then side = Vector3.new(1, 0, 0) end
     side = side.Unit
 
-    -- Real touch sweep: stay slightly under the map/coin path, then rise through the coin volume.
-    -- This keeps the character below the coin while still crossing enough of the hitbox to trigger TouchInterest.
+    -- Low touch sweep: stay under the coin, cross the lower/center hitbox, and avoid lifting too high.
+    -- The highest point is just above the coin center instead of over the top.
+    local lowPeak = math.min(sizeY * 0.22, 0.34)
     local path = {
         pos + Vector3.new(0, -under, 0),
-        pos + Vector3.new(0, -under * 0.72, 0),
-        pos + Vector3.new(0, -under * 0.42, 0),
-        pos + Vector3.new(0, -0.42, 0),
-        pos + Vector3.new(0,  0.05, 0),
-        pos + Vector3.new(0,  math.min(sizeY * 0.65, 1.05), 0),
-        pos + forward * 0.55 + Vector3.new(0, 0.18, 0),
-        pos - forward * 0.55 + Vector3.new(0, 0.18, 0),
-        pos + side * 0.50 + Vector3.new(0, 0.12, 0),
-        pos - side * 0.50 + Vector3.new(0, 0.12, 0),
-        pos + Vector3.new(0, -0.18, 0),
+        pos + Vector3.new(0, -under * 0.70, 0),
+        pos + Vector3.new(0, -under * 0.38, 0),
+        pos + Vector3.new(0, -0.72, 0),
+        pos + Vector3.new(0, -0.28, 0),
+        pos + Vector3.new(0,  lowPeak, 0),
+        pos + forward * 0.46 + Vector3.new(0, 0.08, 0),
+        pos - forward * 0.46 + Vector3.new(0, 0.08, 0),
+        pos + side * 0.42 + Vector3.new(0, 0.06, 0),
+        pos - side * 0.42 + Vector3.new(0, 0.06, 0),
+        pos + Vector3.new(0, -0.34, 0),
     }
 
     for i, p in ipairs(path) do
@@ -1491,7 +1492,7 @@ local function floatToCoin(target, speed)
     local firstFactor = State._coinFirstApproach and 0.52 or 1
     local approachSpeed = math.max(45, moveSpeed * firstFactor)
     local approachMax = State._coinFirstApproach and 1.55 or 0.95
-    State.coinStatus = State._coinFirstApproach and "Smooth first coin entry" or (closeBoost and "Close coin boost" or "Moving deeper under nearest coin")
+    State.coinStatus = State._coinFirstApproach and "Smooth first coin entry" or (closeBoost and "Close coin boost" or "Moving low under nearest coin")
     moveCoinRootDirect(approach, approachSpeed, math.clamp(startDist / math.max(approachSpeed, 1) + 0.16, 0.20, approachMax))
     State._coinFirstApproach = false
 
