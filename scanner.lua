@@ -1,5 +1,5 @@
 -- ref_universal | Murder Mystery tester
--- v2026-06-03-v18-coin-under-gundrop-role-guard
+-- v2026-06-03-v19-coin-lower-route-close-boost-no-lobby-tp
 
 local Players          = game:GetService("Players")
 local TweenService     = game:GetService("TweenService")
@@ -168,7 +168,9 @@ local State = {
     _coinDidInitialStage = false,
     _coinHadPhysicalMove = false,
     _coinFirstApproach  = false,
-    _coinUnderOffset    = 2.85,
+    _coinUnderOffset    = 3.55,
+    _coinApproachExtra   = 1.35,
+    _coinCloseBoost      = false,
     _returningLobby    = false,
     lastEndReason      = nil,
     lastWinnerRole     = nil,
@@ -1121,15 +1123,15 @@ end
 
 local function touchCoinSweep(root, target)
     if not root or not target or not target.Parent then return end
-    State.coinStatus = "Collecting from lower underside"
+    State.coinStatus = State._coinCloseBoost and "Close coin boost" or "Collecting from deeper underside"
     fireTouchCoin(target)
     fireTouchCoinWithParts(target)
 
     local pos = target.Position
     local sizeY = 1.5
     _pcall(function() sizeY = math.max(target.Size.Y, 1.5) end)
-    local under = math.max(State._coinUnderOffset or 2.85, sizeY * 1.15)
-    local passSpeed = coinSpeedStuds(State.coinSpeed) * 1.45
+    local under = math.max(State._coinUnderOffset or 3.55, sizeY * 1.30)
+    local passSpeed = coinSpeedStuds(State.coinSpeed) * (State._coinCloseBoost and 1.58 or 1.45)
 
     local forward = getCoinLieForward()
     local side = forward:Cross(Vector3.new(0, 1, 0))
@@ -1457,18 +1459,39 @@ local function floatToCoin(target, speed)
         resetCoinLieForward()
     end
     beginCoinPhysicsLock()
+    local previousTarget = State._coinLastTarget
+    local closeBoost = false
+    if previousTarget and previousTarget ~= target and previousTarget.Parent then
+        local okClose, closeDist = _pcall(function()
+            return (previousTarget.Position - target.Position).Magnitude
+        end)
+        if okClose and closeDist and closeDist <= 15 then
+            closeBoost = true
+        end
+    end
+    if startDist <= 12 and not State._coinFirstApproach then
+        closeBoost = true
+    end
+    if State._coinFirstApproach then
+        closeBoost = false
+    end
+    State._coinCloseBoost = closeBoost
+    if closeBoost then
+        moveSpeed = moveSpeed * 1.14
+    end
     State._coinLastTarget = target
 
     local sizeY = 1.5
     _pcall(function() sizeY = math.max(target.Size.Y, 1.5) end)
-    local under = math.max(State._coinUnderOffset or 2.85, sizeY * 1.15)
-    local approach = target.Position + Vector3.new(0, -under, 0)
+    local under = math.max(State._coinUnderOffset or 3.55, sizeY * 1.30)
+    local approachUnder = under + (State._coinApproachExtra or 1.35)
+    local approach = target.Position + Vector3.new(0, -approachUnder, 0)
 
     -- First coin after enabling should enter smoothly, not snap across the map.
     local firstFactor = State._coinFirstApproach and 0.52 or 1
     local approachSpeed = math.max(45, moveSpeed * firstFactor)
     local approachMax = State._coinFirstApproach and 1.55 or 0.95
-    State.coinStatus = State._coinFirstApproach and "Smooth first coin entry" or "Moving lower under nearest coin"
+    State.coinStatus = State._coinFirstApproach and "Smooth first coin entry" or (closeBoost and "Close coin boost" or "Moving deeper under nearest coin")
     moveCoinRootDirect(approach, approachSpeed, math.clamp(startDist / math.max(approachSpeed, 1) + 0.16, 0.20, approachMax))
     State._coinFirstApproach = false
 
@@ -1498,6 +1521,7 @@ local function suspendCoinMovement(statusText, keepStage)
     end
     State._coinDesiredCF = nil
     State._coinLieForward = nil
+    State._coinCloseBoost = false
     if statusText then
         State.coinStatus = statusText
     end
@@ -1605,6 +1629,7 @@ local function stopCoinCollect()
     State._coinStartedInLobby = false
     State._coinDidInitialStage = false
     State._coinFirstApproach = false
+    State._coinCloseBoost = false
     safeDisconnect(State._noclipConn)
     State._noclipConn = nil
     restoreCoinPhysics()
@@ -1627,6 +1652,31 @@ local function primeCoinEntry(reason)
     State._coinEntryPrime = testerTime() + 4
     State.coinStatus = "Entry armed"
     if not State.collecting then startCoinCollect() end
+end
+
+local function suspendCoinMovementOnRoundEnd()
+    local hadPhysicalMove = State._coinHadPhysicalMove == true
+        or hasCoinPhysicsActive()
+        or State._coinStagePlatform ~= nil
+    local returnCF = hadPhysicalMove and findCoinReturnCFrame() or nil
+    suspendCoinMovement("Round ended - grounded wait", false)
+    State._coinEntryPrime = 0
+    State._coinIgnoreUntil = {}
+    State._coinDidInitialStage = false
+    State._coinStartedInLobby = true
+    State._coinFirstApproach = true
+    State._coinCloseBoost = false
+
+    local root = getRoot()
+    if hadPhysicalMove and root and returnCF then
+        _pcall(function()
+            root.Anchored = false
+            root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+            root.CFrame = returnCF
+        end)
+    end
+    State._coinHadPhysicalMove = false
 end
 
 local function scoreLobbyCandidate(part)
@@ -2111,12 +2161,7 @@ local function listenRoundSignals()
             end
         end
         if hadCoinCollect then
-            suspendCoinMovement("Round ended - armed", false)
-            State._coinEntryPrime = 0
-            State._coinIgnoreUntil = {}
-            State._coinDidInitialStage = false
-            State._coinStartedInLobby = true
-            if hadCoinPhysical then returnToLobby() end
+            suspendCoinMovementOnRoundEnd()
         end
     end)
 
@@ -2131,12 +2176,7 @@ local function listenRoundSignals()
         resetAllRoles()
         State.localDead = true
         if hadCoinCollect then
-            suspendCoinMovement("Round ended - armed", false)
-            State._coinEntryPrime = 0
-            State._coinIgnoreUntil = {}
-            State._coinDidInitialStage = false
-            State._coinStartedInLobby = true
-            if hadCoinPhysical then returnToLobby() end
+            suspendCoinMovementOnRoundEnd()
         end
     end
 
@@ -3031,7 +3071,7 @@ State._coinToggle = W:Toggle("Coin Collect", false, function(v)
         State._coinDidInitialStage = false
         State._coinHadPhysicalMove = false
         State._coinFirstApproach = true
-        State._coinUnderOffset = 2.85
+        State._coinUnderOffset = 3.55
         rememberSafeCFrame(true)
         startCoinCollect()
     else
