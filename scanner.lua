@@ -30,6 +30,17 @@ local function _pcall(fn, ...)
     return pcall(fn, ...)
 end
 
+local SESSION_KEY = "__REF_UNIVERSAL_MM_TESTER_CLEANUP"
+local previousCleanup = nil
+_pcall(function()
+    if type(getgenv) == "function" then
+        previousCleanup = getgenv()[SESSION_KEY]
+    end
+end)
+if type(previousCleanup) == "function" then
+    _pcall(previousCleanup)
+end
+
 -- ─── helpers ───────────────────────────────────────────────────────────────────
 
 local function getChar()        return LocalPlayer.Character end
@@ -94,32 +105,143 @@ end
 -- ─── state ─────────────────────────────────────────────────────────────────────
 
 local State = {
-    -- tester
-    selectedPart      = "UpperTorso",
-    partIndex         = 1,
-    predictionIndex   = 3,
-    jumpPred          = true,
-    pingPred          = true,
-    cooldownIndex     = 2,
-    targetIndex       = 0,
+    selectedPart       = "UpperTorso",
+    partIndex          = 1,
+    predictionIndex    = 3,
+    jumpPred           = true,
+    pingPred           = true,
+    cooldownIndex      = 2,
+    targetIndex        = 0,
     selectedPlayerName = nil,
-    lastAction        = 0,
-    manualSilent      = false,
-    -- coin
-    coinCollect       = false,
-    coinSpeed         = 50,
-    collecting        = false,
-    -- esp
-    espOn             = false,
-    roles             = {},
-    espObjects        = {},
-    _espAdded         = nil,
-    _espRemoving      = nil,
-    -- gundrop
-    gunDropOn         = false,
-    _gunDropWatch     = false,
-    _gunDropConn      = nil,
+    lastAction         = 0,
+    manualSilent       = false,
+    coinCollect        = false,
+    coinSpeed          = 50,
+    collecting         = false,
+    espOn              = false,
+    roles              = {},
+    espObjects         = {},
+    espCharConns       = {},
+    _espAdded          = nil,
+    _espRemoving       = nil,
+    _roleConn          = nil,
+    _manualConn        = nil,
+    _noclipConn        = nil,
+    gunDropOn          = false,
+    _gunDropWatch      = false,
+    _gunDropConn       = nil,
+    currentPhase       = "Unknown",
+    lastRoundSignal    = "None",
+    lastLobbySignal    = "None",
+    localRole          = nil,
+    coinCount          = 0,
+    coinLimit          = 40,
+    lastEndReason      = nil,
+    lastWinnerRole     = nil,
+    lastCreditedPlayer = nil,
 }
+
+local Alive = true
+local Connections = {}
+local RuntimeObjects = {}
+
+local function trackConn(conn)
+    if conn then
+        Connections[#Connections + 1] = conn
+    end
+    return conn
+end
+
+local function trackObject(obj)
+    if obj then
+        RuntimeObjects[#RuntimeObjects + 1] = obj
+    end
+    return obj
+end
+
+local function safeDisconnect(conn)
+    if conn then
+        _pcall(function() conn:Disconnect() end)
+    end
+end
+
+local function safeDestroy(obj)
+    if obj and obj.Parent then
+        _pcall(function() obj:Destroy() end)
+    elseif obj then
+        _pcall(function() obj:Destroy() end)
+    end
+end
+
+local function clearRuntimeForRoot(root)
+    if not root then return end
+    destroyChild(root, "_CBP")
+    destroyChild(root, "_CBG")
+    destroyChild(root, "_GDBP")
+    destroyChild(root, "_GDBG")
+end
+
+local function cleanup()
+    Alive = false
+    State.manualSilent = false
+    State.coinCollect = false
+    State.gunDropOn = false
+    State.espOn = false
+
+    for _, conn in ipairs(Connections) do
+        safeDisconnect(conn)
+    end
+    for i = #Connections, 1, -1 do
+        Connections[i] = nil
+    end
+
+    for _, obj in ipairs(RuntimeObjects) do
+        safeDestroy(obj)
+    end
+    for i = #RuntimeObjects, 1, -1 do
+        RuntimeObjects[i] = nil
+    end
+
+    for _, obj in pairs(State.espObjects) do
+        safeDestroy(obj)
+    end
+    for k in pairs(State.espObjects) do
+        State.espObjects[k] = nil
+    end
+    for _, conn in pairs(State.espCharConns) do
+        safeDisconnect(conn)
+    end
+    for k in pairs(State.espCharConns) do
+        State.espCharConns[k] = nil
+    end
+
+    local root = getRoot()
+    clearRuntimeForRoot(root)
+    local char = getChar()
+    if char then
+        for _, part in ipairs(char:GetDescendants()) do
+            if part:IsA("BasePart") then
+                _pcall(function() part.CanCollide = true end)
+            end
+        end
+    end
+
+    local pg = LocalPlayer and LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    local oldGui = pg and pg:FindFirstChild("RefUniversal")
+    safeDestroy(oldGui)
+
+    _pcall(function()
+        if type(getgenv) == "function" and getgenv()[SESSION_KEY] == cleanup then
+            getgenv()[SESSION_KEY] = nil
+        end
+    end)
+end
+
+_pcall(function()
+    if type(getgenv) == "function" then
+        getgenv()[SESSION_KEY] = cleanup
+    end
+end)
 
 local PART_OPTIONS       = { "UpperTorso","Head","HumanoidRootPart","Torso","LowerTorso","LeftUpperArm","RightUpperArm" }
 local PRED_OPTIONS       = { 0, 0.08, 0.12, 0.18, 0.25, 0.35 }
@@ -362,25 +484,44 @@ end
 -- ─── manual silent input ───────────────────────────────────────────────────────
 
 local function installManualSilent()
-    _pcall(function()
-        local uis = game:GetService("UserInputService")
-        uis.InputBegan:Connect(function(input, gp)
-            if gp or not State.manualSilent then return end
-            if input.UserInputType ~= Enum.UserInputType.MouseButton1
-            and input.UserInputType ~= Enum.UserInputType.Touch then return end
-            if not findChild(getChar(), "Gun") then return end
-            _spawn(function() Tester.ShootTarget() end)
+    safeDisconnect(State._manualConn)
+    State._manualConn = nil
+    local uis = UserInputService
+    State._manualConn = trackConn(uis.InputBegan:Connect(function(input, gp)
+        if gp or not Alive or not State.manualSilent then return end
+        if input.UserInputType ~= Enum.UserInputType.MouseButton1
+        and input.UserInputType ~= Enum.UserInputType.Touch then return end
+        if not findChild(getChar(), "Gun") then return end
+        _spawn(function()
+            if Alive and State.manualSilent then
+                Tester.ShootTarget()
+            end
         end)
-    end)
+    end))
 end
 
 -- ─── COIN COLLECT ──────────────────────────────────────────────────────────────
 
+local function getCoinPart(obj)
+    if not obj or obj.Name ~= "Coin_Server" then return nil end
+    if obj:IsA("BasePart") then return obj end
+    if obj:IsA("Model") then
+        return obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart", true)
+    end
+    return nil
+end
+
 local function findCoins()
     local list = {}
-    for _, obj in ipairs(workspace:GetDescendants()) do
-        if obj.Name == "Coin_Server" and obj:IsA("BasePart") then
-            list[#list+1] = obj
+    local seen = {}
+    local desc = nil
+    _pcall(function() desc = workspace:GetDescendants() end)
+    if not desc then return list end
+    for _, obj in ipairs(desc) do
+        local part = getCoinPart(obj)
+        if part and part.Parent and not seen[part] then
+            seen[part] = true
+            list[#list + 1] = part
         end
     end
     return list
@@ -406,11 +547,11 @@ local function setCollide(char, state)
 end
 
 local function noclipLoop()
-    -- mantém noclip enquanto coin collect estiver on
-    local conn
-    conn = RunService.Stepped:Connect(function()
-        if not State.coinCollect then
-            conn:Disconnect()
+    safeDisconnect(State._noclipConn)
+    State._noclipConn = trackConn(RunService.Stepped:Connect(function()
+        if not Alive or not State.coinCollect then
+            safeDisconnect(State._noclipConn)
+            State._noclipConn = nil
             return
         end
         local c = getChar()
@@ -420,14 +561,14 @@ local function noclipLoop()
                 _pcall(function() p.CanCollide = false end)
             end
         end
-    end)
+    end))
 end
 
 local function floatToCoin(target, speed)
     local root = getRoot()
     if not root or not target or not target.Parent then return end
 
-    local bp = Instance.new("BodyPosition")
+    local bp = trackObject(Instance.new("BodyPosition"))
     bp.Name     = "_CBP"
     bp.MaxForce = Vector3.new(1e5, 1e5, 1e5)
     bp.P        = 1e4
@@ -435,7 +576,7 @@ local function floatToCoin(target, speed)
     bp.Position = target.Position
     bp.Parent   = root
 
-    local bg = Instance.new("BodyGyro")
+    local bg = trackObject(Instance.new("BodyGyro"))
     bg.Name     = "_CBG"
     bg.MaxTorque = Vector3.new(0, 0, 0)
     bg.Parent   = root
@@ -443,7 +584,7 @@ local function floatToCoin(target, speed)
     local timeout = (root.Position - target.Position).Magnitude / math.max(speed, 1) + 3
     local elapsed = 0
 
-    while elapsed < timeout and State.coinCollect and target and target.Parent do
+    while Alive and elapsed < timeout and State.coinCollect and target and target.Parent do
         _wait(0.05)
         elapsed = elapsed + 0.05
         local r = getRoot()
@@ -466,7 +607,7 @@ local function startCoinCollect()
     State.collecting = true
     noclipLoop()
     _spawn(function()
-        while State.coinCollect do
+        while Alive and State.coinCollect do
             layDown()
             local coins = findCoins()
             if #coins == 0 then
@@ -541,7 +682,7 @@ local function updateEspLabel(pname)
 end
 
 local function attachEsp(player)
-    if player == LocalPlayer then return end
+    if not Alive or player == LocalPlayer then return end
     if State.espObjects[player.Name] then return end
 
     local gui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
@@ -549,8 +690,8 @@ local function attachEsp(player)
 
     local bb = Instance.new("BillboardGui")
     bb.Name         = "RESP_"..player.Name
-    bb.Size         = UDim2.new(0, 120, 0, 44)
-    bb.StudsOffset  = Vector3.new(0, 3.5, 0)
+    bb.Size         = UDim2.new(0, 132, 0, 46)
+    bb.StudsOffset  = Vector3.new(0, 3.6, 0)
     bb.AlwaysOnTop  = true
     bb.ResetOnSpawn = false
     bb.Parent       = gui
@@ -560,18 +701,24 @@ local function attachEsp(player)
     local bg = Instance.new("Frame")
     bg.Size                   = UDim2.new(1,0,1,0)
     bg.BackgroundColor3       = Color3.fromRGB(10,10,14)
-    bg.BackgroundTransparency = 0.3
+    bg.BackgroundTransparency = 0.28
     bg.BorderSizePixel        = 0
     bg.Parent                 = bb
 
     local bgc = Instance.new("UICorner")
-    bgc.CornerRadius = UDim.new(0,5)
+    bgc.CornerRadius = UDim.new(0,6)
     bgc.Parent = bg
+
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = Color3.fromRGB(54, 60, 76)
+    stroke.Thickness = 1
+    stroke.Transparency = 0.35
+    stroke.Parent = bg
 
     local nameLbl = Instance.new("TextLabel")
     nameLbl.Name               = "NameLbl"
-    nameLbl.Size               = UDim2.new(1,-6,0.5,0)
-    nameLbl.Position           = UDim2.new(0,3,0,2)
+    nameLbl.Size               = UDim2.new(1,-8,0.5,0)
+    nameLbl.Position           = UDim2.new(0,4,0,2)
     nameLbl.BackgroundTransparency = 1
     nameLbl.Text               = player.Name
     nameLbl.TextColor3         = Color3.fromRGB(240,240,240)
@@ -582,8 +729,8 @@ local function attachEsp(player)
 
     local roleLbl = Instance.new("TextLabel")
     roleLbl.Name               = "RoleLbl"
-    roleLbl.Size               = UDim2.new(1,-6,0.5,0)
-    roleLbl.Position           = UDim2.new(0,3,0.5,-2)
+    roleLbl.Size               = UDim2.new(1,-8,0.5,0)
+    roleLbl.Position           = UDim2.new(0,4,0.5,-2)
     roleLbl.BackgroundTransparency = 1
     roleLbl.Text               = State.roles[player.Name] or "?"
     roleLbl.TextColor3         = ROLE_COLOR[State.roles[player.Name]] or Color3.fromRGB(180,180,180)
@@ -597,76 +744,198 @@ local function attachEsp(player)
         local r = char:FindFirstChild("HumanoidRootPart")
                 or char:FindFirstChild("UpperTorso")
                 or char:FindFirstChild("Torso")
-        if r then bb.Adornee = r end
+        if r and bb.Parent then
+            bb.Adornee = r
+        end
     end
 
     anchorTo(player.Character)
-    player.CharacterAdded:Connect(function(char)
+    safeDisconnect(State.espCharConns[player.Name])
+    State.espCharConns[player.Name] = trackConn(player.CharacterAdded:Connect(function(char)
+        if not Alive or not State.espOn then return end
         _pcall(function() char:WaitForChild("HumanoidRootPart", 5) end)
         anchorTo(char)
-    end)
-end
-
-local function enableEsp()
-    clearEsp()
-    for _, p in ipairs(Players:GetPlayers()) do attachEsp(p) end
-    State._espAdded    = Players.PlayerAdded:Connect(function(p)
-        if State.espOn then attachEsp(p) end
-    end)
-    State._espRemoving = Players.PlayerRemoving:Connect(function(p)
-        local obj = State.espObjects[p.Name]
-        if obj and obj.Parent then _pcall(function() obj:Destroy() end) end
-        State.espObjects[p.Name] = nil
-        State.roles[p.Name]      = nil
-    end)
+    end))
 end
 
 local function disableEsp()
     clearEsp()
-    if State._espAdded    then State._espAdded:Disconnect();    State._espAdded    = nil end
-    if State._espRemoving then State._espRemoving:Disconnect(); State._espRemoving = nil end
+    safeDisconnect(State._espAdded)
+    safeDisconnect(State._espRemoving)
+    State._espAdded = nil
+    State._espRemoving = nil
+    for _, conn in pairs(State.espCharConns) do
+        safeDisconnect(conn)
+    end
+    for k in pairs(State.espCharConns) do
+        State.espCharConns[k] = nil
+    end
 end
 
--- PlayerDataChanged listener — fonte principal de roles
--- payload pode ser tabela com Role + PlayerName/Name, ou array de tabelas
+local function enableEsp()
+    disableEsp()
+    if not Alive then return end
+    for _, p in ipairs(Players:GetPlayers()) do
+        attachEsp(p)
+    end
+    State._espAdded = trackConn(Players.PlayerAdded:Connect(function(p)
+        if Alive and State.espOn then attachEsp(p) end
+    end))
+    State._espRemoving = trackConn(Players.PlayerRemoving:Connect(function(p)
+        local obj = State.espObjects[p.Name]
+        safeDestroy(obj)
+        State.espObjects[p.Name] = nil
+        State.roles[p.Name] = nil
+        safeDisconnect(State.espCharConns[p.Name])
+        State.espCharConns[p.Name] = nil
+    end))
+end
+
+local function setRoleForPlayer(pname, role)
+    if type(role) ~= "string" or role == "" then return end
+    if type(pname) ~= "string" or pname == "" then
+        pname = LocalPlayer.Name
+    end
+    State.roles[pname] = role
+    if pname == LocalPlayer.Name then
+        State.localRole = role
+    end
+    if State.espOn then
+        updateEspLabel(pname)
+    end
+end
+
+local function playerNameFromUserId(userId)
+    if type(userId) ~= "number" then return nil end
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p.UserId == userId then return p.Name end
+    end
+    return nil
+end
+
+local function parsePlayerDataPayload(value, fallbackName, depth)
+    if depth > 4 or type(value) ~= "table" then return end
+
+    local role = value.Role or value.role
+    local pname = value.Name or value.PlayerName or value.Username or value.UserName or fallbackName
+    if typeof and typeof(pname) == "Instance" and pname:IsA("Player") then
+        pname = pname.Name
+    end
+    if type(pname) ~= "string" then
+        pname = playerNameFromUserId(value.UserId or value.userId)
+    end
+
+    if type(role) == "string" then
+        setRoleForPlayer(pname, role)
+    end
+
+    if value.Coins ~= nil and (not pname or pname == LocalPlayer.Name) then
+        local coins = tonumber(value.Coins)
+        if coins then State.coinCount = coins end
+    end
+
+    for k, v in pairs(value) do
+        if type(v) == "table" then
+            local nextFallback = type(k) == "string" and k or nil
+            parsePlayerDataPayload(v, nextFallback, depth + 1)
+        end
+    end
+end
+
 local function listenRoles()
+    safeDisconnect(State._roleConn)
+    State._roleConn = nil
     local remote = getRemote({"Remotes","Gameplay","PlayerDataChanged"})
     if not remote or not remote:IsA("RemoteEvent") then return end
-    remote.OnClientEvent:Connect(function(...)
+    State._roleConn = trackConn(remote.OnClientEvent:Connect(function(...)
+        if not Alive then return end
         local args = {...}
-        -- tenta todos os formatos que o scan observou
-        local function tryParse(t)
-            if type(t) ~= "table" then return end
-            local role  = t.Role
-            local pname = t.Name or t.PlayerName or t.Username
-            if type(role) == "string" and type(pname) == "string" then
-                State.roles[pname] = role
-                if State.espOn then updateEspLabel(pname) end
-            end
-            -- campos locais (próprio player)
-            if type(role) == "string" then
-                -- pode vir sem nome quando é sobre o LocalPlayer
-                local lp = LocalPlayer.Name
-                -- só seta se não vier de outro player
-                if not pname then
-                    State.roles[lp] = role
-                    if State.espOn then updateEspLabel(lp) end
-                end
-            end
-        end
         for _, v in ipairs(args) do
+            parsePlayerDataPayload(v, nil, 0)
+        end
+    end))
+end
+
+local function bindRemoteEvent(path, callback)
+    local remote = getRemote(path)
+    if remote and remote:IsA("RemoteEvent") then
+        return trackConn(remote.OnClientEvent:Connect(function(...)
+            if Alive then callback(...) end
+        end))
+    end
+    return nil
+end
+
+local function listenRoundSignals()
+    bindRemoteEvent({"Remotes","Gameplay","RoundStart"}, function()
+        State.currentPhase = "Round"
+        State.lastRoundSignal = "RoundStart"
+        State.lastEndReason = nil
+        State.lastWinnerRole = nil
+        State.lastCreditedPlayer = nil
+        State.coinCount = 0
+    end)
+
+    bindRemoteEvent({"Remotes","Gameplay","RoleSelect"}, function(...)
+        State.currentPhase = "Role Select"
+        State.lastRoundSignal = "RoleSelect"
+        for _, v in ipairs({...}) do
+            parsePlayerDataPayload(v, nil, 0)
+        end
+    end)
+
+    bindRemoteEvent({"Remotes","Gameplay","GiveWeapon"}, function()
+        State.lastRoundSignal = "GiveWeapon"
+        if State.currentPhase == "Unknown" or State.currentPhase == "Lobby" then
+            State.currentPhase = "Round"
+        end
+    end)
+
+    bindRemoteEvent({"Remotes","Gameplay","VictoryScreen"}, function(...)
+        State.currentPhase = "Ending"
+        State.lastRoundSignal = "VictoryScreen"
+        for _, v in ipairs({...}) do
             if type(v) == "table" then
-                -- pode ser array de entradas
-                if v[1] and type(v[1]) == "table" then
-                    for _, entry in ipairs(v) do tryParse(entry) end
-                else
-                    tryParse(v)
-                end
+                State.lastEndReason = v.Reason or v.RoundEndReason or v.EndReason or State.lastEndReason
+                State.lastWinnerRole = v.WinnerRole or v.Winner or v.WinRole or State.lastWinnerRole
+                State.lastCreditedPlayer = v.CreditedPlayer or v.Player or v.PlayerName or State.lastCreditedPlayer
+                parsePlayerDataPayload(v, nil, 0)
+            elseif type(v) == "string" then
+                State.lastEndReason = State.lastEndReason or v
             end
         end
     end)
-end
 
+    local function markLobby(signal)
+        State.currentPhase = "Lobby"
+        State.lastLobbySignal = signal
+        State.lastRoundSignal = signal
+    end
+
+    bindRemoteEvent({"Remotes","Gameplay","RoundEndFade"}, function() markLobby("RoundEndFade") end)
+    bindRemoteEvent({"Remotes","CustomGames","Clear1v1"}, function() markLobby("Clear1v1") end)
+    bindRemoteEvent({"Remotes","CustomGames","Cancelled1v1"}, function() markLobby("Cancelled1v1") end)
+
+    bindRemoteEvent({"Remotes","Gameplay","CoinCollected"}, function(...)
+        local args = {...}
+        for _, v in ipairs(args) do
+            if type(v) == "number" then
+                if v > State.coinLimit then
+                    State.coinLimit = v
+                elseif v >= 0 then
+                    State.coinCount = v
+                end
+            elseif type(v) == "table" then
+                local current = tonumber(v.Count or v.Current or v.Coins or v[2])
+                local limit = tonumber(v.Limit or v.Max or v[3])
+                if current then State.coinCount = current end
+                if limit then State.coinLimit = limit end
+            end
+        end
+        if type(args[2]) == "number" then State.coinCount = args[2] end
+        if type(args[3]) == "number" then State.coinLimit = args[3] end
+    end)
+end
 -- ─── GUN DROP COLLECT ──────────────────────────────────────────────────────────
 -- GunDrop: Workspace.<Mapa>.GunDrop, classe Part, pickup por contato físico
 
@@ -681,7 +950,7 @@ local function walkToGunDrop(gd)
     local root = getRoot()
     if not root or not gd or not gd.Parent then return end
 
-    local bp = Instance.new("BodyPosition")
+    local bp = trackObject(Instance.new("BodyPosition"))
     bp.Name     = "_GDBP"
     bp.MaxForce = Vector3.new(1e5,1e5,1e5)
     bp.P        = 8000
@@ -689,7 +958,7 @@ local function walkToGunDrop(gd)
     bp.Position = gd.Position
     bp.Parent   = root
 
-    local bg = Instance.new("BodyGyro")
+    local bg = trackObject(Instance.new("BodyGyro"))
     bg.Name      = "_GDBG"
     bg.MaxTorque = Vector3.new(1e5,1e5,1e5)
     bg.P         = 8000
@@ -697,7 +966,7 @@ local function walkToGunDrop(gd)
     bg.Parent    = root
 
     local elapsed = 0
-    while elapsed < 10 and State.gunDropOn and gd and gd.Parent do
+    while Alive and elapsed < 10 and State.gunDropOn and gd and gd.Parent do
         _wait(0.05)
         elapsed = elapsed + 0.05
         local r = getRoot()
@@ -717,26 +986,36 @@ local function startGunDropWatch()
     if State._gunDropWatch then return end
     State._gunDropWatch = true
     _spawn(function()
-        while State.gunDropOn do
+        while Alive and State.gunDropOn do
             local gd = findGunDrop()
             if gd then walkToGunDrop(gd) end
             _wait(1.5)
         end
         State._gunDropWatch = false
     end)
-    State._gunDropConn = workspace.DescendantAdded:Connect(function(inst)
-        if inst.Name == "GunDrop" and inst:IsA("BasePart") and State.gunDropOn then
-            _spawn(function() _wait(0.15); walkToGunDrop(inst) end)
+    safeDisconnect(State._gunDropConn)
+    State._gunDropConn = trackConn(workspace.DescendantAdded:Connect(function(inst)
+        if Alive and inst.Name == "GunDrop" and inst:IsA("BasePart") and State.gunDropOn then
+            _spawn(function()
+                _wait(0.15)
+                if Alive and State.gunDropOn then
+                    walkToGunDrop(inst)
+                end
+            end)
         end
-    end)
+    end))
 end
 
 local function stopGunDropWatch()
-    State.gunDropOn     = false
+    State.gunDropOn = false
     State._gunDropWatch = false
-    if State._gunDropConn then State._gunDropConn:Disconnect(); State._gunDropConn = nil end
+    safeDisconnect(State._gunDropConn)
+    State._gunDropConn = nil
     local r = getRoot()
-    if r then destroyChild(r,"_GDBP"); destroyChild(r,"_GDBG") end
+    if r then
+        destroyChild(r,"_GDBP")
+        destroyChild(r,"_GDBG")
+    end
 end
 
 -- ─── REFLIB UI ─────────────────────────────────────────────────────────────────
@@ -746,7 +1025,7 @@ local RefLib = {}
 function RefLib.Window(title)
     local playerGui = LocalPlayer:WaitForChild("PlayerGui")
     local old = playerGui:FindFirstChild("RefUniversal")
-    if old then old:Destroy() end
+    if old then safeDestroy(old) end
 
     local gui = Instance.new("ScreenGui")
     gui.Name           = "RefUniversal"
@@ -838,7 +1117,7 @@ function RefLib.Window(title)
     scroll.Position              = UDim2.new(0,0,0,40)
     scroll.BackgroundTransparency = 1
     scroll.BorderSizePixel       = 0
-    scroll.ScrollBarThickness    = 2
+    scroll.ScrollBarThickness    = 0
     scroll.ScrollBarImageColor3  = Color3.fromRGB(80,90,110)
     scroll.CanvasSize            = UDim2.new(0,0,0,0)
     scroll.AutomaticCanvasSize   = Enum.AutomaticSize.Y
@@ -856,32 +1135,32 @@ function RefLib.Window(title)
     pad.Parent        = scroll
 
     -- minimizar
-    minBtn.MouseButton1Click:Connect(function()
+    trackConn(minBtn.MouseButton1Click:Connect(function()
         minimized = not minimized
         TweenService:Create(frame, TweenInfo.new(0.2, Enum.EasingStyle.Quad), {
             Size = minimized and miniSize or fullSize
         }):Play()
         minBtn.Text = minimized and "+" or "─"
         scroll.Visible = not minimized
-    end)
+    end))
 
     -- drag pela barra
     do
         local dragging, dragStart, startPos = false, nil, nil
-        bar.InputBegan:Connect(function(input)
+        trackConn(bar.InputBegan:Connect(function(input)
             if input.UserInputType == Enum.UserInputType.MouseButton1
             or input.UserInputType == Enum.UserInputType.Touch then
                 dragging  = true
                 dragStart = input.Position
                 startPos  = frame.Position
-                input.Changed:Connect(function()
+                trackConn(input.Changed:Connect(function()
                     if input.UserInputState == Enum.UserInputState.End then
                         dragging = false
                     end
-                end)
+                end))
             end
-        end)
-        UserInputService.InputChanged:Connect(function(input)
+        end))
+        trackConn(UserInputService.InputChanged:Connect(function(input)
             if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
                           or input.UserInputType == Enum.UserInputType.Touch) then
                 local d = input.Position - dragStart
@@ -890,7 +1169,7 @@ function RefLib.Window(title)
                     startPos.Y.Scale, startPos.Y.Offset + d.Y
                 )
             end
-        end)
+        end))
     end
 
     -- ── W methods ──────────────────────────────────────────────────────────────
@@ -957,14 +1236,14 @@ function RefLib.Window(title)
         btn.Text               = ""
         btn.Parent             = holder
 
-        btn.MouseButton1Click:Connect(function()
+        trackConn(btn.MouseButton1Click:Connect(function()
             state = not state
             _pcall(function()
                 TweenService:Create(track, TweenInfo.new(0.15), {BackgroundColor3 = state and onCol or offCol}):Play()
                 TweenService:Create(knob,  TweenInfo.new(0.15), {Position = state and onPos or offPos}):Play()
             end)
             if type(callback) == "function" then _pcall(callback, state) end
-        end)
+        end))
 
         local T = {}
         function T:Set(v)
@@ -1040,20 +1319,20 @@ function RefLib.Window(title)
                 if type(callback) == "function" then _pcall(callback, val) end
             end
         end
-        rail.InputBegan:Connect(function(i)
+        trackConn(rail.InputBegan:Connect(function(i)
             if i.UserInputType == Enum.UserInputType.MouseButton1
             or i.UserInputType == Enum.UserInputType.Touch then
                 dragging = true; upd(i.Position)
             end
-        end)
-        UserInputService.InputChanged:Connect(function(i)
+        end))
+        trackConn(UserInputService.InputChanged:Connect(function(i)
             if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement
                          or  i.UserInputType == Enum.UserInputType.Touch) then upd(i.Position) end
-        end)
-        UserInputService.InputEnded:Connect(function(i)
+        end))
+        trackConn(UserInputService.InputEnded:Connect(function(i)
             if i.UserInputType == Enum.UserInputType.MouseButton1
             or i.UserInputType == Enum.UserInputType.Touch then dragging = false end
-        end)
+        end))
 
         local S = {}; function S:Get() return val end; return S
     end
@@ -1069,9 +1348,9 @@ function RefLib.Window(title)
         btn.Font             = Enum.Font.GothamSemibold
         btn.Parent           = scroll
         local bc = Instance.new("UICorner"); bc.CornerRadius = UDim.new(0,7); bc.Parent = btn
-        btn.MouseButton1Click:Connect(function()
+        trackConn(btn.MouseButton1Click:Connect(function()
             if type(callback) == "function" then _pcall(callback) end
-        end)
+        end))
         return btn
     end
 
@@ -1101,12 +1380,12 @@ function RefLib.Window(title)
         btn.Font             = Enum.Font.GothamSemibold
         btn.Parent           = scroll
         local bc = Instance.new("UICorner"); bc.CornerRadius = UDim.new(0,7); bc.Parent = btn
-        btn.MouseButton1Click:Connect(function()
+        trackConn(btn.MouseButton1Click:Connect(function()
             idx = idx + 1
             if idx > #options then idx = 1 end
             btn.Text = label..": "..tostring(options[idx])
             if type(callback) == "function" then _pcall(callback, idx, options[idx]) end
-        end)
+        end))
         local C = {}
         function C:SetIndex(i) idx = i; btn.Text = label..": "..tostring(options[idx]) end
         function C:SetText(t)  btn.Text = t end
@@ -1118,7 +1397,7 @@ end
 
 -- ─── BUILD UI ──────────────────────────────────────────────────────────────────
 
-local W = RefLib.Window("ref_universal")
+local W = RefLib.Window("ref_universal | tester")
 
 -- ── WEAPON TESTER ──────────────────────────────────────────────────────────────
 
@@ -1185,9 +1464,7 @@ W:Toggle("Role ESP", false, function(v)
     if v then enableEsp() else disableEsp() end
 end)
 
-W:Label("Murderer=vermelho  Sheriff=azul  Hero=amarelo  Innocent=verde")
-
--- ── GUN DROP ───────────────────────────────────────────────────────────────────
+W:Label("Murderer=Red  Sheriff=Blue  Hero=Yellow  Innocent=Green")
 
 W:Section("  GUN DROP")
 
@@ -1196,28 +1473,33 @@ W:Toggle("Auto Collect GunDrop", false, function(v)
     if v then startGunDropWatch() else stopGunDropWatch() end
 end)
 
--- ── STATUS ─────────────────────────────────────────────────────────────────────
-
 W:Section("  STATUS")
-local statusLbl = W:Label("Pronto.")
+local statusLbl = W:Label("Ready.")
+local phaseLbl = W:Label("Phase: Unknown")
+local dataLbl = W:Label("Role: ? | Coins: 0/40")
 
 _spawn(function()
-    while true do
-        _wait(2)
+    while Alive and W.gui and W.gui.Parent do
+        _wait(1)
         local parts = {}
-        if State.coinCollect then parts[#parts+1] = "coins"   end
-        if State.espOn        then parts[#parts+1] = "esp"     end
-        if State.gunDropOn    then parts[#parts+1] = "gundrop" end
-        local myRole = State.roles[LocalPlayer.Name]
-        local roleStr = myRole and (" | role: "..myRole) or ""
-        local txt = #parts > 0
-            and ("Ativo: "..table.concat(parts,", ")..roleStr)
-            or  ("Inativo"..roleStr)
-        _pcall(function() statusLbl.Text = txt end)
+        if State.coinCollect then parts[#parts+1] = "coins" end
+        if State.espOn then parts[#parts+1] = "esp" end
+        if State.gunDropOn then parts[#parts+1] = "gundrop" end
+        local activeText = #parts > 0 and ("Active: "..table.concat(parts, ", ")) or "Inactive"
+        local localRole = State.localRole or State.roles[LocalPlayer.Name] or "?"
+        local endText = ""
+        if State.lastEndReason then
+            endText = " | End: "..tostring(State.lastEndReason)
+        end
+        _pcall(function()
+            statusLbl.Text = activeText
+            phaseLbl.Text = "Phase: "..tostring(State.currentPhase or "Unknown").." | Signal: "..tostring(State.lastRoundSignal or "None")..endText
+            dataLbl.Text = "Role: "..tostring(localRole).." | Coins: "..tostring(State.coinCount or 0).."/"..tostring(State.coinLimit or 40)
+        end)
     end
 end)
-
 -- ─── INIT ──────────────────────────────────────────────────────────────────────
 
 listenRoles()
+listenRoundSignals()
 installManualSilent()
