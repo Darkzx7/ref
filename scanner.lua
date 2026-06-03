@@ -1,5 +1,5 @@
 -- ref_universal | Murder Mystery tester
--- v2026-06-03-v24-stage-hold-lower-sweep
+-- v2026-06-03-v28-afk-map-spawns
 
 local Players          = game:GetService("Players")
 local TweenService     = game:GetService("TweenService")
@@ -188,6 +188,9 @@ local State = {
     _afkSavedWalkSpeed = nil,
     _afkSavedJumpPower = nil,
     _afkEndWaitToken   = nil,
+    _afkLobbyBaseCF    = nil,
+    _afkReturnCF       = nil,
+    _afkReleaseToMap   = false,
     lastEndReason      = nil,
     lastWinnerRole     = nil,
     lastCreditedPlayer = nil,
@@ -546,19 +549,240 @@ local function rememberSafeCFrame(force)
     end
 end
 
-local function releaseAfkFarm(statusText)
+local function rememberAfkLobbyBase(force)
+    local root = getRoot()
+    if not root then return end
+    if force or State.currentPhase == "Lobby" or not State._afkLobbyBaseCF then
+        State._afkLobbyBaseCF = root.CFrame
+    end
+end
+
+local function getAfkHighPlatformPos()
+    local root = getRoot()
+    local baseCF = State._afkLobbyBaseCF or (root and root.CFrame) or CFrame.new(0, 0, 0)
+    local pos = baseCF.Position
+    return Vector3.new(pos.X, pos.Y + 6500, pos.Z)
+end
+
+local AFK_ROUND_MAP_NAMES = {
+    "Bank 2",
+    "Bio Lab",
+    "Factory",
+    "Hospital 3",
+    "Hotel 2",
+    "House 2",
+    "Mansion 2",
+    "Mil Base",
+    "Office 3",
+    "Police Station",
+    "Research Facility",
+    "Workplace",
+    "Beach Resort",
+    "Yacht",
+    "Manor",
+    "Farmhouse",
+    "Mineshaft 2",
+    "Barn (Infection)",
+    "Vampire's Castle",
+    "Vampire’s Castle",
+    "Spaceship",
+    "Workshop",
+    "Log Cabin",
+    "Train Station",
+    "Ice Castle",
+    "Ski Lodge",
+    "Christmas In Italy",
+    "Ski Village",
+}
+
+local function normalizeRoundMapName(name)
+    local s = tostring(name or ""):lower()
+    s = s:gsub("[’']", "")
+    s = s:gsub("[%s_%-%(%)]", "")
+    s = s:gsub("[^%w]", "")
+    return s
+end
+
+local AFK_ROUND_MAP_SET = {}
+for _, mapName in ipairs(AFK_ROUND_MAP_NAMES) do
+    AFK_ROUND_MAP_SET[normalizeRoundMapName(mapName)] = true
+end
+
+local function isKnownRoundMap(obj)
+    return obj and AFK_ROUND_MAP_SET[normalizeRoundMapName(obj.Name)] == true
+end
+
+local function findSpawnsFolder(mapObj)
+    if not mapObj then return nil end
+    local direct = mapObj:FindFirstChild("Spawns") or mapObj:FindFirstChild("spawns")
+    if direct then return direct end
+
+    local found = nil
+    _pcall(function()
+        for _, d in ipairs(mapObj:GetDescendants()) do
+            if normalizeRoundMapName(d.Name) == "spawns" then
+                found = d
+                break
+            end
+        end
+    end)
+    return found
+end
+
+local function pickSpawnPart(spawnsFolder)
+    if not spawnsFolder then return nil end
+
+    if spawnsFolder:IsA("BasePart") then
+        return spawnsFolder
+    end
+
+    local root = getRoot()
+    local rootPos = root and root.Position
+    local candidates = {}
+
+    local children = nil
+    _pcall(function() children = spawnsFolder:GetDescendants() end)
+    if not children then return nil end
+
+    for _, obj in ipairs(children) do
+        local ok, isPart = _pcall(function() return obj:IsA("BasePart") end)
+        if ok and isPart and obj.Parent then
+            local canUse = true
+            _pcall(function()
+                if obj.Transparency >= 1 and obj.CanCollide == false and obj.CanTouch == false then
+                    canUse = false
+                end
+            end)
+            if canUse then
+                candidates[#candidates + 1] = obj
+            end
+        end
+    end
+
+    if #candidates == 0 then return nil end
+
+    table.sort(candidates, function(a, b)
+        local an = tostring(a.Name):lower()
+        local bn = tostring(b.Name):lower()
+        local ap = a.Position
+        local bp = b.Position
+        local aScore = 0
+        local bScore = 0
+        if an:find("spawn") then aScore = aScore - 1000 end
+        if bn:find("spawn") then bScore = bScore - 1000 end
+        if rootPos then
+            aScore = aScore + (ap - rootPos).Magnitude
+            bScore = bScore + (bp - rootPos).Magnitude
+        else
+            aScore = aScore + math.abs(ap.Y)
+            bScore = bScore + math.abs(bp.Y)
+        end
+        return aScore < bScore
+    end)
+
+    return candidates[1]
+end
+
+local function getRoundMapSpawnCF()
+    local maps = nil
+    _pcall(function() maps = workspace:GetChildren() end)
+    if not maps then return nil, nil, nil end
+
+    for _, mapObj in ipairs(maps) do
+        if isKnownRoundMap(mapObj) then
+            local spawnsFolder = findSpawnsFolder(mapObj)
+            local spawnPart = pickSpawnPart(spawnsFolder)
+            if spawnPart then
+                local cf = nil
+                _pcall(function()
+                    local lift = 4.2
+                    if spawnPart.Size then
+                        lift = math.max(4.2, (spawnPart.Size.Y * 0.5) + 3.2)
+                    end
+                    cf = spawnPart.CFrame * CFrame.new(0, lift, 0)
+                end)
+                if cf then
+                    return cf, mapObj.Name, spawnPart.Name
+                end
+            end
+        end
+    end
+
+    return nil, nil, nil
+end
+
+local function findAfkMapReturnCF()
+    local mapSpawnCF, mapName, spawnName = getRoundMapSpawnCF()
+    if mapSpawnCF then
+        State.afkStatus = "Returning to "..tostring(mapName).." spawn"
+        return mapSpawnCF
+    end
+
+    if State._afkReturnCF then
+        return State._afkReturnCF
+    end
+
+    local char = getChar()
+    local blacklist = {}
+    if char then blacklist[#blacklist + 1] = char end
+    if State._afkPlatform then blacklist[#blacklist + 1] = State._afkPlatform end
+    if State._coinStagePlatform then blacklist[#blacklist + 1] = State._coinStagePlatform end
+
+    local desc = nil
+    _pcall(function() desc = workspace:GetDescendants() end)
+    if desc then
+        local bestCoin, bestY = nil, math.huge
+        for _, obj in ipairs(desc) do
+            if obj and obj.Name == "Coin_Server" then
+                local part = nil
+                if obj:IsA("BasePart") then
+                    part = obj
+                else
+                    _pcall(function()
+                        part = obj:FindFirstChildWhichIsA("BasePart", true)
+                    end)
+                end
+                if part and part.Parent and part.Position.Y > -50 and part.Position.Y < bestY then
+                    bestCoin = part
+                    bestY = part.Position.Y
+                end
+            end
+        end
+
+        if bestCoin then
+            local params = RaycastParams.new()
+            params.FilterType = Enum.RaycastFilterType.Blacklist
+            params.FilterDescendantsInstances = blacklist
+            local hit = nil
+            _pcall(function()
+                hit = workspace:Raycast(bestCoin.Position + Vector3.new(0, 20, 0), Vector3.new(0, -140, 0), params)
+            end)
+            local p = hit and hit.Position or (bestCoin.Position - Vector3.new(0, 4, 0))
+            return CFrame.new(p + Vector3.new(0, 4.5, 0))
+        end
+    end
+
+    return nil
+end
+
+local function releaseAfkFarm(statusText, returnToRoundMap)
     safeDisconnect(State._afkHoldConn)
     State._afkHoldConn = nil
 
     local root = getRoot()
+    local targetCF = returnToRoundMap and findAfkMapReturnCF() or nil
     if root then
         _pcall(function()
             root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
             root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-            if State._afkSavedRootAnchored ~= nil then
+            root.Anchored = false
+            if targetCF then
+                root.CFrame = targetCF
+                root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+            end
+            if State._afkSavedRootAnchored ~= nil and not targetCF then
                 root.Anchored = State._afkSavedRootAnchored
-            else
-                root.Anchored = false
             end
         end)
     end
@@ -585,6 +809,10 @@ local function releaseAfkFarm(statusText)
     State._afkSavedWalkSpeed = nil
     State._afkSavedJumpPower = nil
     State._afkEndWaitToken = nil
+    State._afkReleaseToMap = false
+    if not returnToRoundMap then
+        State._afkReturnCF = nil
+    end
 
     if statusText then
         State.afkStatus = statusText
@@ -593,21 +821,6 @@ local function releaseAfkFarm(statusText)
     else
         State.afkStatus = "Idle"
     end
-end
-
-local function getDeepVoidY(baseY)
-    local deathY = -500
-    _pcall(function()
-        if type(workspace.FallenPartsDestroyHeight) == "number" then
-            deathY = workspace.FallenPartsDestroyHeight
-        end
-    end)
-
-    local targetY = (tonumber(baseY) or 0) - 640
-    local lowestSafe = deathY + 85
-    if targetY < lowestSafe then targetY = lowestSafe end
-    if targetY > ((tonumber(baseY) or 0) - 260) then targetY = (tonumber(baseY) or 0) - 260 end
-    return targetY
 end
 
 local function startAfkFarmHold(reason)
@@ -619,17 +832,22 @@ local function startAfkFarmHold(reason)
     end
 
     if State._afkActive and State._afkPlatform and State._afkPlatform.Parent and State._afkHoldCF then
-        State.afkStatus = "Deep void hold"
+        State.afkStatus = "High lobby hold"
         return true
     end
 
-    releaseAfkFarm(nil)
+    local currentCF = root.CFrame
+    local shouldSaveReturnCF = State.currentPhase ~= "Lobby" and State.currentPhase ~= "Unknown"
+
+    releaseAfkFarm(nil, false)
 
     root = getRoot()
     if not root then return false end
+    if shouldSaveReturnCF and not State._afkReturnCF then
+        State._afkReturnCF = currentCF
+    end
     local hum = getHumanoid()
-    local platformY = getDeepVoidY(root.Position.Y)
-    local platformPos = Vector3.new(root.Position.X, platformY, root.Position.Z)
+    local platformPos = getAfkHighPlatformPos()
 
     local platform = Instance.new("Part")
     platform.Name = "_REF_AFK_FARM_PLATFORM"
@@ -646,7 +864,7 @@ local function startAfkFarmHold(reason)
     State._afkPlatform = platform
     State._afkHoldCF = CFrame.new(platformPos + Vector3.new(0, 4.2, 0))
     State._afkActive = true
-    State.afkStatus = "Deep void hold"
+    State.afkStatus = "High lobby hold"
 
     _pcall(function()
         State._afkSavedRootAnchored = root.Anchored
@@ -669,7 +887,7 @@ local function startAfkFarmHold(reason)
 
     State._afkHoldConn = trackConn(RunService.Heartbeat:Connect(function()
         if not Alive or not State.afkFarm or not State._afkActive then
-            releaseAfkFarm(State.afkFarm and "Armed - waiting for round" or "Idle")
+            releaseAfkFarm(State.afkFarm and "Armed - waiting for round" or "Idle", false)
             return
         end
         local r = getRoot()
@@ -743,7 +961,7 @@ local function cleanup()
     end
 
     destroyCoinStagePlatform()
-    releaseAfkFarm("Idle")
+    releaseAfkFarm("Idle", false)
 
     safeDestroy(State._gunDropEsp)
     State._gunDropEsp = nil
@@ -2412,7 +2630,7 @@ local function listenRoundSignals()
             _spawn(function()
                 _wait(4)
                 if Alive and State.afkFarm and State._afkActive and State.currentPhase == "Ending" and State._afkEndWaitToken == token then
-                    releaseAfkFarm("Released after round end")
+                    releaseAfkFarm("Released after round end", false)
                 end
             end)
         end
@@ -2422,6 +2640,7 @@ local function listenRoundSignals()
         local hadCoinCollect = State.coinCollect == true
         local hadCoinPhysical = State._coinHadPhysicalMove == true or hasCoinPhysicsActive() or State._coinStagePlatform ~= nil
         State.currentPhase = "Lobby"
+        rememberAfkLobbyBase(true)
         State.lastLobbySignal = signal
         State.lastRoundSignal = signal
         State.localRole = nil
@@ -2432,7 +2651,7 @@ local function listenRoundSignals()
             suspendCoinMovementOnRoundEnd()
         end
         if State.afkFarm or State._afkActive then
-            releaseAfkFarm(State.afkFarm and "Armed - waiting for round" or "Idle")
+            releaseAfkFarm(State.afkFarm and "Armed - waiting for round" or "Idle", false)
         end
     end
 
@@ -3327,7 +3546,7 @@ State._coinToggle = W:Toggle("Coin Collect", false, function(v)
     if v and State.afkFarm then
         State.afkFarm = false
         if State._afkToggle then State._afkToggle:Set(false) end
-        releaseAfkFarm("Idle")
+        releaseAfkFarm("Idle", false)
     end
     State.coinCollect = v
     if v then
@@ -3353,6 +3572,10 @@ W:Section("  AFK")
 State._afkToggle = W:Toggle("Farm AFK", false, function(v)
     State.afkFarm = v
     if v then
+        if State.currentPhase == "Lobby" or State.currentPhase == "Unknown" then
+            rememberAfkLobbyBase(true)
+        end
+        State._afkReturnCF = nil
         if State.coinCollect then
             State.coinCollect = false
             if State._coinToggle then State._coinToggle:Set(false) end
@@ -3360,7 +3583,7 @@ State._afkToggle = W:Toggle("Farm AFK", false, function(v)
         end
         armAfkFarm("Manual")
     else
-        releaseAfkFarm("Idle")
+        releaseAfkFarm("Returned to map spawn", true)
     end
 end)
 
@@ -3420,6 +3643,9 @@ local afkLbl = W:Label("Farm AFK: Idle")
 _spawn(function()
     while Alive and W.gui and W.gui.Parent do
         _wait(1)
+        if State.currentPhase == "Lobby" then
+            rememberAfkLobbyBase(false)
+        end
         local parts = {}
         if State.coinCollect then parts[#parts+1] = "coins" end
         if State.afkFarm then parts[#parts+1] = "farm afk" end
