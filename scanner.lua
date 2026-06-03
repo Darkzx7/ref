@@ -1,5 +1,5 @@
 -- ref_universal | Murder Mystery tester
--- v2026-06-03-v16-role-target-cleanup
+-- v2026-06-03-v17-v16-role-target-cleanup
 
 local Players          = game:GetService("Players")
 local TweenService     = game:GetService("TweenService")
@@ -167,6 +167,8 @@ local State = {
     _coinStartedInLobby = false,
     _coinDidInitialStage = false,
     _coinHadPhysicalMove = false,
+    _coinFirstApproach  = false,
+    _coinUnderOffset    = 2.35,
     _returningLobby    = false,
     lastEndReason      = nil,
     lastWinnerRole     = nil,
@@ -1119,40 +1121,44 @@ end
 
 local function touchCoinSweep(root, target)
     if not root or not target or not target.Parent then return end
-    State.coinStatus = "Walking through coin"
+    State.coinStatus = "Collecting from under coin"
     fireTouchCoin(target)
     fireTouchCoinWithParts(target)
 
     local pos = target.Position
     local sizeY = 1.5
     _pcall(function() sizeY = math.max(target.Size.Y, 1.5) end)
-    local passSpeed = coinSpeedStuds(State.coinSpeed) * 1.85
+    local under = math.max(State._coinUnderOffset or 2.35, sizeY * 1.15)
+    local passSpeed = coinSpeedStuds(State.coinSpeed) * 1.45
 
     local forward = getCoinLieForward()
     local side = forward:Cross(Vector3.new(0, 1, 0))
     if side.Magnitude < 0.05 then side = Vector3.new(1, 0, 0) end
     side = side.Unit
 
+    -- Real touch sweep: stay slightly under the map/coin path, then rise through the coin volume.
+    -- This keeps the character below the coin while still crossing enough of the hitbox to trigger TouchInterest.
     local path = {
-        pos + Vector3.new(0, -1.10, 0),
-        pos + Vector3.new(0, -0.35, 0),
-        pos + Vector3.new(0,  0.25, 0),
-        pos + Vector3.new(0,  sizeY * 0.70, 0),
-        pos + Vector3.new(0,  sizeY * 1.25, 0),
-        pos + forward * 0.85 + Vector3.new(0, sizeY * 0.55, 0),
-        pos - forward * 0.85 + Vector3.new(0, sizeY * 0.55, 0),
-        pos + side * 0.75 + Vector3.new(0, sizeY * 0.50, 0),
-        pos - side * 0.75 + Vector3.new(0, sizeY * 0.50, 0),
-        pos + Vector3.new(0, 0.35, 0),
+        pos + Vector3.new(0, -under, 0),
+        pos + Vector3.new(0, -under * 0.72, 0),
+        pos + Vector3.new(0, -under * 0.42, 0),
+        pos + Vector3.new(0, -0.42, 0),
+        pos + Vector3.new(0,  0.05, 0),
+        pos + Vector3.new(0,  math.min(sizeY * 0.65, 1.05), 0),
+        pos + forward * 0.55 + Vector3.new(0, 0.18, 0),
+        pos - forward * 0.55 + Vector3.new(0, 0.18, 0),
+        pos + side * 0.50 + Vector3.new(0, 0.12, 0),
+        pos - side * 0.50 + Vector3.new(0, 0.12, 0),
+        pos + Vector3.new(0, -0.18, 0),
     }
 
     for i, p in ipairs(path) do
         if not Alive or not State.coinCollect or not target.Parent or not isCoinCollectPhase() then break end
         local cf = lyingCoinCFrame(p)
-        moveCoinRootDirect(p, passSpeed, 0.11)
+        moveCoinRootDirect(p, passSpeed, 0.13)
         fireTouchCoin(target)
         fireTouchCoinWithParts(target)
-        if i >= 2 and i <= 5 then
+        if i >= 3 and i <= 7 then
             physicalCoinContactPulse(target, cf)
         else
             _pcall(function() RunService.Heartbeat:Wait() end)
@@ -1453,9 +1459,18 @@ local function floatToCoin(target, speed)
     beginCoinPhysicsLock()
     State._coinLastTarget = target
 
-    local approach = target.Position + Vector3.new(0, 0.65, 0)
-    State.coinStatus = "Walking to coin"
-    moveCoinRootDirect(approach, moveSpeed, math.clamp(startDist / math.max(moveSpeed, 1) + 0.10, 0.12, 0.95))
+    local sizeY = 1.5
+    _pcall(function() sizeY = math.max(target.Size.Y, 1.5) end)
+    local under = math.max(State._coinUnderOffset or 2.35, sizeY * 1.15)
+    local approach = target.Position + Vector3.new(0, -under, 0)
+
+    -- First coin after enabling should enter smoothly, not snap across the map.
+    local firstFactor = State._coinFirstApproach and 0.52 or 1
+    local approachSpeed = math.max(45, moveSpeed * firstFactor)
+    local approachMax = State._coinFirstApproach and 1.55 or 0.95
+    State.coinStatus = State._coinFirstApproach and "Smooth first coin entry" or "Moving under nearest coin"
+    moveCoinRootDirect(approach, approachSpeed, math.clamp(startDist / math.max(approachSpeed, 1) + 0.16, 0.20, approachMax))
+    State._coinFirstApproach = false
 
     if not Alive or not State.coinCollect or not target.Parent or not isCoinCollectPhase() then return end
 
@@ -1560,6 +1575,7 @@ local function startCoinCollect()
                         -- Keep the toggle/function armed, but release every physical controller.
                         -- This lets the character naturally stand/fall onto the map floor after the coin bag is empty.
                         suspendCoinMovement("No coins - grounded wait", false)
+                        State._coinFirstApproach = true
                         State._coinIgnoreUntil = {}
                         _wait(0.22)
                     end
@@ -1588,6 +1604,7 @@ local function stopCoinCollect()
     State._coinLieForward = nil
     State._coinStartedInLobby = false
     State._coinDidInitialStage = false
+    State._coinFirstApproach = false
     safeDisconnect(State._noclipConn)
     State._noclipConn = nil
     restoreCoinPhysics()
@@ -3012,6 +3029,8 @@ State._coinToggle = W:Toggle("Coin Collect", false, function(v)
         State._coinStartedInLobby = isCoinArmedOnlyPhase()
         State._coinDidInitialStage = false
         State._coinHadPhysicalMove = false
+        State._coinFirstApproach = true
+        State._coinUnderOffset = 2.35
         rememberSafeCFrame(true)
         startCoinCollect()
     else
