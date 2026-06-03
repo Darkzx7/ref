@@ -1,5 +1,5 @@
 -- ref_universal | Murder Mystery tester
--- v2026-06-03-v14-physical-coin-walk
+-- v2026-06-03-v15-coin-ground-wait
 
 local Players          = game:GetService("Players")
 local TweenService     = game:GetService("TweenService")
@@ -1469,6 +1469,22 @@ local function hasCoinPhysicsActive()
         or State._coinMoveBG ~= nil
 end
 
+local function suspendCoinMovement(statusText, keepStage)
+    safeDisconnect(State._noclipConn)
+    State._noclipConn = nil
+    if hasCoinPhysicsActive() then
+        restoreCoinPhysics()
+    end
+    if not keepStage then
+        destroyCoinStagePlatform()
+    end
+    State._coinDesiredCF = nil
+    State._coinLieForward = nil
+    if statusText then
+        State.coinStatus = statusText
+    end
+end
+
 local function detectRoundFromNearbyCoins()
     if State.currentPhase ~= "Unknown" and State.currentPhase ~= "Role Select" then return false end
     if State.localDead == true or not isLocalAlive() then return false end
@@ -1508,34 +1524,42 @@ local function startCoinCollect()
                 end
                 _wait(0.05)
             else
-                if State._coinStartedInLobby and not State._coinDidInitialStage then
-                    if prepareCoinStagePlatform(true) then
-                        _wait(0.45)
-                    end
-                    State._coinDidInitialStage = true
-                end
-                if State._coinStagePlatform then
-                    destroyCoinStagePlatform()
-                end
-                if not State._coinLieForward then
-                    resetCoinLieForward()
-                end
-                if not hasCoinPhysicsActive() then
-                    beginCoinPhysicsLock()
-                    noclipLoop()
-                    local root = getRoot()
-                    if root then
-                        setCoinCFrame(lyingCoinCFrame(root.Position))
-                    end
-                end
-
-                local allowFar = (State._coinEntryPrime or 0) > testerTime()
-                local coin = getNearestCoin(allowFar, false)
-                if coin and coin.Parent then
-                    floatToCoin(coin, State.coinSpeed)
+                if tonumber(State.coinLimit) and tonumber(State.coinCount) and State.coinLimit > 0 and State.coinCount >= State.coinLimit then
+                    suspendCoinMovement("Coin bag full - grounded wait", false)
+                    State._coinIgnoreUntil = {}
+                    _wait(0.25)
                 else
-                    State.coinStatus = "No coins"
-                    _wait(0.002)
+                    local allowFar = (State._coinEntryPrime or 0) > testerTime()
+                    local coin = getNearestCoin(allowFar, false)
+                    if coin and coin.Parent then
+                        if State._coinStartedInLobby and not State._coinDidInitialStage then
+                            if prepareCoinStagePlatform(true) then
+                                _wait(0.20)
+                            end
+                            State._coinDidInitialStage = true
+                        end
+                        if State._coinStagePlatform then
+                            destroyCoinStagePlatform()
+                        end
+                        if not State._coinLieForward then
+                            resetCoinLieForward()
+                        end
+                        if not hasCoinPhysicsActive() then
+                            beginCoinPhysicsLock()
+                            noclipLoop()
+                            local root = getRoot()
+                            if root then
+                                setCoinCFrame(lyingCoinCFrame(root.Position))
+                            end
+                        end
+                        floatToCoin(coin, State.coinSpeed)
+                    else
+                        -- Keep the toggle/function armed, but release every physical controller.
+                        -- This lets the character naturally stand/fall onto the map floor after the coin bag is empty.
+                        suspendCoinMovement("No coins - grounded wait", false)
+                        State._coinIgnoreUntil = {}
+                        _wait(0.22)
+                    end
                 end
             end
         end
@@ -2067,10 +2091,11 @@ local function listenRoundSignals()
             end
         end
         if hadCoinCollect then
-            stopCoinCollect()
-            if State._coinToggle and State._coinToggle.Set then
-                _pcall(function() State._coinToggle:Set(false) end)
-            end
+            suspendCoinMovement("Round ended - armed", false)
+            State._coinEntryPrime = 0
+            State._coinIgnoreUntil = {}
+            State._coinDidInitialStage = false
+            State._coinStartedInLobby = true
             if hadCoinPhysical then returnToLobby() end
         end
     end)
@@ -2086,10 +2111,11 @@ local function listenRoundSignals()
         resetAllRoles()
         State.localDead = true
         if hadCoinCollect then
-            stopCoinCollect()
-            if State._coinToggle and State._coinToggle.Set then
-                _pcall(function() State._coinToggle:Set(false) end)
-            end
+            suspendCoinMovement("Round ended - armed", false)
+            State._coinEntryPrime = 0
+            State._coinIgnoreUntil = {}
+            State._coinDidInitialStage = false
+            State._coinStartedInLobby = true
             if hadCoinPhysical then returnToLobby() end
         end
     end
