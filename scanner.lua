@@ -1,5 +1,5 @@
 -- ref_universal | Murder Mystery tester
--- v2026-06-03-v17-v16-role-target-cleanup
+-- v2026-06-03-v18-coin-under-gundrop-role-guard
 
 local Players          = game:GetService("Players")
 local TweenService     = game:GetService("TweenService")
@@ -168,7 +168,7 @@ local State = {
     _coinDidInitialStage = false,
     _coinHadPhysicalMove = false,
     _coinFirstApproach  = false,
-    _coinUnderOffset    = 2.35,
+    _coinUnderOffset    = 2.85,
     _returningLobby    = false,
     lastEndReason      = nil,
     lastWinnerRole     = nil,
@@ -1121,14 +1121,14 @@ end
 
 local function touchCoinSweep(root, target)
     if not root or not target or not target.Parent then return end
-    State.coinStatus = "Collecting from under coin"
+    State.coinStatus = "Collecting from lower underside"
     fireTouchCoin(target)
     fireTouchCoinWithParts(target)
 
     local pos = target.Position
     local sizeY = 1.5
     _pcall(function() sizeY = math.max(target.Size.Y, 1.5) end)
-    local under = math.max(State._coinUnderOffset or 2.35, sizeY * 1.15)
+    local under = math.max(State._coinUnderOffset or 2.85, sizeY * 1.15)
     local passSpeed = coinSpeedStuds(State.coinSpeed) * 1.45
 
     local forward = getCoinLieForward()
@@ -1461,14 +1461,14 @@ local function floatToCoin(target, speed)
 
     local sizeY = 1.5
     _pcall(function() sizeY = math.max(target.Size.Y, 1.5) end)
-    local under = math.max(State._coinUnderOffset or 2.35, sizeY * 1.15)
+    local under = math.max(State._coinUnderOffset or 2.85, sizeY * 1.15)
     local approach = target.Position + Vector3.new(0, -under, 0)
 
     -- First coin after enabling should enter smoothly, not snap across the map.
     local firstFactor = State._coinFirstApproach and 0.52 or 1
     local approachSpeed = math.max(45, moveSpeed * firstFactor)
     local approachMax = State._coinFirstApproach and 1.55 or 0.95
-    State.coinStatus = State._coinFirstApproach and "Smooth first coin entry" or "Moving under nearest coin"
+    State.coinStatus = State._coinFirstApproach and "Smooth first coin entry" or "Moving lower under nearest coin"
     moveCoinRootDirect(approach, approachSpeed, math.clamp(startDist / math.max(approachSpeed, 1) + 0.16, 0.20, approachMax))
     State._coinFirstApproach = false
 
@@ -2228,6 +2228,7 @@ local function canCollectGunDrop()
     end
     if State.localDead == true then return false, "Dead / no role" end
     if not State.localRole or State.localRole == "?" then return false, "No role" end
+    if State.localRole == "Murderer" then return false, "Murderer - ignored" end
     if not isLocalAlive() then return false, "Dead" end
     return true, "OK"
 end
@@ -3030,7 +3031,7 @@ State._coinToggle = W:Toggle("Coin Collect", false, function(v)
         State._coinDidInitialStage = false
         State._coinHadPhysicalMove = false
         State._coinFirstApproach = true
-        State._coinUnderOffset = 2.35
+        State._coinUnderOffset = 2.85
         rememberSafeCFrame(true)
         startCoinCollect()
     else
