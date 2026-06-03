@@ -116,7 +116,7 @@ local State = {
     lastAction         = 0,
     manualSilent       = false,
     coinCollect        = false,
-    coinSpeed          = 5,
+    coinSpeed          = 2,
     collecting         = false,
     espOn              = false,
     roles              = {},
@@ -146,6 +146,8 @@ local State = {
     coinLimit          = 40,
     coinStatus         = "Idle",
     _coinToggle        = nil,
+    _coinEntryPrime    = 0,
+    _coinStartedInLobby = false,
     _returningLobby    = false,
     lastEndReason      = nil,
     lastWinnerRole     = nil,
@@ -570,7 +572,7 @@ local function isValidCoinPart(part)
     return true
 end
 
-local function findCoins()
+local function findCoins(allowFar)
     local list = {}
     if not isCoinCollectPhase() then
         State.coinStatus = "Waiting for round"
@@ -621,10 +623,14 @@ local function findCoins()
         return list
     end
 
-    -- Prevent the collector from crawling from lobby/void to a distant preloaded map.
-    if best.nearest > 320 then
+    -- In normal mode, never crawl from lobby/void to a far preloaded map.
+    -- During the first seconds of a real round, allow one safe entry stage.
+    if best.nearest > 320 and not allowFar then
         State.coinStatus = "Coins too far"
         return list
+    end
+    if best.nearest > 320 and allowFar then
+        State.coinStatus = "Entry staging"
     end
 
     for _, coin in ipairs(best.coins) do
@@ -634,12 +640,34 @@ local function findCoins()
     return list
 end
 
+local function coinSpeedStuds(speed)
+    speed = tonumber(speed) or 2
+    speed = math.clamp(speed, 1, 5)
+    local map = { 1.15, 1.75, 2.45, 3.25, 4.15 }
+    return map[speed] or 1.75
+end
+
+local function lyingCoinCFrame(pos, lookAt)
+    local cf
+    _pcall(function()
+        local target = lookAt or (pos + Vector3.new(0, 0, -1))
+        if (Vector3.new(target.X, pos.Y, target.Z) - pos).Magnitude < 0.05 then
+            target = pos + Vector3.new(0, 0, -1)
+        else
+            target = Vector3.new(target.X, pos.Y, target.Z)
+        end
+        cf = CFrame.new(pos, target) * CFrame.Angles(math.rad(90), 0, 0)
+    end)
+    return cf or CFrame.new(pos)
+end
+
 local function layDown()
     local root = getRoot()
     if not root then return end
     _pcall(function()
         root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
         root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+        root.CFrame = lyingCoinCFrame(root.Position, root.Position + root.CFrame.LookVector)
     end)
 end
 
@@ -660,6 +688,7 @@ local function noclipLoop()
             State._noclipConn = nil
             return
         end
+        if not isCoinCollectPhase() then return end
         local c = getChar()
         if not c then return end
         for _, p in ipairs(c:GetDescendants()) do
@@ -673,19 +702,21 @@ end
 local function touchCoinSweep(root, target)
     if not root or not target or not target.Parent then return end
     local offsets = {
-        Vector3.new(0, 1.4, 0),
-        Vector3.new(0, 0.6, 0),
-        Vector3.new(1.1, 0.8, 0),
-        Vector3.new(-1.1, 0.8, 0),
-        Vector3.new(0, 0.8, 1.1),
-        Vector3.new(0, 0.8, -1.1),
+        Vector3.new(0, -2.25, 0),
+        Vector3.new(0, -1.75, 0),
+        Vector3.new(0, -1.15, 0),
+        Vector3.new(0.8, -1.65, 0),
+        Vector3.new(-0.8, -1.65, 0),
+        Vector3.new(0, -1.65, 0.8),
+        Vector3.new(0, -1.65, -0.8),
+        Vector3.new(0, -0.55, 0),
     }
     for _, off in ipairs(offsets) do
         if not Alive or not State.coinCollect or not target.Parent then break end
         _pcall(function()
             root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
             root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-            root.CFrame = CFrame.new(target.Position + off)
+            root.CFrame = lyingCoinCFrame(target.Position + off, target.Position)
         end)
         _wait(0.025)
     end
@@ -696,49 +727,69 @@ local function floatToCoin(target, speed)
     if not root or not target or not target.Parent then return end
     if not isCoinCollectPhase() then return end
 
-    speed = tonumber(speed) or 4
-    speed = math.clamp(speed, 1, 6)
+    speed = tonumber(speed) or 2
+    speed = math.clamp(speed, 1, 5)
+    local moveSpeed = coinSpeedStuds(speed)
+    local allowEntryStage = (State._coinEntryPrime or 0) > testerTime()
 
     local startDist = (root.Position - target.Position).Magnitude
-    if startDist > 320 then
+    if startDist > 320 and not allowEntryStage then
         State.coinStatus = "Skipped far coin"
         return
     end
 
-    local timeout = math.clamp(startDist / math.max(speed * 7, 1) + 2, 2.5, 14)
+    if startDist > 320 and allowEntryStage then
+        State.coinStatus = "Entry hover"
+        _pcall(function()
+            root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+            root.CFrame = lyingCoinCFrame(target.Position + Vector3.new(0, -2.35, 0), target.Position)
+        end)
+        _wait(0.18)
+        root = getRoot()
+        if not root then return end
+        startDist = (root.Position - target.Position).Magnitude
+    end
+
+    local timeout = math.clamp(startDist / math.max(moveSpeed, 0.5) + 3, 3.5, 35)
     local elapsed = 0
-    local stepTime = 0.03
+    local stepTime = 0.065
 
     while Alive and elapsed < timeout and State.coinCollect and target and target.Parent and isCoinCollectPhase() do
         local r = getRoot()
         if not r then break end
 
-        local targetPos = target.Position + Vector3.new(0, 1.25, 0)
+        local targetPos = target.Position + Vector3.new(0, -1.75, 0)
         local cur = r.Position
-        if cur.Y < -40 then
+        if cur.Y < -65 then
             State.coinStatus = "Void guard"
+            _pcall(function()
+                r.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                r.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+                r.CFrame = lyingCoinCFrame(target.Position + Vector3.new(0, -2.1, 0), target.Position)
+            end)
+            _wait(0.12)
             break
         end
 
         local delta = targetPos - cur
         local dist = delta.Magnitude
-        if dist < 3.2 then
+        if dist < 1.55 then
             touchCoinSweep(r, target)
             break
         end
 
-        local move = math.min(dist, math.max(2.2, speed * 7) * stepTime)
+        local move = math.min(dist, moveSpeed * stepTime)
         local nextPos = cur + delta.Unit * move
 
-        -- keep the root hovering near the target height instead of letting gravity/noclip drag it down
-        if nextPos.Y < target.Position.Y + 0.55 then
-            nextPos = Vector3.new(nextPos.X, target.Position.Y + 0.55, nextPos.Z)
+        if nextPos.Y < target.Position.Y - 4.5 then
+            nextPos = Vector3.new(nextPos.X, target.Position.Y - 4.5, nextPos.Z)
         end
 
         _pcall(function()
             r.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
             r.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-            r.CFrame = CFrame.new(nextPos, targetPos)
+            r.CFrame = lyingCoinCFrame(nextPos, target.Position)
         end)
 
         _wait(stepTime)
@@ -753,11 +804,13 @@ local function startCoinCollect()
     _spawn(function()
         while Alive and State.coinCollect do
             if not isCoinCollectPhase() then
-                State.coinStatus = "Waiting for round"
+                State._coinStartedInLobby = State.currentPhase == "Lobby" or State.currentPhase == "Unknown" or State.currentPhase == "Loading Map"
+                State.coinStatus = State._coinStartedInLobby and "Armed - waiting for round" or "Waiting for round"
                 _wait(0.4)
             else
                 layDown()
-                local coins = findCoins()
+                local allowFar = (State._coinEntryPrime or 0) > testerTime()
+                local coins = findCoins(allowFar)
                 if #coins == 0 then
                     _wait(0.6)
                 else
@@ -801,8 +854,28 @@ end
 local function stopCoinCollect()
     State.coinCollect = false
     State.coinStatus = "Idle"
+    State._coinEntryPrime = 0
     safeDisconnect(State._noclipConn)
     State._noclipConn = nil
+end
+
+local function primeCoinEntry(reason)
+    if not Alive or not State.coinCollect then return end
+    State._coinEntryPrime = testerTime() + 5
+    State.coinStatus = "Entry armed"
+    if not State.collecting then startCoinCollect() end
+    _spawn(function()
+        _wait(0.15)
+        if not Alive or not State.coinCollect or not isCoinCollectPhase() then return end
+        local root = getRoot()
+        if root then
+            _pcall(function()
+                root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+                root.CFrame = lyingCoinCFrame(root.Position + Vector3.new(0, 2.25, 0), root.Position + root.CFrame.LookVector)
+            end)
+        end
+    end)
 end
 
 local function scoreLobbyCandidate(part)
@@ -1159,6 +1232,7 @@ local function listenRoundSignals()
             parsePlayerDataPayload(v, nil, 0)
         end
         refreshRolesBurst("RoundStart")
+        if State.coinCollect then primeCoinEntry(State.lastRoundSignal) end
     end)
 
     bindRemoteEvent({"Remotes","Gameplay","RoleSelect"}, function(...)
@@ -1168,6 +1242,7 @@ local function listenRoundSignals()
             parsePlayerDataPayload(v, nil, 0)
         end
         refreshRolesBurst("RoleSelect")
+        if State.coinCollect then primeCoinEntry(State.lastRoundSignal) end
     end)
 
     bindRemoteEvent({"Remotes","Gameplay","GiveWeapon"}, function(...)
@@ -1179,6 +1254,7 @@ local function listenRoundSignals()
             parsePlayerDataPayload(v, nil, 0)
         end
         refreshRolesBurst("GiveWeapon")
+        if State.coinCollect then primeCoinEntry(State.lastRoundSignal) end
     end)
 
     bindRemoteEvent({"Remotes","Gameplay","LoadingMap"}, function(...)
@@ -1198,6 +1274,7 @@ local function listenRoundSignals()
             parsePlayerDataPayload(v, nil, 0)
         end
         refreshRolesBurst("ShowRoleSelect")
+        if State.coinCollect then primeCoinEntry(State.lastRoundSignal) end
     end)
 
     bindRemoteEvent({"Remotes","Gameplay","ShowRoleSelectNew"}, function(...)
@@ -1207,6 +1284,7 @@ local function listenRoundSignals()
             parsePlayerDataPayload(v, nil, 0)
         end
         refreshRolesBurst("ShowRoleSelectNew")
+        if State.coinCollect then primeCoinEntry(State.lastRoundSignal) end
     end)
 
     bindRemoteEvent({"Remotes","Gameplay","VictoryScreen"}, function(...)
@@ -2062,7 +2140,7 @@ State._coinToggle = W:Toggle("Coin Collect", false, function(v)
     if v then startCoinCollect() else stopCoinCollect() end
 end)
 
-W:Slider("Speed", 1, 6, 3, function(v)
+W:Slider("Speed", 1, 5, 2, function(v)
     State.coinSpeed = v
 end)
 
