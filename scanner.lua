@@ -1,5 +1,5 @@
 -- ref_universal | Murder Mystery tester
--- v2026-06-03-r6
+-- v2026-06-03-r8
 
 local Players          = game:GetService("Players")
 local TweenService     = game:GetService("TweenService")
@@ -116,7 +116,7 @@ local State = {
     lastAction         = 0,
     manualSilent       = false,
     coinCollect        = false,
-    coinSpeed          = 3,
+    coinSpeed          = 4,
     collecting         = false,
     espOn              = false,
     roles              = {},
@@ -144,10 +144,21 @@ local State = {
     lastRoundSignal    = "None",
     lastLobbySignal    = "None",
     localRole          = nil,
+    localDead          = false,
+    _coinLockConn      = nil,
+    _coinDesiredCF     = nil,
+    _coinSavedHumanoid = nil,
+    _coinSavedCollide  = nil,
+    _coinStagePlatform = nil,
+    _coinStageCF       = nil,
+    _coinLastSafeCF    = nil,
+    _coinLastTarget    = nil,
+    _coinIgnoreUntil   = {},
     coinCount          = 0,
     coinLimit          = 40,
     coinStatus         = "Idle",
     _coinToggle        = nil,
+    _gunDropToggle     = nil,
     _coinEntryPrime    = 0,
     _coinStartedInLobby = false,
     _returningLobby    = false,
@@ -194,6 +205,151 @@ local function clearRuntimeForRoot(root)
     destroyChild(root, "_CBG")
     destroyChild(root, "_GDBP")
     destroyChild(root, "_GDBG")
+end
+local function restoreCoinPhysics()
+    local hadCoinPhysics = State._coinLockConn ~= nil or State._coinDesiredCF ~= nil or State._coinSavedHumanoid ~= nil or State._coinSavedCollide ~= nil
+    safeDisconnect(State._coinLockConn)
+    State._coinLockConn = nil
+    State._coinDesiredCF = nil
+
+    local char = getChar()
+    if char then
+        if State._coinSavedCollide then
+            for part, oldValue in pairs(State._coinSavedCollide) do
+                if part and part.Parent and part:IsA("BasePart") then
+                    _pcall(function() part.CanCollide = oldValue end)
+                end
+            end
+        else
+            for _, part in ipairs(char:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    _pcall(function() part.CanCollide = true end)
+                end
+            end
+        end
+    end
+    State._coinSavedCollide = nil
+
+    local hum = getHumanoid()
+    if hum then
+        local saved = State._coinSavedHumanoid
+        _pcall(function()
+            hum.Sit = false
+            hum.PlatformStand = false
+            if saved and saved.AutoRotate ~= nil then
+                hum.AutoRotate = saved.AutoRotate
+            else
+                hum.AutoRotate = true
+            end
+            hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+        end)
+    end
+    State._coinSavedHumanoid = nil
+
+    local root = getRoot()
+    if root then
+        clearRuntimeForRoot(root)
+        _pcall(function()
+            root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+            if hadCoinPhysics then
+                local _, yaw, _ = root.CFrame:ToOrientation()
+                root.CFrame = CFrame.new(root.Position + Vector3.new(0, 1.25, 0)) * CFrame.Angles(0, yaw, 0)
+            end
+        end)
+    end
+end
+
+local function saveAndApplyNoclip(char)
+    if not char then return end
+    if not State._coinSavedCollide then
+        State._coinSavedCollide = {}
+    end
+    for _, part in ipairs(char:GetDescendants()) do
+        if part:IsA("BasePart") then
+            if State._coinSavedCollide[part] == nil then
+                local old = true
+                _pcall(function() old = part.CanCollide end)
+                State._coinSavedCollide[part] = old
+            end
+            _pcall(function() part.CanCollide = false end)
+        end
+    end
+end
+
+local function beginCoinPhysicsLock()
+    local char = getChar()
+    local hum = getHumanoid()
+    if hum and not State._coinSavedHumanoid then
+        local autoRotate = true
+        _pcall(function() autoRotate = hum.AutoRotate end)
+        State._coinSavedHumanoid = { AutoRotate = autoRotate }
+    end
+    if hum then
+        _pcall(function()
+            hum.Sit = false
+            hum.AutoRotate = false
+            hum.PlatformStand = true
+        end)
+    end
+    saveAndApplyNoclip(char)
+
+    if State._coinLockConn then return end
+    State._coinLockConn = trackConn(RunService.Stepped:Connect(function()
+        if not Alive or not State.coinCollect or not (State.currentPhase == "Round" or State.currentPhase == "Role Select") then
+            return
+        end
+        local c = getChar()
+        local r = getRoot()
+        local h = getHumanoid()
+        if c then saveAndApplyNoclip(c) end
+        if h then
+            _pcall(function()
+                h.Sit = false
+                h.AutoRotate = false
+                h.PlatformStand = true
+            end)
+        end
+        if r then
+            _pcall(function()
+                r.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                r.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+                if State._coinDesiredCF then
+                    r.CFrame = State._coinDesiredCF
+                end
+            end)
+        end
+    end))
+end
+
+local function setCoinCFrame(cf)
+    State._coinDesiredCF = cf
+    local root = getRoot()
+    if root and cf then
+        _pcall(function()
+            root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+            root.CFrame = cf
+        end)
+    end
+end
+
+local function destroyCoinStagePlatform()
+    local p = State._coinStagePlatform
+    State._coinStagePlatform = nil
+    State._coinStageCF = nil
+    if p then
+        safeDestroy(p)
+    end
+end
+
+local function rememberSafeCFrame(force)
+    local root = getRoot()
+    if not root then return end
+    local pos = root.Position
+    if force or (pos.Y > -20 and not State._coinDesiredCF and not State._coinStagePlatform) then
+        State._coinLastSafeCF = CFrame.new(pos + Vector3.new(0, 2.5, 0))
+    end
 end
 
 local function getObjectPath(obj)
@@ -242,6 +398,8 @@ local function cleanup()
         State.espCharConns[k] = nil
     end
 
+    destroyCoinStagePlatform()
+
     safeDestroy(State._gunDropEsp)
     State._gunDropEsp = nil
     safeDisconnect(State._gunDropConn)
@@ -249,16 +407,7 @@ local function cleanup()
     safeDisconnect(State._gunDropEspConn)
     State._gunDropEspConn = nil
 
-    local root = getRoot()
-    clearRuntimeForRoot(root)
-    local char = getChar()
-    if char then
-        for _, part in ipairs(char:GetDescendants()) do
-            if part:IsA("BasePart") then
-                _pcall(function() part.CanCollide = true end)
-            end
-        end
-    end
+    restoreCoinPhysics()
 
     local pg = LocalPlayer and LocalPlayer:FindFirstChildOfClass("PlayerGui")
     local oldGui = pg and pg:FindFirstChild("RefUniversal")
@@ -558,7 +707,14 @@ local function getTopWorkspaceChild(obj)
 end
 
 local function isCoinCollectPhase()
-    return State.currentPhase == "Round" or State.currentPhase == "Role Select"
+    return State.currentPhase == "Round"
+end
+
+local function isCoinStagePhase()
+    return State.currentPhase == "Lobby"
+        or State.currentPhase == "Unknown"
+        or State.currentPhase == "Loading Map"
+        or State.currentPhase == "Role Select"
 end
 
 local function isValidCoinPart(part)
@@ -578,9 +734,9 @@ local function isValidCoinPart(part)
     return true
 end
 
-local function findCoins(allowFar)
+local function findCoins(allowFar, ignorePhase)
     local list = {}
-    if not isCoinCollectPhase() then
+    if not ignorePhase and not isCoinCollectPhase() then
         State.coinStatus = "Waiting for round"
         return list
     end
@@ -631,11 +787,11 @@ local function findCoins(allowFar)
 
     -- In normal mode, never crawl from lobby/void to a far preloaded map.
     -- During the first seconds of a real round, allow one safe entry stage.
-    if best.nearest > 320 and not allowFar then
+    if best.nearest > 450 and not allowFar then
         State.coinStatus = "Coins too far"
         return list
     end
-    if best.nearest > 320 and allowFar then
+    if best.nearest > 450 and allowFar then
         State.coinStatus = "Entry staging"
     end
 
@@ -651,8 +807,8 @@ local function coinSpeedStuds(speed)
     -- 1 is still usable, 6 is quick without becoming instant teleport.
     speed = tonumber(speed) or 3
     speed = math.clamp(speed, 1, 6)
-    local map = { 10, 15, 21, 28, 36, 45 }
-    return map[speed] or 21
+    local map = { 34, 48, 64, 82, 104, 130 }
+    return map[speed] or 64
 end
 
 local function lyingCoinCFrame(pos, lookAt)
@@ -672,15 +828,25 @@ end
 local function layDown()
     local root = getRoot()
     if not root then return end
-    _pcall(function()
-        root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-        root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-        root.CFrame = lyingCoinCFrame(root.Position, root.Position + root.CFrame.LookVector)
-    end)
+    beginCoinPhysicsLock()
+    setCoinCFrame(lyingCoinCFrame(root.Position, root.Position + root.CFrame.LookVector))
 end
 
 local function setCollide(char, state)
     if not char then return end
+    if state == false then
+        saveAndApplyNoclip(char)
+        return
+    end
+    if State._coinSavedCollide then
+        for part, oldValue in pairs(State._coinSavedCollide) do
+            if part and part.Parent and part:IsA("BasePart") then
+                _pcall(function() part.CanCollide = oldValue end)
+            end
+        end
+        State._coinSavedCollide = nil
+        return
+    end
     for _, p in ipairs(char:GetDescendants()) do
         if p:IsA("BasePart") then
             _pcall(function() p.CanCollide = state end)
@@ -697,13 +863,10 @@ local function noclipLoop()
             return
         end
         if not isCoinCollectPhase() then return end
+        beginCoinPhysicsLock()
         local c = getChar()
         if not c then return end
-        for _, p in ipairs(c:GetDescendants()) do
-            if p:IsA("BasePart") then
-                _pcall(function() p.CanCollide = false end)
-            end
-        end
+        saveAndApplyNoclip(c)
     end))
 end
 
@@ -737,26 +900,149 @@ local function touchCoinSweep(root, target)
     if not root or not target or not target.Parent then return end
     fireTouchCoin(target)
     local offsets = {
-        Vector3.new(0, -1.35, 0),
         Vector3.new(0, -0.95, 0),
         Vector3.new(0, -0.55, 0),
-        Vector3.new(0, -0.15, 0),
-        Vector3.new(0.75, -0.75, 0),
-        Vector3.new(-0.75, -0.75, 0),
-        Vector3.new(0, -0.75, 0.75),
-        Vector3.new(0, -0.75, -0.75),
-        Vector3.new(0, 0.25, 0),
+        Vector3.new(0, -0.2, 0),
+        Vector3.new(0, 0.1, 0),
+        Vector3.new(0.65, -0.45, 0),
+        Vector3.new(-0.65, -0.45, 0),
+        Vector3.new(0, -0.45, 0.65),
+        Vector3.new(0, -0.45, -0.65),
+        Vector3.new(0, 0.35, 0),
     }
     for _, off in ipairs(offsets) do
         if not Alive or not State.coinCollect or not target.Parent then break end
-        _pcall(function()
-            root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-            root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-            root.CFrame = lyingCoinCFrame(target.Position + off, target.Position)
-        end)
+        setCoinCFrame(lyingCoinCFrame(target.Position + off, target.Position))
         fireTouchCoin(target)
-        _wait(0.018)
+        _wait(0.01)
     end
+    State._coinIgnoreUntil[target] = testerTime() + 0.12
+end
+
+local function getNearestCoin(allowFar, ignorePhase)
+    local coins = findCoins(allowFar, ignorePhase)
+    local root = getRoot()
+    if not root or #coins == 0 then return nil end
+    local now = testerTime()
+    local rp = root.Position
+    local best, bestDist = nil, math.huge
+    for _, coin in ipairs(coins) do
+        if coin and coin.Parent and (not State._coinIgnoreUntil[coin] or State._coinIgnoreUntil[coin] <= now) then
+            local d = (coin.Position - rp).Magnitude
+            if d < bestDist then
+                best = coin
+                bestDist = d
+            end
+        end
+    end
+    return best, bestDist
+end
+
+local function prepareCoinStagePlatform()
+    if not Alive or not State.coinCollect or not isCoinStagePhase() then return false end
+    local root = getRoot()
+    if not root then return false end
+    if State._coinStagePlatform and State._coinStagePlatform.Parent then
+        local cf = State._coinStageCF
+        if cf then
+            _pcall(function()
+                root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+                root.CFrame = cf + Vector3.new(0, 4.25, 0)
+            end)
+        end
+        State.coinStatus = "Staged - waiting for round"
+        return true
+    end
+
+    rememberSafeCFrame(true)
+
+    local coin = getNearestCoin(true, true)
+    if not coin then
+        State.coinStatus = "Armed - waiting for map"
+        return false
+    end
+
+    local pos = coin.Position + Vector3.new(0, -14, 0)
+    if pos.Y < -60 then
+        pos = Vector3.new(pos.X, -32, pos.Z)
+    end
+
+    local platform = Instance.new("Part")
+    platform.Name = "_REF_COIN_STAGE_PLATFORM"
+    platform.Anchored = true
+    platform.CanCollide = true
+    platform.CanTouch = false
+    platform.Size = Vector3.new(34, 1.2, 34)
+    platform.Material = Enum.Material.ForceField
+    platform.Color = Color3.fromRGB(135, 95, 255)
+    platform.Transparency = 0.35
+    platform.CFrame = CFrame.new(pos)
+    platform.Parent = workspace
+
+    State._coinStagePlatform = platform
+    State._coinStageCF = platform.CFrame
+    trackObject(platform)
+
+    _pcall(function()
+        root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+        root.CFrame = platform.CFrame + Vector3.new(0, 4.25, 0)
+    end)
+
+    State.coinStatus = "Staged under map"
+    return true
+end
+
+local function findCoinReturnCFrame()
+    local root = getRoot()
+    local char = getChar()
+    if root then
+        local origin = root.Position + Vector3.new(0, 90, 0)
+        local params = RaycastParams.new()
+        params.FilterType = Enum.RaycastFilterType.Blacklist
+        local blacklist = {}
+        if char then blacklist[#blacklist + 1] = char end
+        if State._coinStagePlatform then blacklist[#blacklist + 1] = State._coinStagePlatform end
+        params.FilterDescendantsInstances = blacklist
+        local result = nil
+        _pcall(function()
+            result = workspace:Raycast(origin, Vector3.new(0, -240, 0), params)
+        end)
+        if result and result.Position and result.Position.Y > -30 then
+            return CFrame.new(result.Position + Vector3.new(0, 4.5, 0))
+        end
+    end
+
+    if root then
+        local best, bestScore = nil, math.huge
+        local desc = nil
+        _pcall(function() desc = workspace:GetDescendants() end)
+        if desc then
+            local rp = root.Position
+            for _, obj in ipairs(desc) do
+                local ok, isPart = _pcall(function() return obj:IsA("BasePart") end)
+                if ok and isPart and obj ~= State._coinStagePlatform and obj.Name ~= "Coin_Server" and obj.Name ~= "GunDrop" then
+                    local pos = obj.Position
+                    local size = obj.Size
+                    if pos.Y > -30 and size.X >= 3 and size.Z >= 3 then
+                        local horizontal = Vector3.new(pos.X - rp.X, 0, pos.Z - rp.Z).Magnitude
+                        local verticalPenalty = math.max(0, math.abs((pos.Y + size.Y * 0.5) - rp.Y) - 25)
+                        local score = horizontal + verticalPenalty
+                        if score < bestScore then
+                            best = obj
+                            bestScore = score
+                        end
+                    end
+                end
+            end
+        end
+        if best and bestScore < 180 then
+            return CFrame.new(best.Position + Vector3.new(0, best.Size.Y * 0.5 + 4.5, 0))
+        end
+    end
+
+    return State._coinLastSafeCF
 end
 
 local function floatToCoin(target, speed)
@@ -770,48 +1056,42 @@ local function floatToCoin(target, speed)
     local allowEntryStage = (State._coinEntryPrime or 0) > testerTime()
 
     local startDist = (root.Position - target.Position).Magnitude
-    if startDist > 320 and not allowEntryStage then
+    if startDist > 420 and not allowEntryStage then
         State.coinStatus = "Skipped far coin"
         return
     end
 
-    if startDist > 320 and allowEntryStage then
+    if startDist > 420 and allowEntryStage then
         State.coinStatus = "Entry hover"
-        _pcall(function()
-            root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-            root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-            root.CFrame = lyingCoinCFrame(target.Position + Vector3.new(0, -1.05, 0), target.Position)
-        end)
-        _wait(0.18)
+        beginCoinPhysicsLock()
+        setCoinCFrame(lyingCoinCFrame(target.Position + Vector3.new(0, -0.65, 0), target.Position))
+        _wait(0.05)
         root = getRoot()
         if not root then return end
         startDist = (root.Position - target.Position).Magnitude
     end
 
-    local timeout = math.clamp(startDist / math.max(moveSpeed, 1) + 2, 2.5, 18)
+    State._coinLastTarget = target
+    local timeout = math.clamp(startDist / math.max(moveSpeed, 1) + 0.8, 1.2, 10)
     local elapsed = 0
-    local stepTime = 0.035
+    local stepTime = 0.018
 
     while Alive and elapsed < timeout and State.coinCollect and target and target.Parent and isCoinCollectPhase() do
         local r = getRoot()
         if not r then break end
 
-        local targetPos = target.Position + Vector3.new(0, -0.95, 0)
+        local targetPos = target.Position + Vector3.new(0, -0.75, 0)
         local cur = r.Position
         if cur.Y < -65 then
             State.coinStatus = "Void guard"
-            _pcall(function()
-                r.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-                r.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-                r.CFrame = lyingCoinCFrame(target.Position + Vector3.new(0, -2.1, 0), target.Position)
-            end)
+            setCoinCFrame(lyingCoinCFrame(target.Position + Vector3.new(0, -0.65, 0), target.Position))
             _wait(0.12)
             break
         end
 
         local delta = targetPos - cur
         local dist = delta.Magnitude
-        if dist < 2.35 then
+        if dist < 4.2 then
             State.coinStatus = "Touching coin"
             touchCoinSweep(r, target)
             break
@@ -820,17 +1100,13 @@ local function floatToCoin(target, speed)
         local move = math.min(dist, moveSpeed * stepTime)
         local nextPos = cur + delta.Unit * move
 
-        if nextPos.Y < target.Position.Y - 4.5 then
-            nextPos = Vector3.new(nextPos.X, target.Position.Y - 4.5, nextPos.Z)
+        if nextPos.Y < target.Position.Y - 2.6 then
+            nextPos = Vector3.new(nextPos.X, target.Position.Y - 2.6, nextPos.Z)
         end
 
-        _pcall(function()
-            r.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-            r.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-            r.CFrame = lyingCoinCFrame(nextPos, target.Position)
-        end)
+        setCoinCFrame(lyingCoinCFrame(nextPos, target.Position))
 
-        if dist < 7 then
+        if dist < 10 then
             fireTouchCoin(target)
         end
         _wait(stepTime)
@@ -845,59 +1121,53 @@ local function startCoinCollect()
     _spawn(function()
         while Alive and State.coinCollect do
             if not isCoinCollectPhase() then
-                State._coinStartedInLobby = State.currentPhase == "Lobby" or State.currentPhase == "Unknown" or State.currentPhase == "Loading Map"
-                State.coinStatus = State._coinStartedInLobby and "Armed - waiting for round" or "Waiting for round"
-                _wait(0.4)
+                restoreCoinPhysics()
+                State._coinStartedInLobby = isCoinStagePhase()
+                if State._coinStartedInLobby then
+                    prepareCoinStagePlatform()
+                else
+                    State.coinStatus = "Waiting for round"
+                end
+                _wait(0.22)
             else
+                destroyCoinStagePlatform()
                 layDown()
                 local allowFar = (State._coinEntryPrime or 0) > testerTime()
-                local coins = findCoins(allowFar)
-                if #coins == 0 then
-                    _wait(0.6)
+                local coin = getNearestCoin(allowFar, false)
+                if coin and coin.Parent then
+                    State.coinStatus = "Moving to nearest"
+                    floatToCoin(coin, State.coinSpeed)
                 else
-                    local root = getRoot()
-                    if root then
-                        local rp = root.Position
-                        table.sort(coins, function(a, b)
-                            return (a.Position - rp).Magnitude < (b.Position - rp).Magnitude
-                        end)
-                        for _, coin in ipairs(coins) do
-                            if not State.coinCollect or not isCoinCollectPhase() then break end
-                            if coin and coin.Parent then
-                                State.coinStatus = "Moving"
-                                floatToCoin(coin, State.coinSpeed)
-                                _wait(0.04)
-                            end
-                        end
-                    end
-                    _wait(0.2)
+                    State.coinStatus = "No coins"
+                    _wait(0.1)
                 end
             end
         end
-        -- cleanup when disabled
         State.coinStatus = "Idle"
-        local c = getChar()
-        if c then setCollide(c, true) end
-        local r = getRoot()
-        if r then
-            destroyChild(r, "_CBP")
-            destroyChild(r, "_CBG")
-            _pcall(function()
-                r.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-                r.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-                r.CFrame = CFrame.new(r.Position + Vector3.new(0, 1.5, 0))
-            end)
-        end
+        restoreCoinPhysics()
+        destroyCoinStagePlatform()
         State.collecting = false
     end)
 end
 
 local function stopCoinCollect()
+    local returnCF = findCoinReturnCFrame()
     State.coinCollect = false
     State.coinStatus = "Idle"
     State._coinEntryPrime = 0
+    State._coinIgnoreUntil = {}
     safeDisconnect(State._noclipConn)
     State._noclipConn = nil
+    restoreCoinPhysics()
+    destroyCoinStagePlatform()
+    local root = getRoot()
+    if root and returnCF then
+        _pcall(function()
+            root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+            root.CFrame = returnCF
+        end)
+    end
 end
 
 local function primeCoinEntry(reason)
@@ -910,11 +1180,8 @@ local function primeCoinEntry(reason)
         if not Alive or not State.coinCollect or not isCoinCollectPhase() then return end
         local root = getRoot()
         if root then
-            _pcall(function()
-                root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-                root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-                root.CFrame = lyingCoinCFrame(root.Position + Vector3.new(0, 0.65, 0), root.Position + root.CFrame.LookVector)
-            end)
+            beginCoinPhysicsLock()
+            setCoinCFrame(lyingCoinCFrame(root.Position + Vector3.new(0, 0.35, 0), root.Position + root.CFrame.LookVector))
         end
     end)
 end
@@ -1124,6 +1391,7 @@ local function resetAllRoles()
         end
     end
     State.localRole = nil
+    State.localDead = false
 end
 
 local function setRoleForPlayer(pname, role)
@@ -1134,6 +1402,9 @@ local function setRoleForPlayer(pname, role)
     State.roles[pname] = role
     if pname == LocalPlayer.Name then
         State.localRole = role ~= "?" and role or nil
+        if role ~= "?" then
+            State.localDead = false
+        end
     end
     if State.espOn then
         updateEspLabel(pname)
@@ -1162,6 +1433,11 @@ local function parsePlayerDataPayload(value, fallbackName, depth)
 
     local isDead = value.Dead == true or value.dead == true or value.IsDead == true
     if isDead then
+        if not pname or pname == LocalPlayer.Name then
+            State.localDead = true
+            State.localRole = nil
+            State.lastGunDropStatus = "Dead / no role"
+        end
         setRoleForPlayer(pname, "?")
     elseif State.currentPhase ~= "Lobby" and type(role) == "string" then
         setRoleForPlayer(pname, role)
@@ -1268,6 +1544,7 @@ local function listenRoundSignals()
         State.lastWinnerRole = nil
         State.lastCreditedPlayer = nil
         State.coinCount = 0
+        State.localDead = false
         resetAllRoles()
         for _, v in ipairs({...}) do
             parsePlayerDataPayload(v, nil, 0)
@@ -1367,7 +1644,9 @@ local function listenRoundSignals()
         State.lastLobbySignal = signal
         State.lastRoundSignal = signal
         State.localRole = nil
+        State.localDead = true
         resetAllRoles()
+        State.localDead = true
         if hadCoinCollect then
             stopCoinCollect()
             if State._coinToggle and State._coinToggle.Set then
@@ -1408,6 +1687,18 @@ local function listenPlayerRespawns()
         trackConn(player.CharacterAdded:Connect(function()
             if not Alive then return end
             if State.currentPhase == "Round" or State.currentPhase == "Ending" then
+                if player == LocalPlayer then
+                    State.localDead = true
+                    State.localRole = nil
+                    State.lastGunDropStatus = "Dead / no role"
+                    State.gunDropOn = false
+                    State._gunDropWatch = false
+                    safeDisconnect(State._gunDropConn)
+                    State._gunDropConn = nil
+                    if State._gunDropToggle and State._gunDropToggle.Set then
+                        _pcall(function() State._gunDropToggle:Set(false) end)
+                    end
+                end
                 setRoleForPlayer(player.Name, "?")
             end
         end))
@@ -1448,10 +1739,12 @@ end
 
 local function canCollectGunDrop()
     if not State.gunDropOn then return false, "Off" end
-    if not isLocalAlive() then return false, "Dead" end
     if State.currentPhase == "Lobby" or State.currentPhase == "Ending" or State.currentPhase == "Loading Map" then
         return false, "Waiting for round"
     end
+    if State.localDead == true then return false, "Dead / no role" end
+    if not State.localRole or State.localRole == "?" then return false, "No role" end
+    if not isLocalAlive() then return false, "Dead" end
     return true, "OK"
 end
 
@@ -1649,7 +1942,7 @@ local function hardTouchGunDrop(gd)
     }
 
     for _, offset in ipairs(offsets) do
-        if not Alive or not State.gunDropOn or not gd or not gd.Parent then break end
+        if not Alive or not State.gunDropOn or not gd or not gd.Parent or not canCollectGunDrop() then break end
         _pcall(function()
             root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
             root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
@@ -1671,13 +1964,15 @@ local function moveNearGunDrop(gd)
     local speed = 85
 
     while Alive and State.gunDropOn and gd and gd.Parent and testerTime() - started < maxTime do
+        local can = canCollectGunDrop()
+        if not can then break end
         local r = getRoot()
         if not r then break end
         local targetPos = gd.Position + Vector3.new(0, 2.15, 0)
         local delta = targetPos - r.Position
         local dist = delta.Magnitude
         if dist <= 3.2 then break end
-        local stepTime = 0.035
+        local stepTime = 0.025
         local move = math.min(dist, speed * stepTime)
         local nextPos = r.Position + delta.Unit * move
         _pcall(function()
@@ -2259,10 +2554,15 @@ W:Section("  COINS")
 
 State._coinToggle = W:Toggle("Coin Collect", false, function(v)
     State.coinCollect = v
-    if v then startCoinCollect() else stopCoinCollect() end
+    if v then
+        rememberSafeCFrame(true)
+        startCoinCollect()
+    else
+        stopCoinCollect()
+    end
 end)
 
-W:Slider("Speed", 1, 6, 3, function(v)
+W:Slider("Speed", 1, 6, 4, function(v)
     State.coinSpeed = v
 end)
 
@@ -2297,7 +2597,7 @@ W:Toggle("GunDrop ESP", false, function(v)
     if v then startGunDropEsp() else stopGunDropEsp() end
 end)
 
-W:Toggle("Auto Collect GunDrop", false, function(v)
+State._gunDropToggle = W:Toggle("Auto Collect GunDrop", false, function(v)
     State.gunDropOn = v
     if v then startGunDropWatch() else stopGunDropWatch() end
 end)
