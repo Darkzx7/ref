@@ -1,5 +1,5 @@
 -- ref_universal | Murder Mystery tester
--- v2026-06-03-v15-coin-ground-wait
+-- v2026-06-03-v16-role-target-cleanup
 
 local Players          = game:GetService("Players")
 local TweenService     = game:GetService("TweenService")
@@ -111,8 +111,6 @@ local State = {
     jumpPred           = true,
     pingPred           = true,
     cooldownIndex      = 2,
-    targetIndex        = 0,
-    selectedPlayerName = nil,
     lastAction         = 0,
     manualSilent       = false,
     coinCollect        = false,
@@ -652,39 +650,57 @@ local function getPlayerList()
     return list
 end
 
-local function selectedPlayer()
-    if not State.selectedPlayerName then return nil end
-    for _, p in ipairs(getPlayerList()) do
-        if p.Name == State.selectedPlayerName then return p end
-    end
-    State.selectedPlayerName = nil
-    State.targetIndex = 0
-    return nil
+local function roleOfPlayer(player)
+    if not player then return nil end
+    if player == LocalPlayer and State.localRole then return State.localRole end
+    local r = State.roles[player.Name]
+    if r == "?" or r == "" then return nil end
+    return r
 end
 
-local function nearestTarget()
+local function isValidCombatTarget(player)
+    if not player or player == LocalPlayer then return false end
+    if not isAlive(player.Character) then return false end
+    local r = roleOfPlayer(player)
+    if r == "?" then return false end
+    return true
+end
+
+local function nearestByFilter(filterFn, reasonLabel)
     local myRoot = getPart(getChar(), "HumanoidRootPart")
     local myPos  = myRoot and partPos(myRoot)
     if not myPos then return nil, nil, "no local position" end
 
-    local locked = selectedPlayer()
-    if locked then
-        local lp = getPart(locked.Character, State.selectedPart)
-        if lp then return locked, lp, "locked:"..locked.Name end
-        return nil, nil, "locked target missing part"
-    end
-
     local best, bestPart, bestDist = nil, nil, 999999
     for _, p in ipairs(getPlayerList()) do
-        local pt = getPart(p.Character, State.selectedPart)
-        local pos = pt and partPos(pt)
-        if pos then
-            local d = (myPos - pos).Magnitude
-            if d < bestDist then bestDist = d; best = p; bestPart = pt end
+        if not filterFn or filterFn(p) then
+            local pt = getPart(p.Character, State.selectedPart)
+            local pos = pt and partPos(pt)
+            if pos then
+                local d = (myPos - pos).Magnitude
+                if d < bestDist then
+                    bestDist = d
+                    best = p
+                    bestPart = pt
+                end
+            end
         end
     end
-    if not bestPart then return nil, nil, "no target" end
-    return best, bestPart, "nearest:"..best.Name
+
+    if not bestPart then return nil, nil, reasonLabel or "no target" end
+    return best, bestPart, (reasonLabel or "target")..":"..best.Name
+end
+
+local function nearestMurdererTarget()
+    return nearestByFilter(function(p)
+        return isValidCombatTarget(p) and roleOfPlayer(p) == "Murderer"
+    end, "no murderer")
+end
+
+local function nearestKnifeTarget()
+    return nearestByFilter(function(p)
+        return isValidCombatTarget(p)
+    end, "no knife target")
 end
 
 local function makeCFrames(originPart, targetPart, originOverride)
@@ -704,12 +720,12 @@ end
 
 local Tester = {}
 
-function Tester.ShootTarget()
+function Tester.ShootMurderer()
     if not canAct("Shoot") then return false end
     local tool = equipTool("Gun")
     local remote = tool and findChild(tool, "Shoot")
     if not remote then return false end
-    local _, targetPart, st = nearestTarget()
+    local _, targetPart = nearestMurdererTarget()
     if not targetPart then return false end
     local handle = findChild(tool, "Handle") or getPart(getChar(), "HumanoidRootPart")
     local oc, tc = makeCFrames(handle, targetPart)
@@ -718,15 +734,19 @@ function Tester.ShootTarget()
     return true
 end
 
+function Tester.ShootTarget()
+    return Tester.ShootMurderer()
+end
+
 function Tester.ThrowKnife()
     if not canAct("Throw") then return false end
     local tool = equipTool("Knife")
     local events = tool and findChild(tool, "Events")
     local remote = events and findChild(events, "KnifeThrown")
     if not remote then return false end
-    local _, targetPart = nearestTarget()
+    local _, targetPart = nearestKnifeTarget()
     if not targetPart then return false end
-    local handle = findChild(tool, "Handle") or getPart(getChar())
+    local handle = findChild(tool, "Handle") or getPart(getChar(), "HumanoidRootPart")
     local oc, tc = makeCFrames(handle, targetPart)
     if not oc then return false end
     _pcall(function() remote:FireServer(oc, tc) end)
@@ -739,7 +759,7 @@ function Tester.TouchTarget()
     local events = tool and findChild(tool, "Events")
     local remote = events and findChild(events, "HandleTouched")
     if not remote then return false end
-    local _, targetPart = nearestTarget()
+    local _, targetPart = nearestKnifeTarget()
     if not targetPart then return false end
     _pcall(function() remote:FireServer(targetPart) end)
     return true
@@ -757,23 +777,6 @@ function Tester.StabTarget()
     Tester.TouchTarget()
     State.lastAction = old
     return true
-end
-
-function Tester.CycleTarget()
-    local pl = getPlayerList()
-    if #pl == 0 then
-        State.targetIndex = 0
-        State.selectedPlayerName = nil
-        return "nearest"
-    end
-    State.targetIndex = State.targetIndex + 1
-    if State.targetIndex > #pl then
-        State.targetIndex = 0
-        State.selectedPlayerName = nil
-        return "nearest"
-    end
-    State.selectedPlayerName = pl[State.targetIndex].Name
-    return State.selectedPlayerName
 end
 
 function Tester.CyclePart()
@@ -2971,9 +2974,8 @@ local W = RefLib.Window("ref_universal | tester")
 
 -- ── WEAPON TESTER ──────────────────────────────────────────────────────────────
 
-W:Section("  WEAPON TESTER")
+W:Section("  COMBAT TESTER")
 
-local targetBtn = W:CycleButton("Target", {"nearest"}, 1, nil)
 local partBtn   = W:CycleButton("Part", PART_OPTIONS, 1, function(i, v)
     State.partIndex   = i
     State.selectedPart = v
@@ -2987,30 +2989,18 @@ end)
 
 W:Toggle("Jump Prediction", true, function(v) State.jumpPred = v end)
 W:Toggle("Ping Prediction", true, function(v) State.pingPred = v end)
-W:Toggle("Manual Silent", false, function(v) State.manualSilent = v end)
+W:Toggle("Manual Shoot Murderer", false, function(v) State.manualSilent = v end)
 
-W:Button("Shoot Target", function()
-    local ok = Tester.ShootTarget()
+W:Button("Shoot Murderer", function()
+    local ok = Tester.ShootMurderer()
     if not ok then -- feedback visual curto
         _spawn(function() _wait(0.1) end)
     end
 end)
-W:Button("Throw Knife",  function() Tester.ThrowKnife()  end)
-W:Button("Stab Target",  function() Tester.StabTarget()  end)
-W:Button("Touch Target", function() Tester.TouchTarget() end)
+W:Button("Throw Knife Nearest",  function() Tester.ThrowKnife()  end)
+W:Button("Stab Nearest",  function() Tester.StabTarget()  end)
+W:Button("Touch Nearest", function() Tester.TouchTarget() end)
 
--- cycle target personalizado — atualiza label
-local _origCycle = Tester.CycleTarget
-function Tester.CycleTarget()
-    local result = _origCycle()
-    local pl     = getPlayerList()
-    local labels = {"nearest"}
-    for _, p in ipairs(pl) do labels[#labels+1] = p.Name end
-    targetBtn:SetText("Target: "..(result or "nearest"))
-    return result
-end
-
-W:Button("Cycle Target", function() Tester.CycleTarget() end)
 
 -- ── COIN COLLECT ───────────────────────────────────────────────────────────────
 
