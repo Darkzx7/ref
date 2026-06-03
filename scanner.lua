@@ -174,6 +174,20 @@ local State = {
     _coinApproachExtra   = 1.75,
     _coinCloseBoost      = false,
     _returningLobby    = false,
+    afkFarm            = false,
+    afkStatus          = "Idle",
+    _afkToggle         = nil,
+    _afkActive         = false,
+    _afkPlatform       = nil,
+    _afkHoldConn       = nil,
+    _afkHoldCF         = nil,
+    _afkSavedRootAnchored = nil,
+    _afkSavedHumanoid  = nil,
+    _afkSavedAutoRotate = nil,
+    _afkSavedPlatformStand = nil,
+    _afkSavedWalkSpeed = nil,
+    _afkSavedJumpPower = nil,
+    _afkEndWaitToken   = nil,
     lastEndReason      = nil,
     lastWinnerRole     = nil,
     lastCreditedPlayer = nil,
@@ -532,6 +546,155 @@ local function rememberSafeCFrame(force)
     end
 end
 
+local function releaseAfkFarm(statusText)
+    safeDisconnect(State._afkHoldConn)
+    State._afkHoldConn = nil
+
+    local root = getRoot()
+    if root then
+        _pcall(function()
+            root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+            if State._afkSavedRootAnchored ~= nil then
+                root.Anchored = State._afkSavedRootAnchored
+            else
+                root.Anchored = false
+            end
+        end)
+    end
+
+    local hum = State._afkSavedHumanoid
+    if hum and hum.Parent then
+        _pcall(function()
+            if State._afkSavedAutoRotate ~= nil then hum.AutoRotate = State._afkSavedAutoRotate end
+            if State._afkSavedPlatformStand ~= nil then hum.PlatformStand = State._afkSavedPlatformStand end
+            if State._afkSavedWalkSpeed ~= nil then hum.WalkSpeed = State._afkSavedWalkSpeed end
+            if State._afkSavedJumpPower ~= nil then hum.JumpPower = State._afkSavedJumpPower end
+            hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+        end)
+    end
+
+    safeDestroy(State._afkPlatform)
+    State._afkPlatform = nil
+    State._afkHoldCF = nil
+    State._afkActive = false
+    State._afkSavedRootAnchored = nil
+    State._afkSavedHumanoid = nil
+    State._afkSavedAutoRotate = nil
+    State._afkSavedPlatformStand = nil
+    State._afkSavedWalkSpeed = nil
+    State._afkSavedJumpPower = nil
+    State._afkEndWaitToken = nil
+
+    if statusText then
+        State.afkStatus = statusText
+    elseif State.afkFarm then
+        State.afkStatus = "Armed - waiting for round"
+    else
+        State.afkStatus = "Idle"
+    end
+end
+
+local function getDeepVoidY(baseY)
+    local deathY = -500
+    _pcall(function()
+        if type(workspace.FallenPartsDestroyHeight) == "number" then
+            deathY = workspace.FallenPartsDestroyHeight
+        end
+    end)
+
+    local targetY = (tonumber(baseY) or 0) - 640
+    local lowestSafe = deathY + 85
+    if targetY < lowestSafe then targetY = lowestSafe end
+    if targetY > ((tonumber(baseY) or 0) - 260) then targetY = (tonumber(baseY) or 0) - 260 end
+    return targetY
+end
+
+local function startAfkFarmHold(reason)
+    if not Alive or not State.afkFarm then return false end
+    local root = getRoot()
+    if not root then
+        State.afkStatus = "Waiting for character"
+        return false
+    end
+
+    if State._afkActive and State._afkPlatform and State._afkPlatform.Parent and State._afkHoldCF then
+        State.afkStatus = "Deep void hold"
+        return true
+    end
+
+    releaseAfkFarm(nil)
+
+    root = getRoot()
+    if not root then return false end
+    local hum = getHumanoid()
+    local platformY = getDeepVoidY(root.Position.Y)
+    local platformPos = Vector3.new(root.Position.X, platformY, root.Position.Z)
+
+    local platform = Instance.new("Part")
+    platform.Name = "_REF_AFK_FARM_PLATFORM"
+    platform.Anchored = true
+    platform.CanCollide = true
+    platform.CanTouch = false
+    platform.CanQuery = false
+    platform.Size = Vector3.new(90, 1.5, 90)
+    platform.Transparency = 1
+    platform.CFrame = CFrame.new(platformPos)
+    platform.Parent = workspace
+    trackObject(platform)
+
+    State._afkPlatform = platform
+    State._afkHoldCF = CFrame.new(platformPos + Vector3.new(0, 4.2, 0))
+    State._afkActive = true
+    State.afkStatus = "Deep void hold"
+
+    _pcall(function()
+        State._afkSavedRootAnchored = root.Anchored
+        State._afkSavedHumanoid = hum
+        if hum then
+            State._afkSavedAutoRotate = hum.AutoRotate
+            State._afkSavedPlatformStand = hum.PlatformStand
+            State._afkSavedWalkSpeed = hum.WalkSpeed
+            State._afkSavedJumpPower = hum.JumpPower
+            hum.AutoRotate = false
+            hum.PlatformStand = true
+            hum.WalkSpeed = 0
+            hum.JumpPower = 0
+        end
+        root.Anchored = true
+        root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+        root.CFrame = State._afkHoldCF
+    end)
+
+    State._afkHoldConn = trackConn(RunService.Heartbeat:Connect(function()
+        if not Alive or not State.afkFarm or not State._afkActive then
+            releaseAfkFarm(State.afkFarm and "Armed - waiting for round" or "Idle")
+            return
+        end
+        local r = getRoot()
+        if not r or not State._afkHoldCF then return end
+        _pcall(function()
+            r.Anchored = true
+            r.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            r.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+            r.CFrame = State._afkHoldCF
+        end)
+    end))
+
+    return true
+end
+
+local function armAfkFarm(reason)
+    if not State.afkFarm then return end
+    local phase = State.currentPhase
+    if phase == "Lobby" or phase == "Unknown" then
+        State.afkStatus = "Armed - waiting for round"
+        return
+    end
+    startAfkFarmHold(reason)
+end
+
 local function getObjectPath(obj)
     if not obj then return "None" end
     local names = {}
@@ -547,6 +710,7 @@ local function cleanup()
     Alive = false
     State.manualSilent = false
     State.coinCollect = false
+    State.afkFarm = false
     State.gunDropOn = false
     State.gunDropEspOn = false
     State.espOn = false
@@ -579,6 +743,7 @@ local function cleanup()
     end
 
     destroyCoinStagePlatform()
+    releaseAfkFarm("Idle")
 
     safeDestroy(State._gunDropEsp)
     State._gunDropEsp = nil
@@ -2115,6 +2280,7 @@ local function listenRoundSignals()
         end
         refreshRolesBurst("RoundStart")
         if State.coinCollect then primeCoinEntry(State.lastRoundSignal) end
+        if State.afkFarm then startAfkFarmHold("RoundStart") end
     end)
 
     bindRemoteEvent({"Remotes","Gameplay","RoleSelect"}, function(...)
@@ -2134,6 +2300,7 @@ local function listenRoundSignals()
                 end
             end)
         end
+        if State.afkFarm then startAfkFarmHold("RoleSelect") end
     end)
 
     bindRemoteEvent({"Remotes","Gameplay","GiveWeapon"}, function(...)
@@ -2156,6 +2323,7 @@ local function listenRoundSignals()
         end
         refreshRolesBurst("GiveWeapon")
         if State.coinCollect then primeCoinEntry(State.lastRoundSignal) end
+        if State.afkFarm then startAfkFarmHold("GiveWeapon") end
     end)
 
     bindRemoteEvent({"Remotes","Gameplay","LoadingMap"}, function(...)
@@ -2176,6 +2344,7 @@ local function listenRoundSignals()
                 end
             end)
         end
+        if State.afkFarm then startAfkFarmHold("LoadingMap") end
     end)
 
     bindRemoteEvent({"Remotes","Gameplay","ShowRoleSelect"}, function(...)
@@ -2195,6 +2364,7 @@ local function listenRoundSignals()
                 end
             end)
         end
+        if State.afkFarm then startAfkFarmHold(State.lastRoundSignal or "RoleSelect") end
     end)
 
     bindRemoteEvent({"Remotes","Gameplay","ShowRoleSelectNew"}, function(...)
@@ -2214,6 +2384,7 @@ local function listenRoundSignals()
                 end
             end)
         end
+        if State.afkFarm then startAfkFarmHold(State.lastRoundSignal or "RoleSelect") end
     end)
 
     bindRemoteEvent({"Remotes","Gameplay","VictoryScreen"}, function(...)
@@ -2234,6 +2405,17 @@ local function listenRoundSignals()
         if hadCoinCollect then
             suspendCoinMovementOnRoundEnd()
         end
+        if State.afkFarm and State._afkActive then
+            State.afkStatus = "Round ending - waiting for lobby"
+            local token = testerTime()
+            State._afkEndWaitToken = token
+            _spawn(function()
+                _wait(4)
+                if Alive and State.afkFarm and State._afkActive and State.currentPhase == "Ending" and State._afkEndWaitToken == token then
+                    releaseAfkFarm("Released after round end")
+                end
+            end)
+        end
     end)
 
     local function markLobby(signal)
@@ -2248,6 +2430,9 @@ local function listenRoundSignals()
         State.localDead = true
         if hadCoinCollect then
             suspendCoinMovementOnRoundEnd()
+        end
+        if State.afkFarm or State._afkActive then
+            releaseAfkFarm(State.afkFarm and "Armed - waiting for round" or "Idle")
         end
     end
 
@@ -3139,6 +3324,11 @@ W:Button("Touch Nearest", function() Tester.TouchTarget() end)
 W:Section("  COINS")
 
 State._coinToggle = W:Toggle("Coin Collect", false, function(v)
+    if v and State.afkFarm then
+        State.afkFarm = false
+        if State._afkToggle then State._afkToggle:Set(false) end
+        releaseAfkFarm("Idle")
+    end
     State.coinCollect = v
     if v then
         State._coinStartedInLobby = isCoinArmedOnlyPhase()
@@ -3156,6 +3346,22 @@ end)
 
 W:Slider("Speed", 1, 6, 4, function(v)
     State.coinSpeed = v
+end)
+
+W:Section("  AFK")
+
+State._afkToggle = W:Toggle("Farm AFK", false, function(v)
+    State.afkFarm = v
+    if v then
+        if State.coinCollect then
+            State.coinCollect = false
+            if State._coinToggle then State._coinToggle:Set(false) end
+            stopCoinCollect()
+        end
+        armAfkFarm("Manual")
+    else
+        releaseAfkFarm("Idle")
+    end
 end)
 
 -- ── ROLE ESP ───────────────────────────────────────────────────────────────────
@@ -3209,12 +3415,14 @@ local statusLbl = W:Label("Ready.")
 local phaseLbl = W:Label("Phase: Unknown")
 local dataLbl = W:Label("Role: ? | Coins: 0/40")
 local gunDropLbl = W:Label("GunDrop: Missing | N/A")
+local afkLbl = W:Label("Farm AFK: Idle")
 
 _spawn(function()
     while Alive and W.gui and W.gui.Parent do
         _wait(1)
         local parts = {}
         if State.coinCollect then parts[#parts+1] = "coins" end
+        if State.afkFarm then parts[#parts+1] = "farm afk" end
         if State.espOn then parts[#parts+1] = "esp" end
         if State.gunDropOn then parts[#parts+1] = "gundrop" end
         if State.gunDropEspOn then parts[#parts+1] = "gundrop esp" end
@@ -3229,6 +3437,7 @@ _spawn(function()
             phaseLbl.Text = "Phase: "..tostring(State.currentPhase or "Unknown").." | Signal: "..tostring(State.lastRoundSignal or "None")..endText
             dataLbl.Text = "Role: "..tostring(localRole).." | Coins: "..tostring(State.coinCount or 0).."/"..tostring(State.coinLimit or 40).." | Coin: "..tostring(State.coinStatus or "Idle")
             gunDropLbl.Text = "GunDrop: "..tostring(State.lastGunDropStatus or "Missing").." | "..tostring(State.lastGunDropDistance or "N/A").." | GiveWeapon: "..tostring(State._lastGiveWeaponName or "None")
+            afkLbl.Text = "Farm AFK: "..tostring(State.afkStatus or "Idle")
         end)
     end
 end)
