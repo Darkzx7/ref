@@ -1,5 +1,5 @@
 -- ref_universal | Murder Mystery tester
--- v2026-06-03-v22-lower-coin-and-map-stage
+-- v2026-06-03-v23-v22-lower-coin-and-map-stage
 
 local Players          = game:GetService("Players")
 local TweenService     = game:GetService("TweenService")
@@ -1139,20 +1139,20 @@ local function touchCoinSweep(root, target)
     side = side.Unit
 
     -- Lower touch sweep: stay below the coin, brush the lower/center hitbox, and avoid rising above the coin.
-    local lowPeak = math.min(sizeY * 0.035, 0.07)
+    local lowPeak = -0.12
     local path = {
         pos + Vector3.new(0, -under, 0),
-        pos + Vector3.new(0, -under * 0.78, 0),
-        pos + Vector3.new(0, -under * 0.52, 0),
-        pos + Vector3.new(0, -1.12, 0),
-        pos + Vector3.new(0, -0.72, 0),
-        pos + Vector3.new(0, -0.32, 0),
+        pos + Vector3.new(0, -under * 0.80, 0),
+        pos + Vector3.new(0, -under * 0.58, 0),
+        pos + Vector3.new(0, -1.30, 0),
+        pos + Vector3.new(0, -0.92, 0),
+        pos + Vector3.new(0, -0.50, 0),
         pos + Vector3.new(0,  lowPeak, 0),
-        pos + forward * 0.46 + Vector3.new(0, -0.24, 0),
-        pos - forward * 0.46 + Vector3.new(0, -0.24, 0),
-        pos + side * 0.42 + Vector3.new(0, -0.28, 0),
-        pos - side * 0.42 + Vector3.new(0, -0.28, 0),
-        pos + Vector3.new(0, -0.78, 0),
+        pos + forward * 0.46 + Vector3.new(0, -0.42, 0),
+        pos - forward * 0.46 + Vector3.new(0, -0.42, 0),
+        pos + side * 0.42 + Vector3.new(0, -0.46, 0),
+        pos - side * 0.42 + Vector3.new(0, -0.46, 0),
+        pos + Vector3.new(0, -0.94, 0),
     }
 
     for i, p in ipairs(path) do
