@@ -1,5 +1,5 @@
 -- ref_universal | Murder Mystery tester
--- v2026-06-03-r9
+-- v2026-06-03-v10-r9
 
 local Players          = game:GetService("Players")
 local TweenService     = game:GetService("TweenService")
@@ -148,6 +148,7 @@ local State = {
     _coinLockConn      = nil,
     _coinDesiredCF     = nil,
     _coinSavedHumanoid = nil,
+    _coinSavedRootAnchored = nil,
     _coinSavedCollide  = nil,
     _coinStagePlatform = nil,
     _coinStageCF       = nil,
@@ -163,6 +164,7 @@ local State = {
     _gunDropToggle     = nil,
     _coinEntryPrime    = 0,
     _coinStartedInLobby = false,
+    _coinDidInitialStage = false,
     _returningLobby    = false,
     lastEndReason      = nil,
     lastWinnerRole     = nil,
@@ -209,7 +211,17 @@ local function clearRuntimeForRoot(root)
     destroyChild(root, "_GDBG")
 end
 local function restoreCoinPhysics()
-    local hadCoinPhysics = State._coinLockConn ~= nil or State._coinDesiredCF ~= nil or State._coinSavedHumanoid ~= nil or State._coinSavedCollide ~= nil
+    local hadCoinPhysics = State._coinLockConn ~= nil
+        or State._coinDesiredCF ~= nil
+        or State._coinSavedHumanoid ~= nil
+        or State._coinSavedCollide ~= nil
+        or State._coinSavedRootAnchored ~= nil
+
+    if not hadCoinPhysics then
+        State._coinDesiredCF = nil
+        return
+    end
+
     safeDisconnect(State._coinLockConn)
     State._coinLockConn = nil
     State._coinDesiredCF = nil
@@ -232,6 +244,21 @@ local function restoreCoinPhysics()
     end
     State._coinSavedCollide = nil
 
+    local root = getRoot()
+    if root then
+        clearRuntimeForRoot(root)
+        _pcall(function()
+            root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+            if State._coinSavedRootAnchored ~= nil then
+                root.Anchored = State._coinSavedRootAnchored
+            else
+                root.Anchored = false
+            end
+        end)
+    end
+    State._coinSavedRootAnchored = nil
+
     local hum = getHumanoid()
     if hum then
         local saved = State._coinSavedHumanoid
@@ -248,16 +275,11 @@ local function restoreCoinPhysics()
     end
     State._coinSavedHumanoid = nil
 
-    local root = getRoot()
+    root = getRoot()
     if root then
-        clearRuntimeForRoot(root)
         _pcall(function()
-            root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-            root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-            if hadCoinPhysics then
-                local _, yaw, _ = root.CFrame:ToOrientation()
-                root.CFrame = CFrame.new(root.Position + Vector3.new(0, 1.25, 0)) * CFrame.Angles(0, yaw, 0)
-            end
+            local _, yaw, _ = root.CFrame:ToOrientation()
+            root.CFrame = CFrame.new(root.Position + Vector3.new(0, 1.6, 0)) * CFrame.Angles(0, yaw, 0)
         end)
     end
 end
@@ -296,6 +318,20 @@ local function beginCoinPhysicsLock()
     end
     saveAndApplyNoclip(char)
 
+    local root = getRoot()
+    if root and State._coinSavedRootAnchored == nil then
+        local oldAnchored = false
+        _pcall(function() oldAnchored = root.Anchored end)
+        State._coinSavedRootAnchored = oldAnchored
+    end
+    if root then
+        _pcall(function()
+            root.Anchored = true
+            root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+        end)
+    end
+
     if State._coinLockConn then return end
     State._coinLockConn = trackConn(RunService.Stepped:Connect(function()
         if not Alive or not State.coinCollect or State.currentPhase ~= "Round" then
@@ -314,6 +350,7 @@ local function beginCoinPhysicsLock()
         end
         if r then
             _pcall(function()
+                r.Anchored = true
                 r.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
                 r.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
                 if State._coinDesiredCF then
@@ -329,6 +366,7 @@ local function setCoinCFrame(cf)
     local root = getRoot()
     if root and cf then
         _pcall(function()
+            if State._coinSavedRootAnchored ~= nil then root.Anchored = true end
             root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
             root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
             root.CFrame = cf
@@ -809,12 +847,12 @@ local function findCoins(allowFar, ignorePhase)
 end
 
 local function coinSpeedStuds(speed)
-    -- Slider value is not raw BodyPosition force. It maps to controlled studs/second.
-    -- 1 is still usable, 6 is quick without becoming instant teleport.
-    speed = tonumber(speed) or 3
+    -- Slider value maps to direct CFrame travel speed.
+    -- This is intentionally faster than V9, but still not instant teleport.
+    speed = tonumber(speed) or 4
     speed = math.clamp(speed, 1, 6)
-    local map = { 42, 60, 78, 98, 122, 150 }
-    return map[speed] or 78
+    local map = { 85, 125, 170, 225, 285, 350 }
+    return map[speed] or 225
 end
 
 local function getCoinLieForward()
@@ -925,19 +963,18 @@ end
 
 local function touchCoinSweep(root, target)
     if not root or not target or not target.Parent then return end
+    State.coinStatus = "Touching coin"
     fireTouchCoin(target)
-    -- Keep the HRP/body under the coin, then sweep slightly upward.
-    -- This preserves the "lying under the coin" behavior while still touching reliably.
+    -- Keep the body below the coin and sweep upward just enough to trigger touch.
     local offsets = {
-        Vector3.new(0, -1.55, 0),
-        Vector3.new(0, -1.25, 0),
-        Vector3.new(0, -0.95, 0),
-        Vector3.new(0, -0.65, 0),
-        Vector3.new(0, -0.35, 0),
-        Vector3.new(0.55, -0.85, 0),
-        Vector3.new(-0.55, -0.85, 0),
-        Vector3.new(0, -0.85, 0.55),
-        Vector3.new(0, -0.85, -0.55),
+        Vector3.new(0, -2.25, 0),
+        Vector3.new(0, -1.85, 0),
+        Vector3.new(0, -1.45, 0),
+        Vector3.new(0, -1.05, 0),
+        Vector3.new(0.45, -1.55, 0),
+        Vector3.new(-0.45, -1.55, 0),
+        Vector3.new(0, -1.55, 0.45),
+        Vector3.new(0, -1.55, -0.45),
     }
     for _, off in ipairs(offsets) do
         if not Alive or not State.coinCollect or not target.Parent then break end
@@ -945,7 +982,7 @@ local function touchCoinSweep(root, target)
         fireTouchCoin(target)
         _wait(0.006)
     end
-    State._coinIgnoreUntil[target] = testerTime() + 0.05
+    State._coinIgnoreUntil[target] = testerTime() + 0.015
 end
 
 local function getNearestCoin(allowFar, ignorePhase)
@@ -1027,8 +1064,8 @@ local function getGroundBelowCoin(coin)
     return nil
 end
 
-local function prepareCoinStagePlatform()
-    if not Alive or not State.coinCollect or not isCoinStagePhase() then return false end
+local function prepareCoinStagePlatform(force)
+    if not Alive or not State.coinCollect or ((not force) and not isCoinStagePhase()) then return false end
     local root = getRoot()
     if not root then return false end
 
@@ -1042,6 +1079,7 @@ local function prepareCoinStagePlatform()
                 root.CFrame = cf + Vector3.new(0, 3.6, 0)
             end)
         end
+        State._coinDidInitialStage = true
         State.coinStatus = "Staged below map"
         return true
     end
@@ -1071,8 +1109,8 @@ local function prepareCoinStagePlatform()
     local ground = getGroundBelowCoin(coin)
     local floorY = ground and ground.Y or (bucket.minY - 4)
     -- Platform must be actually below the playable floor, not on the map.
-    local stageY = floorY - 12
-    if stageY < -80 then stageY = -80 end
+    local stageY = floorY - 28
+    if stageY < -140 then stageY = -140 end
 
     local platformPos = Vector3.new(coin.Position.X, stageY, coin.Position.Z)
 
@@ -1081,10 +1119,10 @@ local function prepareCoinStagePlatform()
     platform.Anchored = true
     platform.CanCollide = true
     platform.CanTouch = false
-    platform.Size = Vector3.new(42, 1.2, 42)
-    platform.Material = Enum.Material.ForceField
+    platform.Size = Vector3.new(68, 1.4, 68)
+    platform.Material = Enum.Material.SmoothPlastic
     platform.Color = Color3.fromRGB(135, 95, 255)
-    platform.Transparency = 0.28
+    platform.Transparency = 1
     platform.CFrame = CFrame.new(platformPos)
     platform.Parent = workspace
 
@@ -1099,6 +1137,7 @@ local function prepareCoinStagePlatform()
         root.CFrame = platform.CFrame + Vector3.new(0, 3.6, 0)
     end)
 
+    State._coinDidInitialStage = true
     State.coinStatus = "Staged below map"
     return true
 end
@@ -1159,13 +1198,13 @@ local function floatToCoin(target, speed)
     if not root or not target or not target.Parent then return end
     if not isCoinCollectPhase() then return end
 
-    speed = tonumber(speed) or 3
+    speed = tonumber(speed) or 4
     speed = math.clamp(speed, 1, 6)
     local moveSpeed = coinSpeedStuds(speed)
     local allowEntryStage = (State._coinEntryPrime or 0) > testerTime()
 
     local startDist = (root.Position - target.Position).Magnitude
-    if startDist > 520 and not allowEntryStage then
+    if startDist > 620 and not allowEntryStage then
         State.coinStatus = "Skipped far coin"
         return
     end
@@ -1176,28 +1215,28 @@ local function floatToCoin(target, speed)
     beginCoinPhysicsLock()
 
     State._coinLastTarget = target
-    local timeout = math.clamp(startDist / math.max(moveSpeed, 1) + 0.5, 0.65, 7.5)
-    local elapsed = 0
-    local stepTime = 0.014
+    local timeout = math.clamp(startDist / math.max(moveSpeed, 1) + 0.22, 0.18, 4.5)
+    local started = testerTime()
+    local stepTime = 0.008
 
-    while Alive and elapsed < timeout and State.coinCollect and target and target.Parent and isCoinCollectPhase() do
+    while Alive and State.coinCollect and target and target.Parent and isCoinCollectPhase() do
         local r = getRoot()
         if not r then break end
+        if testerTime() - started > timeout then break end
 
-        -- Stay underneath the coin. The character remains in one fixed lying direction.
-        local targetPos = target.Position + Vector3.new(0, -1.18, 0)
+        -- One straight, fixed-orientation line to the underside of the coin.
+        local targetPos = target.Position + Vector3.new(0, -1.65, 0)
         local cur = r.Position
-        if cur.Y < -85 then
+
+        if cur.Y < -135 then
             State.coinStatus = "Void guard"
-            setCoinCFrame(lyingCoinCFrame(target.Position + Vector3.new(0, -1.18, 0)))
-            _wait(0.06)
+            setCoinCFrame(lyingCoinCFrame(targetPos))
             break
         end
 
         local delta = targetPos - cur
         local dist = delta.Magnitude
-        if dist < 3.05 then
-            State.coinStatus = "Touching coin"
+        if dist < 1.65 then
             touchCoinSweep(r, target)
             break
         end
@@ -1205,56 +1244,83 @@ local function floatToCoin(target, speed)
         local move = math.min(dist, moveSpeed * stepTime)
         local nextPos = cur + delta.Unit * move
 
-        -- Do not fly above the coin, and do not drift too far under it.
-        local minY = target.Position.Y - 2.25
-        local maxY = target.Position.Y - 0.65
+        -- Keep the body under the coin while approaching; no looking/turning per coin.
+        local minY = target.Position.Y - 2.55
+        local maxY = target.Position.Y - 1.05
         if nextPos.Y < minY then nextPos = Vector3.new(nextPos.X, minY, nextPos.Z) end
         if nextPos.Y > maxY then nextPos = Vector3.new(nextPos.X, maxY, nextPos.Z) end
 
+        State.coinStatus = "Moving under nearest"
         setCoinCFrame(lyingCoinCFrame(nextPos))
-
-        if dist < 8 then
-            fireTouchCoin(target)
-        end
+        if dist < 6 then fireTouchCoin(target) end
         _wait(stepTime)
-        elapsed = elapsed + stepTime
     end
+end
+
+local function hasCoinPhysicsActive()
+    return State._coinLockConn ~= nil
+        or State._coinDesiredCF ~= nil
+        or State._coinSavedHumanoid ~= nil
+        or State._coinSavedCollide ~= nil
+        or State._coinSavedRootAnchored ~= nil
 end
 
 local function startCoinCollect()
     if State.collecting then return end
     State.collecting = true
-    noclipLoop()
     _spawn(function()
         while Alive and State.coinCollect do
             if not isCoinCollectPhase() then
-                restoreCoinPhysics()
-                State._coinStartedInLobby = isCoinStagePhase()
+                if hasCoinPhysicsActive() then
+                    restoreCoinPhysics()
+                end
+                safeDisconnect(State._noclipConn)
+                State._noclipConn = nil
+
                 if isCoinStagePhase() then
                     prepareCoinStagePlatform()
                 elseif isCoinArmedOnlyPhase() then
-                    -- Fully passive in lobby: do not alter character coordinates/physics.
+                    -- Fully passive in lobby: no noclip, no PlatformStand, no CFrame, no Humanoid state changes.
                     State.coinStatus = "Armed - waiting for map"
                 else
                     State.coinStatus = "Waiting for round"
                 end
-                _wait(0.18)
+                _wait(0.10)
             else
-                destroyCoinStagePlatform()
-                resetCoinLieForward()
-                layDown()
+                if State._coinStartedInLobby and not State._coinDidInitialStage then
+                    if prepareCoinStagePlatform(true) then
+                        _wait(0.18)
+                    end
+                    State._coinDidInitialStage = true
+                end
+                if State._coinStagePlatform then
+                    destroyCoinStagePlatform()
+                end
+                if not State._coinLieForward then
+                    resetCoinLieForward()
+                end
+                if not hasCoinPhysicsActive() then
+                    beginCoinPhysicsLock()
+                    noclipLoop()
+                    local root = getRoot()
+                    if root then
+                        setCoinCFrame(lyingCoinCFrame(root.Position))
+                    end
+                end
+
                 local allowFar = (State._coinEntryPrime or 0) > testerTime()
                 local coin = getNearestCoin(allowFar, false)
                 if coin and coin.Parent then
-                    State.coinStatus = "Moving under nearest"
                     floatToCoin(coin, State.coinSpeed)
                 else
                     State.coinStatus = "No coins"
-                    _wait(0.04)
+                    _wait(0.015)
                 end
             end
         end
         State.coinStatus = "Idle"
+        safeDisconnect(State._noclipConn)
+        State._noclipConn = nil
         restoreCoinPhysics()
         destroyCoinStagePlatform()
         State.collecting = false
@@ -1268,6 +1334,8 @@ local function stopCoinCollect()
     State._coinEntryPrime = 0
     State._coinIgnoreUntil = {}
     State._coinLieForward = nil
+    State._coinStartedInLobby = false
+    State._coinDidInitialStage = false
     safeDisconnect(State._noclipConn)
     State._noclipConn = nil
     restoreCoinPhysics()
@@ -1284,19 +1352,9 @@ end
 
 local function primeCoinEntry(reason)
     if not Alive or not State.coinCollect then return end
-    State._coinEntryPrime = testerTime() + 5
+    State._coinEntryPrime = testerTime() + 4
     State.coinStatus = "Entry armed"
     if not State.collecting then startCoinCollect() end
-    _spawn(function()
-        _wait(0.15)
-        if not Alive or not State.coinCollect or not isCoinCollectPhase() then return end
-        local root = getRoot()
-        if root then
-            resetCoinLieForward()
-            beginCoinPhysicsLock()
-            setCoinCFrame(lyingCoinCFrame(root.Position + Vector3.new(0, 0.35, 0)))
-        end
-    end)
 end
 
 local function scoreLobbyCandidate(part)
@@ -1673,7 +1731,16 @@ local function listenRoundSignals()
             parsePlayerDataPayload(v, nil, 0)
         end
         refreshRolesBurst("RoleSelect")
-        if State.coinCollect then primeCoinEntry(State.lastRoundSignal) end
+        if State.coinCollect then
+            if not State.collecting then startCoinCollect() end
+            _spawn(function()
+                for _ = 1, 8 do
+                    if not Alive or not State.coinCollect or not isCoinStagePhase() then break end
+                    if prepareCoinStagePlatform() then break end
+                    _wait(0.08)
+                end
+            end)
+        end
     end)
 
     bindRemoteEvent({"Remotes","Gameplay","GiveWeapon"}, function(...)
@@ -1706,6 +1773,16 @@ local function listenRoundSignals()
             parsePlayerDataPayload(v, nil, 0)
         end
         refreshRolesBurst("LoadingMap")
+        if State.coinCollect then
+            if not State.collecting then startCoinCollect() end
+            _spawn(function()
+                for _ = 1, 12 do
+                    if not Alive or not State.coinCollect or not isCoinStagePhase() then break end
+                    if prepareCoinStagePlatform() then break end
+                    _wait(0.12)
+                end
+            end)
+        end
     end)
 
     bindRemoteEvent({"Remotes","Gameplay","ShowRoleSelect"}, function(...)
@@ -1715,7 +1792,16 @@ local function listenRoundSignals()
             parsePlayerDataPayload(v, nil, 0)
         end
         refreshRolesBurst("ShowRoleSelect")
-        if State.coinCollect then primeCoinEntry(State.lastRoundSignal) end
+        if State.coinCollect then
+            if not State.collecting then startCoinCollect() end
+            _spawn(function()
+                for _ = 1, 8 do
+                    if not Alive or not State.coinCollect or not isCoinStagePhase() then break end
+                    if prepareCoinStagePlatform() then break end
+                    _wait(0.08)
+                end
+            end)
+        end
     end)
 
     bindRemoteEvent({"Remotes","Gameplay","ShowRoleSelectNew"}, function(...)
@@ -1725,7 +1811,16 @@ local function listenRoundSignals()
             parsePlayerDataPayload(v, nil, 0)
         end
         refreshRolesBurst("ShowRoleSelectNew")
-        if State.coinCollect then primeCoinEntry(State.lastRoundSignal) end
+        if State.coinCollect then
+            if not State.collecting then startCoinCollect() end
+            _spawn(function()
+                for _ = 1, 8 do
+                    if not Alive or not State.coinCollect or not isCoinStagePhase() then break end
+                    if prepareCoinStagePlatform() then break end
+                    _wait(0.08)
+                end
+            end)
+        end
     end)
 
     bindRemoteEvent({"Remotes","Gameplay","VictoryScreen"}, function(...)
@@ -2668,6 +2763,8 @@ W:Section("  COINS")
 State._coinToggle = W:Toggle("Coin Collect", false, function(v)
     State.coinCollect = v
     if v then
+        State._coinStartedInLobby = isCoinArmedOnlyPhase()
+        State._coinDidInitialStage = false
         rememberSafeCFrame(true)
         startCoinCollect()
     else
