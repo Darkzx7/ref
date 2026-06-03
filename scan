@@ -1,4 +1,4 @@
-local VERSION = "2026-06-03-mm-scan-passive-state-v4"
+local VERSION = "2026-06-03-mm-scan-passive-state-v5"
 local MAX_FILE_BYTES = 4500000
 local FLUSH_EVERY = 50
 
@@ -230,6 +230,8 @@ local function main()
             lastRoleSignal = "unknown",
             lastLocalRole = "unknown",
             lastLocalWeapon = "unknown",
+            lastLocalGun = "unknown",
+            lastLocalKnife = "unknown",
             lastCoinCount = "unknown",
             lastCoinLimit = "unknown",
             lastRoles = {},
@@ -979,22 +981,44 @@ local function main()
         return rawArgs[index]
     end
 
+    local function summaryFieldValue(entry, fieldName)
+        if _type(entry) ~= "table" or _type(entry.data) ~= "table" or _type(entry.data.fields) ~= "table" then
+            return nil
+        end
+        local field = entry.data.fields[fieldName]
+        if _type(field) == "table" then
+            return field.value
+        end
+        return nil
+    end
+
     local function logSpecialInbound(remote, packedArgs, rawArgs)
         local path = pathText(remote)
 
         if stringFind(path, "PlayerDataChanged") then
             local playerSummary = summarizePlayerData(rawArg(rawArgs, 1))
             Scan.summary.lastRoleSignal = path
-            Scan.summary.lastRoles = {
-                murderer = playerSummary.murderer,
-                sheriff = playerSummary.sheriff,
-                hero = playerSummary.hero,
-                localPlayer = playerSummary.localPlayer,
-            }
+            if (playerSummary.playerCount or 0) > 0 then
+                Scan.summary.lastRoles = {
+                    murderer = playerSummary.murderer,
+                    sheriff = playerSummary.sheriff,
+                    hero = playerSummary.hero,
+                    localPlayer = playerSummary.localPlayer,
+                }
+                if playerSummary.localPlayer then
+                    local localRole = playerSummary.localPlayer.role
+                    if localRole and localRole ~= "unknown" then
+                        Scan.summary.lastLocalRole = localRole
+                    end
+                    Scan.summary.lastLocalGun = summaryFieldValue(playerSummary.localPlayer, "Gun") or Scan.summary.lastLocalGun
+                    Scan.summary.lastLocalKnife = summaryFieldValue(playerSummary.localPlayer, "Knife") or Scan.summary.lastLocalKnife
+                end
+            end
             logRecord({
                 event = "player_data_summary",
                 source = instanceInfo(remote),
                 summary = playerSummary,
+                retainedAsLastRoles = (playerSummary.playerCount or 0) > 0,
             })
             return
         end
@@ -1395,6 +1419,8 @@ local function main()
             .. "\nlastRoleSignal: " .. safeToString(Scan.summary.lastRoleSignal)
             .. "\nlastLocalRole: " .. safeToString(Scan.summary.lastLocalRole)
             .. "\nlastLocalWeapon: " .. safeToString(Scan.summary.lastLocalWeapon)
+            .. "\nlastLocalGun: " .. safeToString(Scan.summary.lastLocalGun)
+            .. "\nlastLocalKnife: " .. safeToString(Scan.summary.lastLocalKnife)
             .. "\nlastCoinCount: " .. safeToString(Scan.summary.lastCoinCount) .. "/" .. safeToString(Scan.summary.lastCoinLimit)
             .. "\n"
         writeText(statusPath, text)
