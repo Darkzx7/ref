@@ -512,6 +512,7 @@ local function setCoinCFrame(cf)
 end
 
 local function destroyCoinStagePlatform()
+    State._coinRemoveStageAfterFirstCoin = false
     releaseCoinStageHold()
     local p = State._coinStagePlatform
     State._coinStagePlatform = nil
@@ -1173,7 +1174,7 @@ end
 
 local function touchCoinSweep(root, target)
     if not root or not target or not target.Parent then return end
-    State.coinStatus = State._coinCloseBoost and "Close coin boost+" or "Collecting extra-low underside"
+    State.coinStatus = State._coinCloseBoost and "Close coin boost++" or "Collecting extra-low underside"
     fireTouchCoin(target)
     fireTouchCoinWithParts(target)
 
@@ -1181,7 +1182,7 @@ local function touchCoinSweep(root, target)
     local sizeY = 1.5
     _pcall(function() sizeY = math.max(target.Size.Y, 1.5) end)
     local under = math.max(State._coinUnderOffset or 3.85, sizeY * 1.42)
-    local passSpeed = coinSpeedStuds(State.coinSpeed) * (State._coinCloseBoost and 1.82 or 1.45)
+    local passSpeed = coinSpeedStuds(State.coinSpeed) * (State._coinCloseBoost and 2.65 or 1.45)
 
     local forward = getCoinLieForward()
     local side = forward:Cross(Vector3.new(0, 1, 0))
@@ -1208,7 +1209,7 @@ local function touchCoinSweep(root, target)
     for i, p in ipairs(path) do
         if not Alive or not State.coinCollect or not target.Parent or not isCoinCollectPhase() then break end
         local cf = lyingCoinCFrame(p)
-        moveCoinRootDirect(p, passSpeed, 0.13)
+        moveCoinRootDirect(p, passSpeed, State._coinCloseBoost and 0.075 or 0.13)
         fireTouchCoin(target)
         fireTouchCoinWithParts(target)
         if i >= 3 and i <= 7 then
@@ -1544,11 +1545,11 @@ local function floatToCoin(target, speed)
         local okClose, closeDist = _pcall(function()
             return (previousTarget.Position - target.Position).Magnitude
         end)
-        if okClose and closeDist and closeDist <= 22 then
+        if okClose and closeDist and closeDist <= 30 then
             closeBoost = true
         end
     end
-    if startDist <= 16 and not State._coinFirstApproach then
+    if startDist <= 26 and not State._coinFirstApproach then
         closeBoost = true
     end
     if State._coinFirstApproach then
@@ -1556,7 +1557,7 @@ local function floatToCoin(target, speed)
     end
     State._coinCloseBoost = closeBoost
     if closeBoost then
-        moveSpeed = moveSpeed * 1.32
+        moveSpeed = moveSpeed * 1.82
     end
     State._coinLastTarget = target
 
@@ -1569,14 +1570,18 @@ local function floatToCoin(target, speed)
     -- First coin after enabling should enter smoothly, not snap across the map.
     local firstFactor = State._coinFirstApproach and 0.52 or 1
     local approachSpeed = math.max(45, moveSpeed * firstFactor)
-    local approachMax = State._coinFirstApproach and 1.55 or (closeBoost and 0.42 or 0.95)
-    State.coinStatus = State._coinFirstApproach and "Smooth first coin entry" or (closeBoost and "Close coin boost+" or "Moving extra-low under nearest coin")
+    local approachMax = State._coinFirstApproach and 1.55 or (closeBoost and 0.26 or 0.95)
+    State.coinStatus = State._coinFirstApproach and "Smooth first coin entry" or (closeBoost and "Close coin boost++" or "Moving extra-low under nearest coin")
     moveCoinRootDirect(approach, approachSpeed, math.clamp(startDist / math.max(approachSpeed, 1) + 0.16, 0.20, approachMax))
     State._coinFirstApproach = false
 
     if not Alive or not State.coinCollect or not target.Parent or not isCoinCollectPhase() then return end
 
     touchCoinSweep(getRoot(), target)
+
+    if State._coinRemoveStageAfterFirstCoin and (not target.Parent) then
+        destroyCoinStagePlatform()
+    end
 end
 
 local function hasCoinPhysicsActive()
@@ -1601,6 +1606,7 @@ local function suspendCoinMovement(statusText, keepStage)
     State._coinDesiredCF = nil
     State._coinLieForward = nil
     State._coinCloseBoost = false
+    State._coinRemoveStageAfterFirstCoin = false
     if statusText then
         State.coinStatus = statusText
     end
@@ -1655,7 +1661,10 @@ local function startCoinCollect()
                     local coin = getNearestCoin(allowFar, false)
                     if coin and coin.Parent then
                         if State._coinStagePlatform then
-                            destroyCoinStagePlatform()
+                            -- Keep the invisible stage platform until the first coin is actually collected,
+                            -- but release the character hold now so collection movement can begin cleanly.
+                            releaseCoinStageHold()
+                            State._coinRemoveStageAfterFirstCoin = true
                         end
                         if not State._coinLieForward then
                             resetCoinLieForward()
@@ -2264,6 +2273,9 @@ local function listenRoundSignals()
         end
         if type(args[2]) == "number" then State.coinCount = args[2] end
         if type(args[3]) == "number" then State.coinLimit = args[3] end
+        if State._coinRemoveStageAfterFirstCoin then
+            destroyCoinStagePlatform()
+        end
     end)
 end
 
