@@ -1,4 +1,4 @@
-local VERSION = "2026-06-03-mm-scan-passive-state-v3"
+local VERSION = "2026-06-03-mm-scan-passive-state-v4"
 local MAX_FILE_BYTES = 4500000
 local FLUSH_EVERY = 50
 
@@ -217,6 +217,10 @@ local function main()
         gunDropObjects = callable(_setmetatable) and _setmetatable({}, weakKeys) or {},
         coinRemovedObjects = callable(_setmetatable) and _setmetatable({}, weakKeys) or {},
         gunDropRemovedObjects = callable(_setmetatable) and _setmetatable({}, weakKeys) or {},
+        coinObjectKeys = {},
+        gunDropObjectKeys = {},
+        coinRemovedKeys = {},
+        gunDropRemovedKeys = {},
         scannedRoots = callable(_setmetatable) and _setmetatable({}, weakKeys) or {},
         summary = {
             coinsSeen = 0,
@@ -917,6 +921,14 @@ local function main()
         return nil
     end
 
+    local function objectSignature(instance, position)
+        local path = pathText(instance)
+        if position and position.x and position.y and position.z then
+            return path .. "@" .. safeToString(position.x) .. "," .. safeToString(position.y) .. "," .. safeToString(position.z)
+        end
+        return path
+    end
+
     local function attributesInfo(instance)
         local attrs = nil
         safeCall(function()
@@ -1213,15 +1225,20 @@ local function main()
         end
 
         local coinRoot, coinReason = canonicalCoinRoot(instance)
-        if coinRoot and not Scan.coinObjects[coinRoot] then
+        local coinPosition = coinRoot and (positionFromDescendant(coinRoot, "MainCoin") or objectPosition(coinRoot)) or nil
+        local coinKey = coinRoot and objectSignature(coinRoot, coinPosition) or nil
+        if coinRoot and coinKey and not Scan.coinObjectKeys[coinKey] then
             Scan.coinObjects[coinRoot] = true
+            Scan.coinObjectKeys[coinKey] = true
             Scan.coinRemovedObjects[coinRoot] = nil
+            Scan.coinRemovedKeys[coinKey] = nil
             Scan.summary.coinsSeen = Scan.summary.coinsSeen + 1
             logRecord({
                 event = "coin_object_discovered",
                 object = instanceInfo(coinRoot),
                 map = mapNameFor(coinRoot),
-                position = positionFromDescendant(coinRoot, "MainCoin") or objectPosition(coinRoot),
+                position = coinPosition,
+                signature = coinKey,
                 hasTouchInterest = hasDescendantNamed(coinRoot, "TouchInterest"),
                 attributes = attributesInfo(coinRoot),
                 reason = coinReason,
@@ -1229,15 +1246,20 @@ local function main()
         end
 
         local gunDropRoot, gunDropReason = canonicalGunDropRoot(instance)
-        if gunDropRoot and not Scan.gunDropObjects[gunDropRoot] then
+        local gunDropPosition = gunDropRoot and objectPosition(gunDropRoot) or nil
+        local gunDropKey = gunDropRoot and objectSignature(gunDropRoot, gunDropPosition) or nil
+        if gunDropRoot and gunDropKey and not Scan.gunDropObjectKeys[gunDropKey] then
             Scan.gunDropObjects[gunDropRoot] = true
+            Scan.gunDropObjectKeys[gunDropKey] = true
             Scan.gunDropRemovedObjects[gunDropRoot] = nil
+            Scan.gunDropRemovedKeys[gunDropKey] = nil
             Scan.summary.gunDropsSeen = Scan.summary.gunDropsSeen + 1
             logRecord({
                 event = "gun_drop_object_discovered",
                 object = instanceInfo(gunDropRoot),
                 map = mapNameFor(gunDropRoot),
-                position = objectPosition(gunDropRoot),
+                position = gunDropPosition,
+                signature = gunDropKey,
                 hasTouchInterest = hasDescendantNamed(gunDropRoot, "TouchInterest"),
                 children = directChildInfos(gunDropRoot, 12),
                 attributes = attributesInfo(gunDropRoot),
@@ -1322,14 +1344,20 @@ local function main()
         Scan:Connect(removingSignal, function(instance)
             protected("descendant_removing", function()
                 local coinRoot = canonicalCoinRoot(instance)
-                if coinRoot and Scan.coinObjects[coinRoot] and not Scan.coinRemovedObjects[coinRoot] then
+                local coinPosition = coinRoot and (positionFromDescendant(coinRoot, "MainCoin") or objectPosition(coinRoot)) or nil
+                local coinKey = coinRoot and objectSignature(coinRoot, coinPosition) or nil
+                if coinRoot and coinKey and Scan.coinObjectKeys[coinKey] and not Scan.coinRemovedKeys[coinKey] then
                     Scan.coinRemovedObjects[coinRoot] = true
-                    logRecord({ event = "coin_object_removed", object = instanceInfo(coinRoot), map = mapNameFor(coinRoot), position = positionFromDescendant(coinRoot, "MainCoin") or objectPosition(coinRoot) })
+                    Scan.coinRemovedKeys[coinKey] = true
+                    logRecord({ event = "coin_object_removed", object = instanceInfo(coinRoot), map = mapNameFor(coinRoot), position = coinPosition, signature = coinKey })
                 end
                 local gunDropRoot = canonicalGunDropRoot(instance)
-                if gunDropRoot and Scan.gunDropObjects[gunDropRoot] and not Scan.gunDropRemovedObjects[gunDropRoot] then
+                local gunDropPosition = gunDropRoot and objectPosition(gunDropRoot) or nil
+                local gunDropKey = gunDropRoot and objectSignature(gunDropRoot, gunDropPosition) or nil
+                if gunDropRoot and gunDropKey and Scan.gunDropObjectKeys[gunDropKey] and not Scan.gunDropRemovedKeys[gunDropKey] then
                     Scan.gunDropRemovedObjects[gunDropRoot] = true
-                    logRecord({ event = "gun_drop_object_removed", object = instanceInfo(gunDropRoot), map = mapNameFor(gunDropRoot), position = objectPosition(gunDropRoot) })
+                    Scan.gunDropRemovedKeys[gunDropKey] = true
+                    logRecord({ event = "gun_drop_object_removed", object = instanceInfo(gunDropRoot), map = mapNameFor(gunDropRoot), position = gunDropPosition, signature = gunDropKey })
                 end
             end)
         end)
