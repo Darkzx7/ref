@@ -1,5 +1,5 @@
 -- ref_universal | Murder Mystery tester
--- v58: passive stab hitbox + safe show hitbox adornment
+-- v59: v54 stable + stab hitbox scope fixed, no show hitbox
 -- v2026-06-04-v52-stable-childadded-throwingknife-hitbox
 
 -- PREBOOT GUARD: runs before any Roblox :GetService/namecall.
@@ -159,9 +159,6 @@ local State = {
     stabHitboxOn       = false,
     stabHitboxRadius   = 10,
     stabHitboxStatus   = "Idle",
-    showHitbox         = false,
-    showHitboxStatus   = "Hidden",
-    _showHitboxAdornment = nil,
     _stabHitboxConn    = nil,
     _stabHitboxLoop    = false,
     _stabHitboxLastHit = {},
@@ -1492,13 +1489,9 @@ local function cleanup()
     State.gunDropOn = false
     State.gunDropEspOn = false
     State.espOn = false
-    State.showHitbox = false
-    _pcall(function()
-        if State._showHitboxAdornment then
-            State._showHitboxAdornment:Destroy()
-            State._showHitboxAdornment = nil
-        end
-    end)
+    State.stabHitboxOn = false
+    safeDisconnect(State._stabHitboxConn)
+    State._stabHitboxConn = nil
 
     for _, conn in ipairs(Connections) do
         safeDisconnect(conn)
@@ -1833,12 +1826,13 @@ end
 
 
 -- ─── passive stab hitbox ───────────────────────────────────────────────────────
--- Uses the same working knife stab/touch flow, but only after a real manual stab input.
--- It waits a tiny moment; if Workspace.ThrowingKnife appears, it treats it as throw and skips.
+-- Safe scope version.
+-- It does not hook remotes, does not alter KnifeThrown, and only reacts to real Tool.Activated.
+-- It skips if ThrowingKnife appears, so throw/manual projectile stays handled by Throw Hitbox.
 
 local function isStabHitboxTarget(player)
     if not player or player == LocalPlayer then return false end
-    if not isAlive(player.Character) then return false end
+    if not player.Character or not isAlive(player.Character) then return false end
     local myRole = roleOfPlayer(LocalPlayer)
     if myRole ~= "Murderer" then return false end
     local r = roleOfPlayer(player)
@@ -1874,7 +1868,7 @@ end
 
 local function pulseStabHitbox(targetPlayer, targetPart)
     if not targetPlayer or not targetPart then return false end
-    if not isAlive(targetPlayer.Character) then return false end
+    if not targetPlayer.Character or not isAlive(targetPlayer.Character) then return false end
 
     local t = testerTime()
     State._stabHitboxLastHit = State._stabHitboxLastHit or {}
@@ -1906,7 +1900,7 @@ local function pulseStabHitbox(targetPlayer, targetPart)
         if #parts >= 6 then break end
     end
 
-    for i = 1, 2 do
+    for _ = 1, 2 do
         if not Alive or not State.stabHitboxOn then return false end
         for _, p in ipairs(parts) do
             if p and p.Parent then
@@ -1922,15 +1916,15 @@ local function pulseStabHitbox(targetPlayer, targetPart)
     return true
 end
 
-local function isThrowingKnifePresent()
+local function isThrowingKnifePresentSafe()
     local found = false
     _pcall(function()
-        found = Workspace:FindFirstChild("ThrowingKnife") ~= nil
+        found = workspace:FindFirstChild("ThrowingKnife") ~= nil
     end)
     return found == true
 end
 
-local function tryStabHitboxFromManualUse(source)
+local function tryStabHitboxFromManualUse()
     if not Alive or not State.stabHitboxOn then return false end
     if State.localDead then
         State.stabHitboxStatus = "Dead"
@@ -1948,12 +1942,11 @@ local function tryStabHitboxFromManualUse(source)
     State._stabLastPulse = t
 
     _spawn(function()
-        _wait(0.055)
+        _wait(0.06)
 
         if not Alive or not State.stabHitboxOn then return end
 
-        -- If a real throw object appeared, this input was throw, not stab.
-        if isThrowingKnifePresent() then
+        if isThrowingKnifePresentSafe() then
             State.stabHitboxStatus = "Throw detected - skipped"
             return
         end
@@ -1989,10 +1982,13 @@ local function hookCurrentKnifeForStabHitbox()
     if not tool then return false end
 
     local okConn = _pcall(function()
-        State._stabHitboxConn = trackConn(tool.Activated:Connect(function()
-            if not Alive or not State.stabHitboxOn then return end
-            tryStabHitboxFromManualUse("Tool.Activated")
-        end))
+        local sig = tool.Activated
+        if sig and sig.Connect then
+            State._stabHitboxConn = trackConn(sig:Connect(function()
+                if not Alive or not State.stabHitboxOn then return end
+                tryStabHitboxFromManualUse()
+            end))
+        end
     end)
 
     return okConn == true
@@ -2018,8 +2014,9 @@ local function startStabHitboxSafe()
             if not okLoop then
                 State.stabHitboxStatus = "Stab hook guarded"
             end
-            _wait(0.4)
+            _wait(0.45)
         end
+
         State._stabHitboxLoop = false
         safeDisconnect(State._stabHitboxConn)
         State._stabHitboxConn = nil
@@ -4754,25 +4751,16 @@ W:Button("Stab Nearest",  function() Tester.StabTarget()  end)
 W:Button("Touch Nearest", function() Tester.TouchTarget() end)
 
 W:Toggle("Stab Hitbox", false, function(v)
-    State.stabHitboxOn = v
-    if v then startStabHitboxSafe() else stopStabHitboxSafe() end
+    State.stabHitboxOn = v == true
+    if State.stabHitboxOn then
+        startStabHitboxSafe()
+    else
+        stopStabHitboxSafe()
+    end
 end)
 
 W:Slider("Stab Hitbox Range", 4, 28, 10, function(v)
     State.stabHitboxRadius = v
-end)
-
-W:Toggle("Show Hitbox", false, function(v)
-    State.showHitbox = v == true
-    State.showHitboxStatus = State.showHitbox and "Visible" or "Hidden"
-    if not State.showHitbox then
-        _pcall(function()
-            if State._showHitboxAdornment then
-                State._showHitboxAdornment:Destroy()
-                State._showHitboxAdornment = nil
-            end
-        end)
-    end
 end)
 
 W:Toggle("Throw Hitbox", false, function(v)
@@ -4909,7 +4897,6 @@ local dataLbl = W:Label("Role: ? | Coins: 0/40")
 local gunDropLbl = W:Label("GunDrop: Missing | N/A")
 local afkLbl = W:Label("Farm AFK: Idle")
 local stabLbl = W:Label("Stab Hitbox: Idle")
-local showHitboxLbl = W:Label("Show Hitbox: Hidden")
 local throwLbl = W:Label("Throw Hitbox: Idle")
 
 _spawn(function()
@@ -4928,7 +4915,6 @@ _spawn(function()
         if State.gunDropOn then parts[#parts+1] = "gundrop" end
         if State.gunDropEspOn then parts[#parts+1] = "gundrop esp" end
         if State.stabHitboxOn then parts[#parts+1] = "stab hitbox" end
-        if State.showHitbox then parts[#parts+1] = "show hitbox" end
         if State.throwRangeOn then parts[#parts+1] = "throw hitbox" end
         local activeText = #parts > 0 and ("Active: "..table.concat(parts, ", ")) or "Inactive"
         local localRole = State.currentPhase == "Lobby" and "?" or (State.localRole or State.roles[LocalPlayer.Name] or "?")
@@ -4943,52 +4929,6 @@ _spawn(function()
             gunDropLbl.Text = "GunDrop: "..tostring(State.lastGunDropStatus or "Missing").." | "..tostring(State.lastGunDropDistance or "N/A").." | GiveWeapon: "..tostring(State._lastGiveWeaponName or "None")
             afkLbl.Text = "Farm AFK: "..tostring(State.afkStatus or "Idle")
             stabLbl.Text = "Stab Hitbox: "..tostring(State.stabHitboxStatus or "Idle").." | Range: "..tostring(State.stabHitboxRadius or 10)
-
-            if State.showHitbox then
-                local root = getRoot()
-                if root then
-                    if not State._showHitboxAdornment or not State._showHitboxAdornment.Parent then
-                        local okAdorn, adorn = _pcall(function()
-                            local a = Instance.new("SphereHandleAdornment")
-                            a.Name = "_REF_StabHitboxAdornment"
-                            a.AlwaysOnTop = true
-                            a.ZIndex = 10
-                            a.Transparency = 0.72
-                            a.Color3 = Color3.fromRGB(165, 80, 255)
-                            a.Parent = LocalPlayer:FindFirstChildOfClass("PlayerGui") or root
-                            return a
-                        end)
-                        if okAdorn and adorn then
-                            State._showHitboxAdornment = adorn
-                        end
-                    end
-
-                    local adorn = State._showHitboxAdornment
-                    if adorn then
-                        _pcall(function()
-                            local radius = tonumber(State.stabHitboxRadius) or 10
-                            adorn.Adornee = root
-                            adorn.Radius = radius
-                            adorn.Transparency = State.stabHitboxOn and 0.72 or 0.86
-                            State.showHitboxStatus = State.stabHitboxOn and ("Stab radius: "..tostring(radius)) or ("Preview radius: "..tostring(radius))
-                        end)
-                    else
-                        State.showHitboxStatus = "Adornment unavailable"
-                    end
-                else
-                    State.showHitboxStatus = "No character"
-                end
-            else
-                _pcall(function()
-                    if State._showHitboxAdornment then
-                        State._showHitboxAdornment:Destroy()
-                        State._showHitboxAdornment = nil
-                    end
-                end)
-                State.showHitboxStatus = "Hidden"
-            end
-
-            showHitboxLbl.Text = "Show Hitbox: "..tostring(State.showHitboxStatus or "Hidden")
             throwLbl.Text = "Throw Hitbox: "..tostring(State.throwRangeStatus or "Idle").." | Radius: "..tostring(State.throwRangeRadius or 18)
         end)
     end
