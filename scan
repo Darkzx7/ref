@@ -1,446 +1,191 @@
--- ref_throw_knife_projectile_scanner.lua
--- Passive scanner for throw knife/projectile behavior.
--- It does NOT hook __namecall and does NOT call or modify KnifeThrown.
--- Logs are saved with writefile/appendfile in the executor workspace.
-
-local VERSION = "2026-06-04-throw-knife-projectile-scan-v1"
-local FOLDER = "ThrowKnifeScan"
-local LATEST = FOLDER .. "/latest.log"
-local STATUS = FOLDER .. "/status.txt"
-local CRASH = FOLDER .. "/crash_last.txt"
-local MAX_MEMORY_BYTES = 3500000
-local FLUSH_EVERY = 8
-local PROJECTILE_TRACK_SECONDS = 4.0
-local PROJECTILE_SAMPLE_DT = 0.055
-local ACTIVATION_WINDOW = 2.25
-local NEAR_HIT_RADIUS = 12
+-- ref_stab_hitbox_patch_v1.lua
+-- Standalone passive Stab Hitbox patch.
+-- Run this AFTER the main ref script is loaded.
+-- It does not hook __namecall, does not alter KnifeThrown, and does not touch Throw Hitbox.
 
 local Players = game:GetService("Players")
-local Workspace = game:GetService("Workspace")
+local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local RunService = game:GetService("RunService")
 
 local LocalPlayer = Players.LocalPlayer
 
-local function env()
+local ENV = _G
+pcall(function()
     if type(getgenv) == "function" then
-        local ok, e = pcall(getgenv)
-        if ok and type(e) == "table" then return e end
+        ENV = getgenv()
     end
-    return _G
+end)
+
+local OLD = ENV.__REF_STAB_HITBOX_PATCH
+if type(OLD) == "table" and type(OLD.Stop) == "function" then
+    pcall(function()
+        OLD:Stop("replaced")
+    end)
 end
 
-local ENV = env()
+local Patch = {
+    Enabled = false,
+    Radius = 10,
+    Status = "Off",
+    Connections = {},
+    Roles = {},
+    LocalRole = nil,
+    LocalDead = false,
+    LastPulse = 0,
+    LastTargetHit = {},
+}
+ENV.__REF_STAB_HITBOX_PATCH = Patch
 
-local function getfn(name)
-    local f = ENV and ENV[name]
-    if type(f) == "function" then return f end
-    if type(_G) == "table" and type(_G[name]) == "function" then return _G[name] end
+local function safe(fn, ...)
+    if type(fn) ~= "function" then
+        return false, "not_function"
+    end
+    return pcall(fn, ...)
+end
+
+local function connect(sig, fn)
+    if not sig or type(fn) ~= "function" then return nil end
+    local ok, conn = pcall(function()
+        return sig:Connect(fn)
+    end)
+    if ok and conn then
+        table.insert(Patch.Connections, conn)
+        return conn
+    end
     return nil
 end
 
-local writefileFn = getfn("writefile")
-local appendfileFn = getfn("appendfile")
-local makefolderFn = getfn("makefolder")
-local isfolderFn = getfn("isfolder")
-
-local function ensureFolder()
-    if type(makefolderFn) ~= "function" then return false end
-    if type(isfolderFn) == "function" then
-        local ok, exists = pcall(isfolderFn, FOLDER)
-        if ok and exists then return true end
+function Patch:Stop(reason)
+    self.Enabled = false
+    self.Status = "Stopped: " .. tostring(reason or "manual")
+    for _, conn in ipairs(self.Connections) do
+        pcall(function()
+            conn:Disconnect()
+        end)
     end
-    pcall(makefolderFn, FOLDER)
-    return true
-end
-
-ensureFolder()
-
-local memoryText = ""
-
-local function writeText(path, text)
-    if type(writefileFn) ~= "function" then return false end
-    local ok = pcall(writefileFn, path, tostring(text or ""))
-    return ok
-end
-
-local function appendText(path, text)
-    text = tostring(text or "")
-    if type(appendfileFn) == "function" then
-        local ok = pcall(appendfileFn, path, text)
-        if ok then return true end
-    end
-    if path == LATEST then
-        memoryText = memoryText .. text
-        if #memoryText > MAX_MEMORY_BYTES then
-            memoryText = memoryText:sub(#memoryText - 2600000)
-            memoryText = "{\"event\":\"trimmed\",\"reason\":\"max_memory_bytes\"}\n" .. memoryText
+    self.Connections = {}
+    pcall(function()
+        if self.Gui then
+            self.Gui:Destroy()
         end
-        return writeText(path, memoryText)
+    end)
+end
+
+local function waitSmall(t)
+    if type(task) == "table" and type(task.wait) == "function" then
+        return task.wait(t or 0)
     end
-    return writeText(path, text)
+    return wait(t or 0)
 end
 
-writeText(LATEST, "")
-writeText(STATUS, "boot: " .. VERSION .. "\n")
-writeText(CRASH, "")
-
-local function nowIso()
-    local ok, d = pcall(os.date, "!%Y-%m-%dT%H:%M:%SZ")
-    if ok and d then return d end
-    return tostring(os.time())
+local function spawnTask(fn)
+    if type(task) == "table" and type(task.spawn) == "function" then
+        return task.spawn(fn)
+    end
+    return spawn(fn)
 end
 
-local function clockNow()
-    if type(os.clock) == "function" then
+local function now()
+    if type(os) == "table" and type(os.clock) == "function" then
         local ok, v = pcall(os.clock)
         if ok then return v end
     end
     return tick()
 end
 
-local function lower(s)
-    return string.lower(tostring(s or ""))
+local function getChar(player)
+    player = player or LocalPlayer
+    return player and player.Character
 end
 
-local function quote(s)
-    s = tostring(s or "")
-    s = s:gsub("\\", "\\\\")
-         :gsub("\"", "\\\"")
-         :gsub("\n", "\\n")
-         :gsub("\r", "\\r")
-         :gsub("\t", "\\t")
-    return "\"" .. s .. "\""
+local function getHumanoid(char)
+    return char and char:FindFirstChildOfClass("Humanoid")
 end
 
-local function roundNum(n)
-    if type(n) ~= "number" then return n end
-    return math.floor(n * 10000 + 0.5) / 10000
+local function isAliveChar(char)
+    local hum = getHumanoid(char)
+    if not hum then return false end
+    return hum.Health > 0
 end
 
-local function encode(v, depth, seen)
-    depth = depth or 0
-    seen = seen or {}
+local function getRoot(char)
+    if not char then return nil end
+    return char:FindFirstChild("HumanoidRootPart")
+        or char:FindFirstChild("UpperTorso")
+        or char:FindFirstChild("Torso")
+end
 
-    local tv = typeof and typeof(v) or type(v)
+local function findKnifeEquipped()
+    local char = getChar(LocalPlayer)
+    return char and char:FindFirstChild("Knife")
+end
 
-    if v == nil then return "null" end
-    if tv == "boolean" or tv == "number" then return tostring(v) end
-    if tv == "string" then return quote(v) end
+local function findKnifeAny()
+    local char = getChar(LocalPlayer)
+    local bp = LocalPlayer and LocalPlayer:FindFirstChildOfClass("Backpack")
+    return (char and char:FindFirstChild("Knife")) or (bp and bp:FindFirstChild("Knife"))
+end
 
-    if tv == "Vector3" then
-        return "{\"type\":\"Vector3\",\"x\":" .. tostring(roundNum(v.X)) ..
-            ",\"y\":" .. tostring(roundNum(v.Y)) ..
-            ",\"z\":" .. tostring(roundNum(v.Z)) .. "}"
-    end
+local function getKnifeRemotes()
+    local tool = findKnifeAny()
+    local events = tool and tool:FindFirstChild("Events")
+    local stab = events and events:FindFirstChild("KnifeStabbed")
+    local touch = events and events:FindFirstChild("HandleTouched")
+    return stab, touch
+end
 
-    if tv == "CFrame" then
-        local p = v.Position
-        return "{\"type\":\"CFrame\",\"pos\":{\"x\":" .. tostring(roundNum(p.X)) ..
-            ",\"y\":" .. tostring(roundNum(p.Y)) ..
-            ",\"z\":" .. tostring(roundNum(p.Z)) .. "}}"
-    end
-
-    if tv == "Instance" then
-        local path = ""
-        pcall(function() path = v:GetFullName() end)
-        return "{\"type\":\"Instance\",\"class\":" .. quote(v.ClassName) ..
-            ",\"name\":" .. quote(v.Name) ..
-            ",\"path\":" .. quote(path) .. "}"
-    end
-
-    if type(v) ~= "table" then
-        return quote(tostring(v))
-    end
-
-    if seen[v] then return quote("[circular]") end
-    if depth >= 5 then return quote("[max-depth]") end
-    seen[v] = true
-
-    local isArray = true
-    local count = 0
-    local max = 0
-    for k in pairs(v) do
-        count = count + 1
-        if type(k) ~= "number" or k < 1 or k % 1 ~= 0 then
-            isArray = false
-        else
-            if k > max then max = k end
+local function roleOf(player)
+    if not player then return nil end
+    if player == LocalPlayer then
+        if Patch.LocalRole and Patch.LocalRole ~= "?" and Patch.LocalRole ~= "" then
+            return Patch.LocalRole
         end
     end
-    if count ~= max then isArray = false end
+    local r = Patch.Roles[player.Name]
+    if r and r ~= "?" and r ~= "" then return r end
 
-    local parts = {}
-    if isArray then
-        for i = 1, max do
-            parts[#parts + 1] = encode(v[i], depth + 1, seen)
-        end
-        seen[v] = nil
-        return "[" .. table.concat(parts, ",") .. "]"
-    end
-
-    for k, item in pairs(v) do
-        parts[#parts + 1] = quote(k) .. ":" .. encode(item, depth + 1, seen)
-    end
-    table.sort(parts)
-    seen[v] = nil
-    return "{" .. table.concat(parts, ",") .. "}"
-end
-
-local function vecInfo(v)
-    if typeof(v) ~= "Vector3" then return nil end
-    return { x = roundNum(v.X), y = roundNum(v.Y), z = roundNum(v.Z) }
-end
-
-local function cframeInfo(cf)
-    if typeof(cf) ~= "CFrame" then return nil end
-    return { position = vecInfo(cf.Position) }
-end
-
-local function fullName(inst)
-    local ok, r = pcall(function() return inst:GetFullName() end)
-    return ok and r or tostring(inst)
-end
-
-local function instInfo(inst)
-    if typeof(inst) ~= "Instance" then return nil end
-    local info = {
-        class = inst.ClassName,
-        name = inst.Name,
-        path = fullName(inst),
-    }
+    local attrRole = nil
     pcall(function()
-        if inst:IsA("BasePart") then
-            info.position = vecInfo(inst.Position)
-            info.velocity = vecInfo(inst.AssemblyLinearVelocity or inst.Velocity)
-            info.size = vecInfo(inst.Size)
-            info.anchored = inst.Anchored
-            info.canCollide = inst.CanCollide
-            info.canTouch = inst.CanTouch
-        elseif inst:IsA("Model") then
-            info.pivot = cframeInfo(inst:GetPivot())
-        elseif inst:IsA("Tool") then
-            local h = inst:FindFirstChild("Handle")
-            if h and h:IsA("BasePart") then
-                info.handle = instInfo(h)
-            end
-        end
+        attrRole = player:GetAttribute("Role") or player:GetAttribute("CurrentRole") or player:GetAttribute("RoundRole")
     end)
-    return info
-end
-
-local Scan = {
-    active = true,
-    conns = {},
-    buffer = {},
-    tracked = setmetatable({}, { __mode = "k" }),
-    projectileKeys = {},
-    lastActivationAt = 0,
-    lastActivationTool = "?",
-    lastKnifeTool = nil,
-    latestProjectile = "none",
-    projectileCount = 0,
-    nearHitCount = 0,
-    remoteCount = 0,
-}
-
-if ENV.__THROW_KNIFE_PROJECTILE_SCAN and type(ENV.__THROW_KNIFE_PROJECTILE_SCAN.Stop) == "function" then
-    pcall(function()
-        ENV.__THROW_KNIFE_PROJECTILE_SCAN:Stop("replaced")
-    end)
-end
-ENV.__THROW_KNIFE_PROJECTILE_SCAN = Scan
-
-local function log(record)
-    if not Scan.active then return end
-    record.time = nowIso()
-    local ok, line = pcall(function() return encode(record) end)
-    if not ok then
-        line = "{\"event\":\"encode_error\",\"message\":" .. quote(line) .. "}"
+    if type(attrRole) == "string" and attrRole ~= "" and attrRole ~= "?" then
+        return attrRole
     end
-    Scan.buffer[#Scan.buffer + 1] = line
-    if #Scan.buffer >= FLUSH_EVERY then
-        appendText(LATEST, table.concat(Scan.buffer, "\n") .. "\n")
-        Scan.buffer = {}
-    end
-end
 
-local function flush()
-    if #Scan.buffer > 0 then
-        appendText(LATEST, table.concat(Scan.buffer, "\n") .. "\n")
-        Scan.buffer = {}
+    local v = player:FindFirstChild("Role") or player:FindFirstChild("CurrentRole") or player:FindFirstChild("RoundRole")
+    if v and v:IsA("StringValue") and v.Value ~= "" and v.Value ~= "?" then
+        return v.Value
     end
-end
 
-local function status(extra)
-    local text = "running: " .. VERSION
-        .. "\nfile: " .. LATEST
-        .. "\nno hook: true"
-        .. "\nno remote fire: true"
-        .. "\nwritefile: " .. tostring(type(writefileFn) == "function")
-        .. "\nappendfile: " .. tostring(type(appendfileFn) == "function")
-        .. "\nprojectiles: " .. tostring(Scan.projectileCount)
-        .. "\nnearHits: " .. tostring(Scan.nearHitCount)
-        .. "\nremotes: " .. tostring(Scan.remoteCount)
-        .. "\nlastActivationTool: " .. tostring(Scan.lastActivationTool)
-        .. "\nlatestProjectile: " .. tostring(Scan.latestProjectile)
-        .. "\nextra: " .. tostring(extra or "")
-        .. "\n"
-    writeText(STATUS, text)
-end
-
-function Scan:Connect(sig, fn)
-    if not sig or type(fn) ~= "function" then return nil end
-    local ok, conn = pcall(function() return sig:Connect(fn) end)
-    if ok and conn then
-        self.conns[#self.conns + 1] = conn
-        return conn
-    end
     return nil
 end
 
-function Scan:Stop(reason)
-    if not self.active then return end
-    log({ event = "scan_stop", reason = tostring(reason or "manual") })
-    self.active = false
-    for _, c in ipairs(self.conns) do
-        pcall(function() c:Disconnect() end)
-    end
-    flush()
-    status("stopped: " .. tostring(reason or "manual"))
+local function isLocalMurdererOrKnife()
+    local r = roleOf(LocalPlayer)
+    if r == "Murderer" then return true end
+    -- fallback when roles have not replicated but the knife is equipped
+    return findKnifeEquipped() ~= nil
 end
 
-local function hasAny(text, terms)
-    text = lower(text)
-    for _, t in ipairs(terms) do
-        if string.find(text, lower(t), 1, true) then
-            return true
-        end
+local function isValidTarget(player)
+    if not player or player == LocalPlayer then return false end
+    local char = getChar(player)
+    if not isAliveChar(char) then return false end
+
+    local r = roleOf(player)
+    if r == "Murderer" then return false end
+    if r == "Innocent" or r == "Sheriff" or r == "Hero" then return true end
+
+    -- If roles are not known yet, allow fallback only when local has knife equipped.
+    -- This avoids blocking the patch in rounds where PlayerDataChanged arrived late.
+    if isLocalMurdererOrKnife() then
+        return true
     end
+
     return false
 end
 
-local KNIFE_TERMS = {
-    "knife", "throw", "thrown", "blade", "dagger", "projectile", "knifeproj",
-    "knife_projectile", "knifeclone", "knifehandle"
-}
-
-local REMOTE_TERMS = {
-    "knife", "throw", "thrown", "stab", "touch", "hit", "weapon", "shoot"
-}
-
-local function isAlive(player)
-    local c = player and player.Character
-    local hum = c and c:FindFirstChildOfClass("Humanoid")
-    return hum and hum.Health > 0
-end
-
-local function partPosition(part)
-    local ok, pos = pcall(function() return part.Position end)
-    return ok and pos or nil
-end
-
-local function partVelocity(part)
-    local ok, vel = pcall(function()
-        return part.AssemblyLinearVelocity or part.Velocity
-    end)
-    return ok and vel or Vector3.zero
-end
-
-local function getAllParts(obj)
-    local parts = {}
-    if typeof(obj) ~= "Instance" then return parts end
-    if obj:IsA("BasePart") then
-        parts[#parts + 1] = obj
-        return parts
-    end
-    local ok, desc = pcall(function() return obj:GetDescendants() end)
-    if ok then
-        for _, d in ipairs(desc) do
-            if d:IsA("BasePart") then
-                parts[#parts + 1] = d
-            end
-        end
-    end
-    return parts
-end
-
-local function getMainPart(obj)
-    if typeof(obj) ~= "Instance" then return nil end
-    if obj:IsA("BasePart") then return obj end
-    if obj:IsA("Tool") then
-        local h = obj:FindFirstChild("Handle")
-        if h and h:IsA("BasePart") then return h end
-    end
-    if obj:IsA("Model") then
-        local pp = obj.PrimaryPart
-        if pp and pp:IsA("BasePart") then return pp end
-    end
-    local parts = getAllParts(obj)
-    return parts[1]
-end
-
-local function isDescendantOfLocalCharacter(inst)
-    local char = LocalPlayer and LocalPlayer.Character
-    if not char or typeof(inst) ~= "Instance" then return false end
-    local ok, r = pcall(function() return inst:IsDescendantOf(char) end)
-    return ok and r == true
-end
-
-local function isDescendantOfBackpack(inst)
-    local bp = LocalPlayer and LocalPlayer:FindFirstChildOfClass("Backpack")
-    if not bp or typeof(inst) ~= "Instance" then return false end
-    local ok, r = pcall(function() return inst:IsDescendantOf(bp) end)
-    return ok and r == true
-end
-
-local function likelyProjectile(inst)
-    if typeof(inst) ~= "Instance" then return false, "not_instance" end
-    if isDescendantOfLocalCharacter(inst) or isDescendantOfBackpack(inst) then
-        return false, "local_tool_or_character"
-    end
-
-    local path = fullName(inst)
-    local nameHit = hasAny(path, KNIFE_TERMS)
-    local main = getMainPart(inst)
-    if not main then
-        return false, "no_part"
-    end
-
-    local vel = partVelocity(main)
-    local speed = vel.Magnitude
-    local activationAge = clockNow() - Scan.lastActivationAt
-
-    if nameHit and activationAge <= ACTIVATION_WINDOW + 2.0 then
-        return true, "knife_named_after_activation"
-    end
-    if nameHit and speed >= 8 then
-        return true, "knife_named_moving"
-    end
-    if activationAge <= ACTIVATION_WINDOW and speed >= 18 then
-        return true, "fast_object_after_activation"
-    end
-    if nameHit then
-        return true, "knife_named"
-    end
-
-    return false, "not_projectile"
-end
-
-local function playerRole(player)
-    local role = "?"
-    pcall(function()
-        role = player:GetAttribute("Role")
-            or player:GetAttribute("CurrentRole")
-            or player:GetAttribute("RoundRole")
-            or role
-    end)
-    local v = player:FindFirstChild("Role") or player:FindFirstChild("CurrentRole") or player:FindFirstChild("RoundRole")
-    if v and v:IsA("StringValue") then role = v.Value end
-    return tostring(role or "?")
-end
-
-local TARGET_PART_NAMES = {
+local TARGET_PARTS = {
     "HumanoidRootPart",
     "UpperTorso",
     "LowerTorso",
@@ -452,359 +197,321 @@ local TARGET_PART_NAMES = {
     "RightUpperLeg",
 }
 
-local function targetParts(player)
-    local char = player.Character
-    local parts = {}
-    if not char then return parts end
-    for _, name in ipairs(TARGET_PART_NAMES) do
+local function getTargetParts(char)
+    local out = {}
+    if not char then return out end
+    for _, name in ipairs(TARGET_PARTS) do
         local p = char:FindFirstChild(name)
         if p and p:IsA("BasePart") then
-            parts[#parts + 1] = p
+            table.insert(out, p)
         end
     end
-    return parts
+    return out
 end
 
-local function closestPointOnSegment(a, b, p)
-    local ab = b - a
-    local ab2 = ab:Dot(ab)
-    if ab2 <= 0.00001 then
-        return a, (p - a).Magnitude, 0
-    end
-    local t = math.clamp((p - a):Dot(ab) / ab2, 0, 1)
-    local c = a + ab * t
-    return c, (p - c).Magnitude, t
-end
+local function nearestTarget(radius)
+    local root = getRoot(getChar(LocalPlayer))
+    if not root then return nil, nil, nil end
+    local rootPos = root.Position
 
-local function nearestPlayersToSegment(a, b, radius)
-    local results = {}
-    for _, plr in ipairs(Players:GetPlayers()) do
-        if plr ~= LocalPlayer and isAlive(plr) then
-            local best = nil
-            for _, part in ipairs(targetParts(plr)) do
-                local pos = partPosition(part)
-                if pos then
-                    local closest, dist, t = closestPointOnSegment(a, b, pos)
-                    if not best or dist < best.distance then
-                        best = {
-                            player = plr.Name,
-                            userId = plr.UserId,
-                            role = playerRole(plr),
-                            part = part.Name,
-                            distance = roundNum(dist),
-                            t = roundNum(t),
-                            closest = vecInfo(closest),
-                            targetPosition = vecInfo(pos),
-                        }
-                    end
-                end
-            end
-            if best and best.distance <= radius then
-                results[#results + 1] = best
-            end
-        end
-    end
-    table.sort(results, function(x, y)
-        return (x.distance or 9999) < (y.distance or 9999)
-    end)
-    return results
-end
+    radius = tonumber(radius) or 10
+    local bestPlayer = nil
+    local bestPart = nil
+    local bestDist = math.huge
 
-local function keyFor(inst)
-    local id = ""
-    pcall(function() id = inst:GetDebugId(0) end)
-    return fullName(inst) .. "|" .. tostring(id)
-end
-
-local function trackProjectile(inst, reason)
-    if not Scan.active or typeof(inst) ~= "Instance" then return end
-    if Scan.tracked[inst] then return end
-    local main = getMainPart(inst)
-    if not main then return end
-
-    local key = keyFor(inst)
-    if Scan.projectileKeys[key] then return end
-    Scan.projectileKeys[key] = true
-    Scan.tracked[inst] = true
-    Scan.projectileCount = Scan.projectileCount + 1
-    Scan.latestProjectile = fullName(inst)
-
-    log({
-        event = "projectile_candidate_discovered",
-        reason = reason,
-        object = instInfo(inst),
-        mainPart = instInfo(main),
-        activationAge = roundNum(clockNow() - Scan.lastActivationAt),
-        localKnifeTool = Scan.lastActivationTool,
-        children = (function()
-            local list = {}
-            pcall(function()
-                for _, c in ipairs(inst:GetChildren()) do
-                    if #list < 25 then
-                        list[#list + 1] = { name = c.Name, class = c.ClassName }
-                    end
-                end
-            end)
-            return list
-        end)(),
-    })
-
-    task.spawn(function()
-        local started = clockNow()
-        local lastPos = partPosition(main)
-        local lastLog = 0
-        local sample = 0
-
-        while Scan.active and inst.Parent and main.Parent and clockNow() - started <= PROJECTILE_TRACK_SECONDS do
-            local pos = partPosition(main)
-            local vel = partVelocity(main)
-            if pos and lastPos then
-                local distMoved = (pos - lastPos).Magnitude
-                local speed = vel.Magnitude
-                local radius = NEAR_HIT_RADIUS
-
-                local near = nearestPlayersToSegment(lastPos, pos, radius)
-                if #near > 0 then
-                    Scan.nearHitCount = Scan.nearHitCount + 1
-                    log({
-                        event = "projectile_near_player",
-                        projectile = instInfo(inst),
-                        mainPart = instInfo(main),
-                        sample = sample,
-                        from = vecInfo(lastPos),
-                        to = vecInfo(pos),
-                        speed = roundNum(speed),
-                        moved = roundNum(distMoved),
-                        radius = radius,
-                        near = near,
-                    })
-                elseif clockNow() - lastLog >= 0.22 then
-                    log({
-                        event = "projectile_sample",
-                        projectile = { name = inst.Name, class = inst.ClassName, path = fullName(inst) },
-                        mainPart = { name = main.Name, class = main.ClassName, path = fullName(main) },
-                        sample = sample,
-                        position = vecInfo(pos),
-                        velocity = vecInfo(vel),
-                        speed = roundNum(speed),
-                        moved = roundNum(distMoved),
-                    })
-                    lastLog = clockNow()
-                end
-
-                lastPos = pos
-                sample = sample + 1
-            end
-            task.wait(PROJECTILE_SAMPLE_DT)
-        end
-
-        log({
-            event = "projectile_track_end",
-            projectile = instInfo(inst),
-            lived = roundNum(clockNow() - started),
-            parentStillExists = inst.Parent ~= nil,
-        })
-        flush()
-        status("projectile_track_end")
-    end)
-end
-
-local function scanExistingProjectiles(reason)
-    local ok, desc = pcall(function() return Workspace:GetDescendants() end)
-    if not ok then return end
-    for i, inst in ipairs(desc) do
-        local yes, why = likelyProjectile(inst)
-        if yes then
-            trackProjectile(inst, reason .. ":" .. why)
-        end
-        if i % 500 == 0 then task.wait() end
-    end
-end
-
-local function scanRemotes()
-    local function inspect(root)
-        local ok, desc = pcall(function() return root:GetDescendants() end)
-        if not ok then return end
-        for _, inst in ipairs(desc) do
-            if inst:IsA("RemoteEvent") or inst:IsA("RemoteFunction") then
-                local path = fullName(inst)
-                if hasAny(path, REMOTE_TERMS) then
-                    Scan.remoteCount = Scan.remoteCount + 1
-                    log({
-                        event = "interesting_remote_discovered",
-                        remote = instInfo(inst),
-                        tags = {
-                            knife = hasAny(path, {"knife"}),
-                            throw = hasAny(path, {"throw", "thrown"}),
-                            touch = hasAny(path, {"touch"}),
-                            hit = hasAny(path, {"hit"}),
-                            weapon = hasAny(path, {"weapon"}),
-                        },
-                    })
+    for _, player in ipairs(Players:GetPlayers()) do
+        if isValidTarget(player) then
+            local char = getChar(player)
+            for _, part in ipairs(getTargetParts(char)) do
+                local dist = (rootPos - part.Position).Magnitude
+                if dist <= radius and dist < bestDist then
+                    bestPlayer = player
+                    bestPart = part
+                    bestDist = dist
                 end
             end
         end
     end
-    inspect(ReplicatedStorage)
-    if LocalPlayer then
-        local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
-        if bp then inspect(bp) end
-        if LocalPlayer.Character then inspect(LocalPlayer.Character) end
-    end
+
+    return bestPlayer, bestPart, bestDist
 end
 
-local function markActivation(tool, source)
-    Scan.lastActivationAt = clockNow()
-    Scan.lastActivationTool = tool and fullName(tool) or tostring(source or "?")
-    Scan.lastKnifeTool = tool
-
-    log({
-        event = "knife_activation_detected",
-        source = source,
-        tool = tool and instInfo(tool) or nil,
-        character = LocalPlayer and LocalPlayer.Character and instInfo(LocalPlayer.Character) or nil,
-    })
-    status("knife_activation_detected")
-
-    task.defer(function()
-        task.wait(0.08)
-        scanExistingProjectiles("activation_rescan_0.08")
-        task.wait(0.22)
-        scanExistingProjectiles("activation_rescan_0.30")
-        task.wait(0.45)
-        scanExistingProjectiles("activation_rescan_0.75")
-    end)
-end
-
-local watchedTools = setmetatable({}, { __mode = "k" })
-
-local function maybeWatchKnifeTool(tool)
-    if typeof(tool) ~= "Instance" or not tool:IsA("Tool") or watchedTools[tool] then return end
-    local path = fullName(tool)
-    if not hasAny(path, {"knife", "blade", "dagger"}) then return end
-
-    watchedTools[tool] = true
-    log({
-        event = "knife_tool_discovered",
-        tool = instInfo(tool),
-        children = (function()
-            local list = {}
-            pcall(function()
-                for _, c in ipairs(tool:GetDescendants()) do
-                    if #list < 40 and (c:IsA("RemoteEvent") or c:IsA("RemoteFunction") or c:IsA("BasePart")) then
-                        list[#list + 1] = instInfo(c)
-                    end
-                end
-            end)
-            return list
-        end)(),
-    })
-
-    Scan:Connect(tool.Activated, function()
-        markActivation(tool, "Tool.Activated")
-    end)
-
-    Scan:Connect(tool.Equipped, function()
-        log({ event = "knife_tool_equipped", tool = instInfo(tool) })
-    end)
-
-    Scan:Connect(tool.Unequipped, function()
-        log({ event = "knife_tool_unequipped", tool = instInfo(tool) })
-    end)
-end
-
-local function watchContainer(container)
-    if not container then return end
+local function throwingKnifePresent()
+    local found = false
     pcall(function()
-        for _, child in ipairs(container:GetDescendants()) do
-            maybeWatchKnifeTool(child)
-        end
+        found = workspace:FindFirstChild("ThrowingKnife") ~= nil
     end)
-    Scan:Connect(container.DescendantAdded, function(inst)
-        maybeWatchKnifeTool(inst)
+    return found
+end
+
+local function applyStab(target, firstPart)
+    if not target or not firstPart then return false end
+    if not isAliveChar(getChar(target)) then return false end
+
+    local t = now()
+    local last = Patch.LastTargetHit[target.Name]
+    if last and t - last < 0.22 then
+        return true
+    end
+    Patch.LastTargetHit[target.Name] = t
+
+    local stabRemote, touchRemote = getKnifeRemotes()
+    if not stabRemote or not touchRemote then
+        Patch.Status = "Missing Knife remotes"
+        return false
+    end
+
+    safe(function()
+        stabRemote:FireServer()
+    end)
+
+    local parts = { firstPart }
+    for _, p in ipairs(getTargetParts(getChar(target))) do
+        if p ~= firstPart then
+            table.insert(parts, p)
+        end
+        if #parts >= 6 then break end
+    end
+
+    for _ = 1, 2 do
+        if not Patch.Enabled then return false end
+        for _, p in ipairs(parts) do
+            if p and p.Parent then
+                safe(function()
+                    touchRemote:FireServer(p)
+                end)
+                waitSmall(0.004)
+            end
+        end
+        waitSmall(0.008)
+    end
+
+    return true
+end
+
+local function runFromInput()
+    if not Patch.Enabled then return end
+
+    local char = getChar(LocalPlayer)
+    if not isAliveChar(char) then
+        Patch.Status = "Dead"
+        return
+    end
+
+    if not findKnifeEquipped() then
+        Patch.Status = "Knife not equipped"
+        return
+    end
+
+    if not isLocalMurdererOrKnife() then
+        Patch.Status = "Need Murderer"
+        return
+    end
+
+    local t = now()
+    if Patch.LastPulse and t - Patch.LastPulse < 0.16 then
+        return
+    end
+    Patch.LastPulse = t
+
+    spawnTask(function()
+        waitSmall(0.075)
+
+        if not Patch.Enabled then return end
+
+        -- If a real throw object appeared, this was a throw. Let Throw Hitbox handle it.
+        if throwingKnifePresent() then
+            Patch.Status = "Throw detected - skipped"
+            return
+        end
+
+        local target, part, dist = nearestTarget(Patch.Radius)
+        if not target or not part then
+            Patch.Status = "No target in range"
+            return
+        end
+
+        local ok = applyStab(target, part)
+        if ok then
+            Patch.Status = "Stab hitbox: " .. target.Name .. " | dist " .. tostring(math.floor((dist or 0) + 0.5))
+        else
+            Patch.Status = "Stab failed"
+        end
     end)
 end
 
-local function setupCharacter(char)
-    watchContainer(char)
-    log({ event = "character_watch", character = char and instInfo(char) or nil })
+local function parsePlayerData(data)
+    if type(data) ~= "table" then return end
+
+    for key, value in pairs(data) do
+        if type(key) == "string" and type(value) == "table" then
+            local role = value.Role or value.role
+            if type(role) == "string" then
+                Patch.Roles[key] = role
+                if key == LocalPlayer.Name then
+                    Patch.LocalRole = role
+                    Patch.LocalDead = value.Dead == true or value.dead == true
+                end
+            end
+        elseif type(value) == "table" then
+            local name = value.Name or value.PlayerName or value.Username
+            local role = value.Role or value.role
+            if type(name) == "string" and type(role) == "string" then
+                Patch.Roles[name] = role
+                if name == LocalPlayer.Name then
+                    Patch.LocalRole = role
+                    Patch.LocalDead = value.Dead == true or value.dead == true
+                end
+            end
+        end
+    end
 end
 
-local function setupPlayer()
-    if not LocalPlayer then return end
-    watchContainer(LocalPlayer:FindFirstChildOfClass("Backpack"))
-    if LocalPlayer.Character then
-        setupCharacter(LocalPlayer.Character)
+local function listenRoles()
+    local remote = ReplicatedStorage:FindFirstChild("Remotes")
+        and ReplicatedStorage.Remotes:FindFirstChild("Gameplay")
+        and ReplicatedStorage.Remotes.Gameplay:FindFirstChild("PlayerDataChanged")
+
+    if remote and remote:IsA("RemoteEvent") then
+        connect(remote.OnClientEvent, function(...)
+            local args = { ... }
+            for _, arg in ipairs(args) do
+                parsePlayerData(arg)
+            end
+        end)
     end
-    Scan:Connect(LocalPlayer.CharacterAdded, function(char)
-        task.wait(0.25)
-        setupCharacter(char)
-    end)
-    Scan:Connect(LocalPlayer.ChildAdded, function(child)
-        if child:IsA("Backpack") then
-            task.wait(0.1)
-            watchContainer(child)
+
+    local endNames = { "VictoryScreen", "RoundEndFade" }
+    for _, name in ipairs(endNames) do
+        local r = ReplicatedStorage:FindFirstChild("Remotes")
+            and ReplicatedStorage.Remotes:FindFirstChild("Gameplay")
+            and ReplicatedStorage.Remotes.Gameplay:FindFirstChild(name)
+        if r and r:IsA("RemoteEvent") then
+            connect(r.OnClientEvent, function()
+                Patch.LocalRole = nil
+                Patch.Roles = {}
+                Patch.Status = "Round ended"
+            end)
         end
-    end)
+    end
 end
 
-Scan:Connect(Workspace.DescendantAdded, function(inst)
-    task.defer(function()
-        if not Scan.active then return end
-        local yes, why = likelyProjectile(inst)
-        if yes then
-            trackProjectile(inst, "DescendantAdded:" .. why)
+local function makeButton(parent, text, pos, size)
+    local b = Instance.new("TextButton")
+    b.Size = size or UDim2.new(1, -12, 0, 26)
+    b.Position = pos
+    b.BackgroundColor3 = Color3.fromRGB(35, 38, 48)
+    b.BorderSizePixel = 0
+    b.Text = text
+    b.TextColor3 = Color3.fromRGB(230, 235, 245)
+    b.TextSize = 12
+    b.Font = Enum.Font.GothamSemibold
+    b.Parent = parent
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, 6)
+    c.Parent = b
+    return b
+end
+
+local function buildGui()
+    local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    if not pg then return end
+
+    local old = pg:FindFirstChild("RefStabHitboxPatch")
+    if old then old:Destroy() end
+
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "RefStabHitboxPatch"
+    gui.ResetOnSpawn = false
+    gui.DisplayOrder = 999998
+    gui.Parent = pg
+
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(0, 210, 0, 132)
+    frame.Position = UDim2.new(0, 258, 0.5, -66)
+    frame.BackgroundColor3 = Color3.fromRGB(16, 17, 22)
+    frame.BorderSizePixel = 0
+    frame.Active = true
+    frame.Parent = gui
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 10)
+    corner.Parent = frame
+
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(1, -12, 0, 25)
+    title.Position = UDim2.new(0, 8, 0, 4)
+    title.BackgroundTransparency = 1
+    title.Text = "Stab Hitbox Patch"
+    title.TextColor3 = Color3.fromRGB(220, 225, 240)
+    title.TextSize = 13
+    title.Font = Enum.Font.GothamBold
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Parent = frame
+
+    local toggle = makeButton(frame, "Stab Hitbox: OFF", UDim2.new(0, 6, 0, 32))
+    local minus = makeButton(frame, "-", UDim2.new(0, 6, 0, 64), UDim2.new(0, 40, 0, 26))
+    local plus = makeButton(frame, "+", UDim2.new(1, -46, 0, 64), UDim2.new(0, 40, 0, 26))
+
+    local radiusLbl = Instance.new("TextLabel")
+    radiusLbl.Size = UDim2.new(1, -96, 0, 26)
+    radiusLbl.Position = UDim2.new(0, 48, 0, 64)
+    radiusLbl.BackgroundTransparency = 1
+    radiusLbl.TextColor3 = Color3.fromRGB(200, 210, 230)
+    radiusLbl.TextSize = 12
+    radiusLbl.Font = Enum.Font.Gotham
+    radiusLbl.Text = "Range: " .. tostring(Patch.Radius)
+    radiusLbl.Parent = frame
+
+    local statusLbl = Instance.new("TextLabel")
+    statusLbl.Size = UDim2.new(1, -12, 0, 34)
+    statusLbl.Position = UDim2.new(0, 6, 0, 94)
+    statusLbl.BackgroundTransparency = 1
+    statusLbl.TextColor3 = Color3.fromRGB(150, 160, 180)
+    statusLbl.TextSize = 10
+    statusLbl.Font = Enum.Font.Gotham
+    statusLbl.TextWrapped = true
+    statusLbl.Text = "Status: Off"
+    statusLbl.Parent = frame
+
+    toggle.MouseButton1Click:Connect(function()
+        Patch.Enabled = not Patch.Enabled
+        Patch.Status = Patch.Enabled and "Waiting manual stab" or "Off"
+        toggle.Text = Patch.Enabled and "Stab Hitbox: ON" or "Stab Hitbox: OFF"
+    end)
+
+    minus.MouseButton1Click:Connect(function()
+        Patch.Radius = math.max(4, Patch.Radius - 1)
+        radiusLbl.Text = "Range: " .. tostring(Patch.Radius)
+    end)
+
+    plus.MouseButton1Click:Connect(function()
+        Patch.Radius = math.min(28, Patch.Radius + 1)
+        radiusLbl.Text = "Range: " .. tostring(Patch.Radius)
+    end)
+
+    connect(UserInputService.InputBegan, function(input, gp)
+        if gp or not Patch.Enabled then return end
+        local isClick = input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch
+        if isClick then
+            runFromInput()
         end
     end)
-end)
 
-Scan:Connect(Workspace.DescendantRemoving, function(inst)
-    if Scan.tracked[inst] then
-        log({ event = "tracked_projectile_removing", projectile = instInfo(inst) })
-        flush()
-    end
-end)
-
-task.spawn(function()
-    local ok, err = pcall(function()
-        log({
-            event = "scan_start",
-            version = VERSION,
-            placeId = game.PlaceId,
-            jobId = game.JobId,
-            localPlayer = LocalPlayer and { name = LocalPlayer.Name, userId = LocalPlayer.UserId } or nil,
-            mode = "passive_projectile_workspace_scan",
-            doesNotHookNamecall = true,
-            doesNotFireRemotes = true,
-        })
-
-        scanRemotes()
-        setupPlayer()
-        scanExistingProjectiles("initial")
-        flush()
-        status("started")
-
-        while Scan.active do
-            task.wait(2)
-            scanExistingProjectiles("periodic")
-            log({
-                event = "heartbeat",
-                projectiles = Scan.projectileCount,
-                nearHits = Scan.nearHitCount,
-                latestProjectile = Scan.latestProjectile,
-                lastActivationTool = Scan.lastActivationTool,
-            })
-            flush()
-            status("heartbeat")
+    spawnTask(function()
+        while Patch.Gui and Patch.Gui.Parent do
+            statusLbl.Text = "Status: " .. tostring(Patch.Status)
+            toggle.Text = Patch.Enabled and "Stab Hitbox: ON" or "Stab Hitbox: OFF"
+            radiusLbl.Text = "Range: " .. tostring(Patch.Radius)
+            waitSmall(0.25)
         end
     end)
 
-    if not ok then
-        local msg = tostring(err)
-        if type(debug) == "table" and type(debug.traceback) == "function" then
-            msg = debug.traceback(msg)
-        end
-        writeText(CRASH, msg)
-        status("crash: " .. msg)
-    end
-end)
+    Patch.Gui = gui
+end
+
+listenRoles()
+buildGui()
+
+Patch.Status = "Loaded"
