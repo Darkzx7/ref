@@ -1,5 +1,5 @@
 -- ref_universal | Murder Mystery tester
--- v62: v54 stable + isolated embedded stab hitbox patch
+-- v63: v54 stable + no old cleanup + isolated embedded stab hitbox
 -- v2026-06-04-v52-stable-childadded-throwingknife-hitbox
 
 -- PREBOOT GUARD: runs before any Roblox :GetService/namecall.
@@ -73,15 +73,14 @@ _pcall(function()
 end)
 
 local SESSION_KEY = "__REF_UNIVERSAL_MM_TESTER_CLEANUP"
-local previousCleanup = nil
+-- v63: Do NOT execute previous cleanup from older broken builds.
+-- Some earlier experimental builds saved cleanup callbacks that can call nil later
+-- and make the executor report "attempt to call a nil value" at chunk line 1.
 _pcall(function()
     if type(getgenv) == "function" then
-        previousCleanup = getgenv()[SESSION_KEY]
+        getgenv()[SESSION_KEY] = function() end
     end
 end)
-if type(previousCleanup) == "function" then
-    _pcall(previousCleanup)
-end
 
 -- ─── helpers ───────────────────────────────────────────────────────────────────
 
@@ -4717,15 +4716,13 @@ _spawn(function()
 end)
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- ISOLATED STAB HITBOX MODULE
--- This is intentionally embedded as a delayed, sandboxed module.
--- It behaves like the standalone patch that worked, but ships in this same file.
--- It does not touch Throw Hitbox internals, does not hook __namecall,
--- does not alter KnifeThrown, and skips itself when ThrowingKnife exists.
+-- ISOLATED STAB HITBOX PATCH - EMBEDDED
+-- Same code as the standalone patch that worked, but bundled into this file.
+-- It starts after the main script; it does not touch Throw Hitbox internals.
 -- ─────────────────────────────────────────────────────────────────────────────
 
 do
-    local function __REF_RUN_ISOLATED_STAB_HITBOX_PATCH()
+    local function __REF_RUN_EMBEDDED_STAB_PATCH()
         -- ref_stab_hitbox_patch_v1.lua
         -- Standalone passive Stab Hitbox patch.
         -- Run this AFTER the main ref script is loaded.
@@ -5245,29 +5242,34 @@ do
         Patch.Status = "Loaded"
     end
 
-    local function __REF_SAFE_START_ISOLATED_STAB_HITBOX_PATCH()
-        local ok, err = pcall(__REF_RUN_ISOLATED_STAB_HITBOX_PATCH)
+    local function __REF_START_EMBEDDED_STAB_PATCH()
+        local ok, err = pcall(__REF_RUN_EMBEDDED_STAB_PATCH)
         if not ok then
             pcall(function()
                 local env = _G
                 if type(getgenv) == "function" then
                     local got = getgenv()
-                    if type(got) == "table" then
-                        env = got
-                    end
+                    if type(got) == "table" then env = got end
                 end
-                env.__REF_STAB_HITBOX_PATCH_ERROR = tostring(err)
+                env.__REF_EMBEDDED_STAB_PATCH_ERROR = tostring(err)
             end)
         end
     end
 
-    if type(task) == "table" and type(task.defer) == "function" then
-        task.defer(__REF_SAFE_START_ISOLATED_STAB_HITBOX_PATCH)
-    elseif type(task) == "table" and type(task.spawn) == "function" then
-        task.spawn(__REF_SAFE_START_ISOLATED_STAB_HITBOX_PATCH)
+    local function __REF_DELAYED_START_EMBEDDED_STAB_PATCH()
+        if type(task) == "table" and type(task.wait) == "function" then
+            task.wait(1.25)
+        elseif type(wait) == "function" then
+            wait(1.25)
+        end
+        __REF_START_EMBEDDED_STAB_PATCH()
+    end
+
+    if type(task) == "table" and type(task.spawn) == "function" then
+        task.spawn(__REF_DELAYED_START_EMBEDDED_STAB_PATCH)
     elseif type(spawn) == "function" then
-        spawn(__REF_SAFE_START_ISOLATED_STAB_HITBOX_PATCH)
+        spawn(__REF_DELAYED_START_EMBEDDED_STAB_PATCH)
     else
-        __REF_SAFE_START_ISOLATED_STAB_HITBOX_PATCH()
+        __REF_START_EMBEDDED_STAB_PATCH()
     end
 end
