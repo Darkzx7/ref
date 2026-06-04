@@ -1,5 +1,5 @@
 -- ref_universal | Murder Mystery tester
--- v59: v54 stable + stab hitbox scope fixed, no show hitbox
+-- v60: v54 stable + isolated input-based stab hitbox, no show hitbox
 -- v2026-06-04-v52-stable-childadded-throwingknife-hitbox
 
 -- PREBOOT GUARD: runs before any Roblox :GetService/namecall.
@@ -31,7 +31,6 @@ local TweenService     = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService       = game:GetService("RunService")
-local Workspace       = workspace
 
 local LocalPlayer = Players.LocalPlayer
 
@@ -159,10 +158,9 @@ local State = {
     stabHitboxOn       = false,
     stabHitboxRadius   = 10,
     stabHitboxStatus   = "Idle",
-    _stabHitboxConn    = nil,
-    _stabHitboxLoop    = false,
-    _stabHitboxLastHit = {},
+    _stabInputConn     = nil,
     _stabLastPulse     = 0,
+    _stabLastTargetHit = {},
     throwRangeOn       = false,
     throwRangeRadius   = 18,
     throwRangeStatus   = "Idle",
@@ -1490,8 +1488,8 @@ local function cleanup()
     State.gunDropEspOn = false
     State.espOn = false
     State.stabHitboxOn = false
-    safeDisconnect(State._stabHitboxConn)
-    State._stabHitboxConn = nil
+    safeDisconnect(State._stabInputConn)
+    State._stabInputConn = nil
 
     for _, conn in ipairs(Connections) do
         safeDisconnect(conn)
@@ -1824,209 +1822,6 @@ local function pulseThrowHitboxTouch(targetPlayer, targetPart)
     return true
 end
 
-
--- ─── passive stab hitbox ───────────────────────────────────────────────────────
--- Safe scope version.
--- It does not hook remotes, does not alter KnifeThrown, and only reacts to real Tool.Activated.
--- It skips if ThrowingKnife appears, so throw/manual projectile stays handled by Throw Hitbox.
-
-local function isStabHitboxTarget(player)
-    if not player or player == LocalPlayer then return false end
-    if not player.Character or not isAlive(player.Character) then return false end
-    local myRole = roleOfPlayer(LocalPlayer)
-    if myRole ~= "Murderer" then return false end
-    local r = roleOfPlayer(player)
-    return r == "Innocent" or r == "Sheriff" or r == "Hero"
-end
-
-local function getStabHitboxTarget(radius)
-    local root = getRoot()
-    local rootPos = root and partPos(root)
-    if not rootPos then return nil, nil, nil end
-
-    radius = tonumber(radius) or 10
-    local best, bestPart, bestDist = nil, nil, 999999
-
-    for _, p in ipairs(getPlayerList()) do
-        if isStabHitboxTarget(p) then
-            for _, part in ipairs(getThrowHitboxParts(p.Character)) do
-                local pos = part and partPos(part)
-                if pos then
-                    local dist = (rootPos - pos).Magnitude
-                    if dist <= radius and dist < bestDist then
-                        best = p
-                        bestPart = part
-                        bestDist = dist
-                    end
-                end
-            end
-        end
-    end
-
-    return best, bestPart, bestDist
-end
-
-local function pulseStabHitbox(targetPlayer, targetPart)
-    if not targetPlayer or not targetPart then return false end
-    if not targetPlayer.Character or not isAlive(targetPlayer.Character) then return false end
-
-    local t = testerTime()
-    State._stabHitboxLastHit = State._stabHitboxLastHit or {}
-    local last = State._stabHitboxLastHit[targetPlayer.Name]
-    if last and t - last < 0.22 then
-        return true
-    end
-    State._stabHitboxLastHit[targetPlayer.Name] = t
-
-    local tool = findTool("Knife")
-    local events = tool and findChild(tool, "Events")
-    local stabRemote = events and findChild(events, "KnifeStabbed")
-    local touchRemote = events and findChild(events, "HandleTouched")
-
-    if not stabRemote or not touchRemote then
-        State.stabHitboxStatus = "Missing stab/touch remote"
-        return false
-    end
-
-    _pcall(function()
-        stabRemote:FireServer()
-    end)
-
-    local parts = { targetPart }
-    for _, p in ipairs(getThrowHitboxParts(targetPlayer.Character)) do
-        if p and p ~= targetPart then
-            parts[#parts + 1] = p
-        end
-        if #parts >= 6 then break end
-    end
-
-    for _ = 1, 2 do
-        if not Alive or not State.stabHitboxOn then return false end
-        for _, p in ipairs(parts) do
-            if p and p.Parent then
-                _pcall(function()
-                    touchRemote:FireServer(p)
-                end)
-                _wait(0.004)
-            end
-        end
-        _wait(0.008)
-    end
-
-    return true
-end
-
-local function isThrowingKnifePresentSafe()
-    local found = false
-    _pcall(function()
-        found = workspace:FindFirstChild("ThrowingKnife") ~= nil
-    end)
-    return found == true
-end
-
-local function tryStabHitboxFromManualUse()
-    if not Alive or not State.stabHitboxOn then return false end
-    if State.localDead then
-        State.stabHitboxStatus = "Dead"
-        return false
-    end
-    if roleOfPlayer(LocalPlayer) ~= "Murderer" then
-        State.stabHitboxStatus = "Need Murderer"
-        return false
-    end
-
-    local t = testerTime()
-    if State._stabLastPulse and t - State._stabLastPulse < 0.18 then
-        return false
-    end
-    State._stabLastPulse = t
-
-    _spawn(function()
-        _wait(0.06)
-
-        if not Alive or not State.stabHitboxOn then return end
-
-        if isThrowingKnifePresentSafe() then
-            State.stabHitboxStatus = "Throw detected - skipped"
-            return
-        end
-
-        local target, part, dist = getStabHitboxTarget(State.stabHitboxRadius or 10)
-        if not target or not part then
-            State.stabHitboxStatus = "No target in range"
-            return
-        end
-
-        local ok = pulseStabHitbox(target, part)
-        State.stabHitboxStatus = ok
-            and ("Stab hitbox: "..target.Name.." | dist "..tostring(math.floor((dist or 0) + 0.5)))
-            or "Stab hitbox failed"
-    end)
-
-    return true
-end
-
-local function stopStabHitboxSafe()
-    State.stabHitboxOn = false
-    State.stabHitboxStatus = "Idle"
-    State._stabHitboxLoop = false
-    safeDisconnect(State._stabHitboxConn)
-    State._stabHitboxConn = nil
-end
-
-local function hookCurrentKnifeForStabHitbox()
-    safeDisconnect(State._stabHitboxConn)
-    State._stabHitboxConn = nil
-
-    local tool = findTool("Knife")
-    if not tool then return false end
-
-    local okConn = _pcall(function()
-        local sig = tool.Activated
-        if sig and sig.Connect then
-            State._stabHitboxConn = trackConn(sig:Connect(function()
-                if not Alive or not State.stabHitboxOn then return end
-                tryStabHitboxFromManualUse()
-            end))
-        end
-    end)
-
-    return okConn == true
-end
-
-local function startStabHitboxSafe()
-    if State._stabHitboxLoop then return end
-    State._stabHitboxLoop = true
-    State.stabHitboxStatus = "Waiting manual stab"
-
-    hookCurrentKnifeForStabHitbox()
-
-    _spawn(function()
-        local lastTool = nil
-        while Alive and State.stabHitboxOn do
-            local okLoop = _pcall(function()
-                local tool = findTool("Knife")
-                if tool ~= lastTool then
-                    lastTool = tool
-                    hookCurrentKnifeForStabHitbox()
-                end
-            end)
-            if not okLoop then
-                State.stabHitboxStatus = "Stab hook guarded"
-            end
-            _wait(0.45)
-        end
-
-        State._stabHitboxLoop = false
-        safeDisconnect(State._stabHitboxConn)
-        State._stabHitboxConn = nil
-        if not State.stabHitboxOn then
-            State.stabHitboxStatus = "Idle"
-        end
-    end)
-end
-
-
 local function makeCFrames(originPart, targetPart, originOverride)
     local op = originOverride or partPos(originPart)
     local tp = predictedPos(targetPart)
@@ -2115,6 +1910,187 @@ function Tester.StabTarget()
     Tester.TouchTarget()
     State.lastAction = old
     return true
+end
+
+
+-- ─── safe stab hitbox, input-based and isolated ───────────────────────────────
+-- Does not hook KnifeThrown, does not touch Throw Hitbox, and does not run on boot.
+-- It only listens while the toggle is ON. If ThrowingKnife appears, it skips.
+
+local function isValidStabHitboxTarget(player)
+    if not player or player == LocalPlayer then return false end
+    if not player.Character or not isAlive(player.Character) then return false end
+    local myRole = roleOfPlayer(LocalPlayer)
+    if myRole ~= "Murderer" then return false end
+    local r = roleOfPlayer(player)
+    return r == "Innocent" or r == "Sheriff" or r == "Hero"
+end
+
+local function stabHitboxParts(char)
+    local names = {
+        "HumanoidRootPart",
+        "UpperTorso",
+        "LowerTorso",
+        "Torso",
+        "Head",
+        "LeftUpperArm",
+        "RightUpperArm",
+        "LeftUpperLeg",
+        "RightUpperLeg",
+    }
+    local out = {}
+    if not char then return out end
+    for _, name in ipairs(names) do
+        local p = findChild(char, name)
+        if p then out[#out + 1] = p end
+    end
+    return out
+end
+
+local function getNearestStabHitboxTarget(radius)
+    local root = getRoot()
+    local rootPos = root and partPos(root)
+    if not rootPos then return nil, nil, nil end
+
+    radius = tonumber(radius) or 10
+    local best, bestPart, bestDist = nil, nil, 999999
+
+    for _, p in ipairs(getPlayerList()) do
+        if isValidStabHitboxTarget(p) then
+            for _, part in ipairs(stabHitboxParts(p.Character)) do
+                local pos = part and partPos(part)
+                if pos then
+                    local dist = (rootPos - pos).Magnitude
+                    if dist <= radius and dist < bestDist then
+                        best = p
+                        bestPart = part
+                        bestDist = dist
+                    end
+                end
+            end
+        end
+    end
+
+    return best, bestPart, bestDist
+end
+
+local function applyStabHitboxToTarget(target, firstPart)
+    if not target or not firstPart then return false end
+    if not target.Character or not isAlive(target.Character) then return false end
+
+    local nowT = testerTime()
+    State._stabLastTargetHit = State._stabLastTargetHit or {}
+    local last = State._stabLastTargetHit[target.Name]
+    if last and nowT - last < 0.22 then
+        return true
+    end
+    State._stabLastTargetHit[target.Name] = nowT
+
+    local tool = findTool("Knife")
+    local events = tool and findChild(tool, "Events")
+    local stabRemote = events and findChild(events, "KnifeStabbed")
+    local touchRemote = events and findChild(events, "HandleTouched")
+    if not stabRemote or not touchRemote then
+        State.stabHitboxStatus = "Missing knife remotes"
+        return false
+    end
+
+    _pcall(function()
+        stabRemote:FireServer()
+    end)
+
+    local parts = { firstPart }
+    for _, p in ipairs(stabHitboxParts(target.Character)) do
+        if p and p ~= firstPart then
+            parts[#parts + 1] = p
+        end
+        if #parts >= 6 then break end
+    end
+
+    for _ = 1, 2 do
+        if not Alive or not State.stabHitboxOn then return false end
+        for _, part in ipairs(parts) do
+            if part and part.Parent then
+                _pcall(function()
+                    touchRemote:FireServer(part)
+                end)
+                _wait(0.004)
+            end
+        end
+        _wait(0.008)
+    end
+
+    return true
+end
+
+local function runStabHitboxFromInput()
+    if not Alive or not State.stabHitboxOn then return false end
+    if State.currentPhase == "Lobby" or State.currentPhase == "Ending" then
+        State.stabHitboxStatus = "Not in round"
+        return false
+    end
+    if State.localDead then
+        State.stabHitboxStatus = "Dead"
+        return false
+    end
+    if roleOfPlayer(LocalPlayer) ~= "Murderer" then
+        State.stabHitboxStatus = "Need Murderer"
+        return false
+    end
+    if not findChild(getChar(), "Knife") then
+        State.stabHitboxStatus = "Knife not equipped"
+        return false
+    end
+
+    local t = testerTime()
+    if State._stabLastPulse and t - State._stabLastPulse < 0.16 then
+        return false
+    end
+    State._stabLastPulse = t
+
+    _spawn(function()
+        _wait(0.075)
+        if not Alive or not State.stabHitboxOn then return end
+
+        local isThrow = false
+        _pcall(function()
+            isThrow = workspace:FindFirstChild("ThrowingKnife") ~= nil
+        end)
+        if isThrow then
+            State.stabHitboxStatus = "Throw detected - skipped"
+            return
+        end
+
+        local target, part, dist = getNearestStabHitboxTarget(State.stabHitboxRadius or 10)
+        if not target or not part then
+            State.stabHitboxStatus = "No target in range"
+            return
+        end
+
+        local ok = applyStabHitboxToTarget(target, part)
+        State.stabHitboxStatus = ok
+            and ("Stab hitbox: "..target.Name.." | dist "..tostring(math.floor((dist or 0) + 0.5)))
+            or "Stab hitbox failed"
+    end)
+end
+
+local function stopStabHitboxInput()
+    State.stabHitboxOn = false
+    State.stabHitboxStatus = "Idle"
+    safeDisconnect(State._stabInputConn)
+    State._stabInputConn = nil
+end
+
+local function startStabHitboxInput()
+    if State._stabInputConn then return end
+    State.stabHitboxStatus = "Waiting manual stab"
+    State._stabInputConn = trackConn(UserInputService.InputBegan:Connect(function(input, gp)
+        if gp or not State.stabHitboxOn then return end
+        local isClick = input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch
+        if not isClick then return end
+        runStabHitboxFromInput()
+    end))
 end
 
 function Tester.CyclePart()
@@ -4753,9 +4729,9 @@ W:Button("Touch Nearest", function() Tester.TouchTarget() end)
 W:Toggle("Stab Hitbox", false, function(v)
     State.stabHitboxOn = v == true
     if State.stabHitboxOn then
-        startStabHitboxSafe()
+        startStabHitboxInput()
     else
-        stopStabHitboxSafe()
+        stopStabHitboxInput()
     end
 end)
 
