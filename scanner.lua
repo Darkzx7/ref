@@ -116,8 +116,12 @@ local State = {
     throwRangeOn      = false,
     throwRangeRadius  = 22,
     throwRangeStatus  = "Idle",
+    throwHitboxMaxDistance = 800,
     _throwRangeLoop   = false,
     _throwRangeToggle = nil,
+    _throwHitboxInputLast = 0,
+    _throwHitboxActivatedConn = nil,
+    _throwHitboxHookedKnife = nil,
     coinCollect        = false,
     coinSpeed          = 4,
     collecting         = false,
@@ -1644,41 +1648,20 @@ local function nearestKnifeTarget()
     end, "no knife target")
 end
 
+local THROW_HITBOX_TARGET_ROLES = {
+    Innocent = true,
+    Sheriff = true,
+    Hero = true,
+}
+
 local function isValidThrowRangeTarget(player)
     if not isValidCombatTarget(player) then return false end
+
     local myRole = roleOfPlayer(LocalPlayer)
+    if myRole ~= "Murderer" then return false end
+
     local targetRole = roleOfPlayer(player)
-    if myRole == "Murderer" and targetRole == "Murderer" then return false end
-    return true
-end
-
-local function nearestThrowRangeTarget(radius)
-    radius = tonumber(radius) or State.throwRangeRadius or 22
-    local myRoot = getPart(getChar(), "HumanoidRootPart")
-    local myPos = myRoot and partPos(myRoot)
-    if not myPos then return nil, nil, "no local position" end
-
-    local best, bestPart, bestDist = nil, nil, radius + 0.001
-    for _, p in ipairs(getPlayerList()) do
-        if isValidThrowRangeTarget(p) then
-            local pt = getPart(p.Character, State.selectedPart)
-                or getPart(p.Character, "HumanoidRootPart")
-                or getPart(p.Character, "UpperTorso")
-                or getPart(p.Character, "Torso")
-            local pos = pt and partPos(pt)
-            if pos then
-                local d = (myPos - pos).Magnitude
-                if d <= radius and d < bestDist then
-                    best = p
-                    bestPart = pt
-                    bestDist = d
-                end
-            end
-        end
-    end
-
-    if not bestPart then return nil, nil, "no target in range" end
-    return best, bestPart, "range:"..best.Name.." @"..tostring(math.floor(bestDist + 0.5))
+    return THROW_HITBOX_TARGET_ROLES[targetRole] == true
 end
 
 local function getThrowContactParts(char, preferred)
@@ -1704,6 +1687,166 @@ local function getThrowContactParts(char, preferred)
         end
     end
     return parts
+end
+
+local function closestPointOnSegment(a, b, p)
+    local ab = b - a
+    local ab2 = ab:Dot(ab)
+    if ab2 <= 0.0001 then
+        return a, 0, (p - a).Magnitude
+    end
+    local t = math.clamp((p - a):Dot(ab) / ab2, 0, 1)
+    local closest = a + ab * t
+    return closest, t, (p - closest).Magnitude
+end
+
+local function getThrowAimSegment()
+    local char = getChar()
+    local tool = findTool("Knife")
+    local handle = tool and findChild(tool, "Handle")
+    local originPart = handle or getPart(char, "HumanoidRootPart")
+    local origin = originPart and partPos(originPart)
+    if not origin then return nil, nil, "no origin" end
+
+    local aimPos = nil
+    _pcall(function()
+        local mouse = LocalPlayer:GetMouse()
+        if mouse and mouse.Hit then
+            aimPos = mouse.Hit.Position
+        end
+    end)
+
+    if not aimPos then
+        _pcall(function()
+            local cam = workspace.CurrentCamera
+            if cam then
+                aimPos = origin + cam.CFrame.LookVector * 500
+            end
+        end)
+    end
+
+    if not aimPos then return nil, nil, "no aim" end
+
+    local dir = aimPos - origin
+    if dir.Magnitude < 1 then return nil, nil, "bad aim" end
+    dir = dir.Unit
+
+    local rawLen = (aimPos - origin).Magnitude
+    local maxLen = tonumber(State.throwHitboxMaxDistance) or 800
+    local len = math.clamp(math.max(rawLen, 140), 40, maxLen)
+    return origin, origin + dir * len, "ok"
+end
+
+local function collectThrowHitboxRayTargets(radius, segA, segB)
+    radius = tonumber(radius) or State.throwRangeRadius or 22
+    if not segA or not segB then return {}, "no throw ray" end
+
+    local found = {}
+    for _, p in ipairs(getPlayerList()) do
+        if isValidThrowRangeTarget(p) then
+            local char = p.Character
+            local bestPart, bestRayDist, bestTravel, bestT = nil, radius + 0.001, 999999, 1
+            if char then
+                for _, part in ipairs(getThrowContactParts(char, State.selectedPart)) do
+                    local pos = part and partPos(part)
+                    if pos then
+                        local _, t, rayDist = closestPointOnSegment(segA, segB, pos)
+                        local travel = (segB - segA).Magnitude * t
+                        if rayDist <= radius and (travel < bestTravel or rayDist < bestRayDist) then
+                            bestPart = part
+                            bestRayDist = rayDist
+                            bestTravel = travel
+                            bestT = t
+                        end
+                    end
+                end
+            end
+            if bestPart then
+                found[#found + 1] = {
+                    player = p,
+                    part = bestPart,
+                    rayDist = bestRayDist,
+                    travel = bestTravel,
+                    t = bestT,
+                }
+            end
+        end
+    end
+
+    table.sort(found, function(a, b)
+        local at = a.travel or 999999
+        local bt = b.travel or 999999
+        if math.abs(at - bt) > 1.5 then return at < bt end
+        return (a.rayDist or 999999) < (b.rayDist or 999999)
+    end)
+
+    if #found == 0 then return found, "no target on throw path" end
+    local first = found[1]
+    return found, "path:"..first.player.Name.." @"..tostring(math.floor((first.rayDist or 0) + 0.5))
+end
+
+local function collectThrowHitboxAuraTargets(radius)
+    radius = tonumber(radius) or State.throwRangeRadius or 22
+    local myRoot = getPart(getChar(), "HumanoidRootPart")
+    local myPos = myRoot and partPos(myRoot)
+    if not myPos then return {}, "no local position" end
+
+    local found = {}
+    for _, p in ipairs(getPlayerList()) do
+        if isValidThrowRangeTarget(p) then
+            local char = p.Character
+            local bestPart, bestDist = nil, radius + 0.001
+            if char then
+                for _, part in ipairs(getThrowContactParts(char, State.selectedPart)) do
+                    local pos = part and partPos(part)
+                    if pos then
+                        local d = (myPos - pos).Magnitude
+                        if d <= radius and d < bestDist then
+                            bestPart = part
+                            bestDist = d
+                        end
+                    end
+                end
+            end
+            if bestPart then
+                found[#found + 1] = {
+                    player = p,
+                    part = bestPart,
+                    dist = bestDist
+                }
+            end
+        end
+    end
+
+    table.sort(found, function(a, b)
+        return (a.dist or 999999) < (b.dist or 999999)
+    end)
+
+    if #found == 0 then return found, "no target in hitbox" end
+    return found, "aura:"..found[1].player.Name.." @"..tostring(math.floor((found[1].dist or 0) + 0.5))
+end
+
+local function pulseThrowHitboxTouch(touchRemote, targetPlayer, preferredPart, allowWhenToggleOff)
+    if not touchRemote or not targetPlayer or not targetPlayer.Character then return false end
+    if not isAlive(targetPlayer.Character) then return false end
+
+    local hitParts = getThrowContactParts(targetPlayer.Character, preferredPart and preferredPart.Name or State.selectedPart)
+    if #hitParts == 0 then return false end
+
+    for cycle = 1, 7 do
+        if not Alive then return false end
+        if not allowWhenToggleOff and not State.throwRangeOn then return false end
+        if not targetPlayer.Character or not isAlive(targetPlayer.Character) then return true end
+        for _, part in ipairs(hitParts) do
+            if part and part.Parent then
+                _pcall(function() touchRemote:FireServer(part) end)
+                _wait(0.005)
+            end
+        end
+        _wait(0.01)
+    end
+
+    return true
 end
 
 local function makeCFrames(originPart, targetPart, originOverride)
@@ -1760,6 +1903,50 @@ function Tester.ThrowKnife()
     return Tester.ThrowKnifeAtPart(targetPart, false)
 end
 
+function Tester.ThrowHitboxFromAim(allowWhenToggleOff)
+    if not Alive then return false end
+    if not allowWhenToggleOff and not State.throwRangeOn then return false end
+    if State.localDead then
+        State.throwRangeStatus = "Dead"
+        return false
+    end
+
+    local myRole = roleOfPlayer(LocalPlayer)
+    if myRole ~= "Murderer" then
+        State.throwRangeStatus = "Need Murderer"
+        return false
+    end
+
+    local tool = findTool("Knife")
+    if not tool then
+        State.throwRangeStatus = "No knife"
+        return false
+    end
+
+    local events = findChild(tool, "Events")
+    local touchRemote = events and findChild(events, "HandleTouched")
+    if not touchRemote then
+        State.throwRangeStatus = "No HandleTouched"
+        return false
+    end
+
+    local segA, segB, rayState = getThrowAimSegment()
+    local targets, why = collectThrowHitboxRayTargets(State.throwRangeRadius, segA, segB)
+    local entry = targets and targets[1]
+    if not entry or not entry.player or not entry.part then
+        State.throwRangeStatus = why or rayState or "No throw path target"
+        return false
+    end
+
+    local ok = pulseThrowHitboxTouch(touchRemote, entry.player, entry.part, allowWhenToggleOff)
+    if ok then
+        State.throwRangeStatus = "Manual throw hitbox: "..entry.player.Name.." | gap "..tostring(math.floor((entry.rayDist or 0) + 0.5))
+    else
+        State.throwRangeStatus = "Manual throw hitbox failed"
+    end
+    return ok
+end
+
 function Tester.ThrowRangeHit()
     if not canAct("ThrowRange") then return false end
     if State.localDead then
@@ -1768,7 +1955,7 @@ function Tester.ThrowRangeHit()
     end
 
     local myRole = roleOfPlayer(LocalPlayer)
-    if myRole and myRole ~= "Murderer" then
+    if myRole ~= "Murderer" then
         State.throwRangeStatus = "Need Murderer"
         return false
     end
@@ -1781,35 +1968,25 @@ function Tester.ThrowRangeHit()
 
     local events = findChild(tool, "Events")
     local touchRemote = events and findChild(events, "HandleTouched")
-    local targetPlayer, targetPart, why = nearestThrowRangeTarget(State.throwRangeRadius)
-    if not targetPlayer or not targetPart then
-        State.throwRangeStatus = why or "No target"
+    if not touchRemote then
+        State.throwRangeStatus = "No HandleTouched"
         return false
     end
 
-    local ok = Tester.ThrowKnifeAtPart(targetPart, true)
-    if not ok then
-        State.throwRangeStatus = "Throw failed"
+    local targets, why = collectThrowHitboxAuraTargets(State.throwRangeRadius)
+    local entry = targets and targets[1]
+    if not entry or not entry.player or not entry.part then
+        State.throwRangeStatus = why or "No hitbox target"
         return false
     end
 
-    if touchRemote then
-        _spawn(function()
-            _wait(0.035)
-            if not Alive or not State.throwRangeOn then return end
-            if not targetPlayer.Character or not isAlive(targetPlayer.Character) then return end
-            local hitParts = getThrowContactParts(targetPlayer.Character, State.selectedPart)
-            for _, part in ipairs(hitParts) do
-                if part and part.Parent then
-                    _pcall(function() touchRemote:FireServer(part) end)
-                    _wait(0.015)
-                end
-            end
-        end)
+    local ok = pulseThrowHitboxTouch(touchRemote, entry.player, entry.part, true)
+    if ok then
+        State.throwRangeStatus = "Hitbox touch: "..entry.player.Name.." @"..tostring(math.floor((entry.dist or 0) + 0.5))
+    else
+        State.throwRangeStatus = "Hitbox touch failed"
     end
-
-    State.throwRangeStatus = why or "Thrown"
-    return true
+    return ok
 end
 
 function Tester.TouchTarget()
@@ -1857,26 +2034,61 @@ function Tester.CycleCooldown()
     return COOLDOWN_OPTIONS[State.cooldownIndex]
 end
 
+local function triggerManualThrowHitbox(source)
+    if not Alive or not State.throwRangeOn then return false end
+    local nowTime = testerTime()
+    if nowTime - (State._throwHitboxInputLast or 0) < 0.16 then return false end
+    State._throwHitboxInputLast = nowTime
+    State.throwRangeStatus = "Manual throw detected"
+    _spawn(function()
+        _wait(0.035)
+        if Alive and State.throwRangeOn then
+            Tester.ThrowHitboxFromAim(false)
+        end
+    end)
+    return true
+end
+
+local function hookThrowHitboxKnifeActivated()
+    local char = getChar()
+    local knife = char and findChild(char, "Knife")
+    if State._throwHitboxHookedKnife == knife and State._throwHitboxActivatedConn then return end
+
+    safeDisconnect(State._throwHitboxActivatedConn)
+    State._throwHitboxActivatedConn = nil
+    State._throwHitboxHookedKnife = knife
+
+    if knife and knife.Activated then
+        State._throwHitboxActivatedConn = trackConn(knife.Activated:Connect(function()
+            triggerManualThrowHitbox("Activated")
+        end))
+    end
+end
+
 local function startThrowRangeLoop()
     if State._throwRangeLoop then return end
     State._throwRangeLoop = true
     _spawn(function()
         while Alive and State.throwRangeOn do
-            local waitTime = 0.12
-            local ok = false
+            hookThrowHitboxKnifeActivated()
             if State.currentPhase == "Lobby" or State.currentPhase == "Ending" or State.currentPhase == "Loading" then
-                State.throwRangeStatus = "Waiting for round"
-                waitTime = 0.35
+                State.throwRangeStatus = "Passive - waiting for round"
             elseif State.localDead then
                 State.throwRangeStatus = "Dead"
-                waitTime = 0.35
+            elseif roleOfPlayer(LocalPlayer) ~= "Murderer" then
+                State.throwRangeStatus = "Need Murderer"
+            elseif not findTool("Knife") then
+                State.throwRangeStatus = "Passive - no knife"
             else
-                ok = Tester.ThrowRangeHit()
-                waitTime = ok and math.max((COOLDOWN_OPTIONS[State.cooldownIndex] or 0.25) * 0.75, 0.08) or 0.16
+                local _, why = collectThrowHitboxAuraTargets(State.throwRangeRadius)
+                State.throwRangeStatus = "Passive - throw manually | "..tostring(why or "ready")
             end
-            _wait(waitTime)
+            _wait(0.35)
         end
         State._throwRangeLoop = false
+        safeDisconnect(State._throwHitboxActivatedConn)
+        State._throwHitboxActivatedConn = nil
+        State._throwHitboxHookedKnife = nil
         if not State.throwRangeOn then
             State.throwRangeStatus = "Idle"
         end
@@ -1886,6 +2098,9 @@ end
 local function stopThrowRangeLoop()
     State.throwRangeOn = false
     State.throwRangeStatus = "Idle"
+    safeDisconnect(State._throwHitboxActivatedConn)
+    State._throwHitboxActivatedConn = nil
+    State._throwHitboxHookedKnife = nil
 end
 
 -- ─── manual silent input ───────────────────────────────────────────────────────
@@ -1895,9 +2110,15 @@ local function installManualSilent()
     State._manualConn = nil
     local uis = UserInputService
     State._manualConn = trackConn(uis.InputBegan:Connect(function(input, gp)
-        if gp or not Alive or not State.manualSilent then return end
+        if not Alive then return end
         if input.UserInputType ~= Enum.UserInputType.MouseButton1
         and input.UserInputType ~= Enum.UserInputType.Touch then return end
+
+        if State.throwRangeOn and findChild(getChar(), "Knife") then
+            triggerManualThrowHitbox("Input")
+        end
+
+        if gp or not State.manualSilent then return end
         if not findChild(getChar(), "Gun") then return end
         _spawn(function()
             if Alive and State.manualSilent then
@@ -4256,16 +4477,16 @@ W:Button("Throw Knife Nearest",  function() Tester.ThrowKnife()  end)
 W:Button("Stab Nearest",  function() Tester.StabTarget()  end)
 W:Button("Touch Nearest", function() Tester.TouchTarget() end)
 
-State._throwRangeToggle = W:Toggle("Throw Range", false, function(v)
+State._throwRangeToggle = W:Toggle("Throw Hitbox", false, function(v)
     State.throwRangeOn = v
     if v then startThrowRangeLoop() else stopThrowRangeLoop() end
 end)
 
-W:Slider("Throw Range Radius", 8, 70, State.throwRangeRadius, function(v)
+W:Slider("Throw Hitbox Radius", 8, 70, State.throwRangeRadius, function(v)
     State.throwRangeRadius = v
 end)
 
-W:Button("Throw Range Once", function()
+W:Button("Throw Hitbox Scan Once", function()
     Tester.ThrowRangeHit()
 end)
 
@@ -4388,7 +4609,7 @@ local statusLbl = W:Label("Ready.")
 local phaseLbl = W:Label("Phase: Unknown")
 local dataLbl = W:Label("Role: ? | Coins: 0/40")
 local gunDropLbl = W:Label("GunDrop: Missing | N/A")
-local throwRangeLbl = W:Label("Throw Range: Idle")
+local throwRangeLbl = W:Label("Throw Hitbox: Idle")
 local afkLbl = W:Label("Farm AFK: Idle")
 
 _spawn(function()
@@ -4406,7 +4627,7 @@ _spawn(function()
         if State.espOn then parts[#parts+1] = "esp" end
         if State.gunDropOn then parts[#parts+1] = "gundrop" end
         if State.gunDropEspOn then parts[#parts+1] = "gundrop esp" end
-        if State.throwRangeOn then parts[#parts+1] = "throw range" end
+        if State.throwRangeOn then parts[#parts+1] = "throw hitbox" end
         local activeText = #parts > 0 and ("Active: "..table.concat(parts, ", ")) or "Inactive"
         local localRole = State.currentPhase == "Lobby" and "?" or (State.localRole or State.roles[LocalPlayer.Name] or "?")
         local endText = ""
@@ -4418,7 +4639,7 @@ _spawn(function()
             phaseLbl.Text = "Phase: "..tostring(State.currentPhase or "Unknown").." | Signal: "..tostring(State.lastRoundSignal or "None")..endText
             dataLbl.Text = "Role: "..tostring(localRole).." | Coins: "..tostring(State.coinCount or 0).."/"..tostring(State.coinLimit or 40).." | Coin: "..tostring(State.coinStatus or "Idle")
             gunDropLbl.Text = "GunDrop: "..tostring(State.lastGunDropStatus or "Missing").." | "..tostring(State.lastGunDropDistance or "N/A").." | GiveWeapon: "..tostring(State._lastGiveWeaponName or "None")
-            throwRangeLbl.Text = "Throw Range: "..tostring(State.throwRangeStatus or "Idle").." | Radius: "..tostring(State.throwRangeRadius or 0)
+            throwRangeLbl.Text = "Throw Hitbox: "..tostring(State.throwRangeStatus or "Idle").." | Radius: "..tostring(State.throwRangeRadius or 0)
             afkLbl.Text = "Farm AFK: "..tostring(State.afkStatus or "Idle")
         end)
     end
