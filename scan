@@ -1,1576 +1,810 @@
-local VERSION = "2026-06-03-mm-scan-passive-state-v6"
-local MAX_FILE_BYTES = 4500000
-local FLUSH_EVERY = 50
+-- ref_throw_knife_projectile_scanner.lua
+-- Passive scanner for throw knife/projectile behavior.
+-- It does NOT hook __namecall and does NOT call or modify KnifeThrown.
+-- Logs are saved with writefile/appendfile in the executor workspace.
 
-local _type = type
-local _tostring = tostring
-local _pcall = pcall
-local _xpcall = xpcall
-local _pairs = pairs
-local _ipairs = ipairs
-local _select = select
-local _setmetatable = setmetatable
-local _math = math
-local _table = table
-local _string = string
-local _os = os
-local _coroutine = coroutine
-local _unpack = unpack or (_table and _table.unpack)
-local _game = game
-local _G_ref = _G
+local VERSION = "2026-06-04-throw-knife-projectile-scan-v1"
+local FOLDER = "ThrowKnifeScan"
+local LATEST = FOLDER .. "/latest.log"
+local STATUS = FOLDER .. "/status.txt"
+local CRASH = FOLDER .. "/crash_last.txt"
+local MAX_MEMORY_BYTES = 3500000
+local FLUSH_EVERY = 8
+local PROJECTILE_TRACK_SECONDS = 4.0
+local PROJECTILE_SAMPLE_DT = 0.055
+local ACTIVATION_WINDOW = 2.25
+local NEAR_HIT_RADIUS = 12
 
-local function callable(value)
-    return _type(value) == "function"
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+
+local LocalPlayer = Players.LocalPlayer
+
+local function env()
+    if type(getgenv) == "function" then
+        local ok, e = pcall(getgenv)
+        if ok and type(e) == "table" then return e end
+    end
+    return _G
 end
 
-local function safeCall(fn, ...)
-    if not callable(fn) then
-        return false, "not_function"
-    end
-    if callable(_pcall) then
-        return _pcall(fn, ...)
-    end
-    return false, "pcall_missing"
+local ENV = env()
+
+local function getfn(name)
+    local f = ENV and ENV[name]
+    if type(f) == "function" then return f end
+    if type(_G) == "table" and type(_G[name]) == "function" then return _G[name] end
+    return nil
 end
 
-local function safeToString(value)
-    if callable(_tostring) then
-        local ok, result = safeCall(_tostring, value)
-        if ok then
-            return result
+local writefileFn = getfn("writefile")
+local appendfileFn = getfn("appendfile")
+local makefolderFn = getfn("makefolder")
+local isfolderFn = getfn("isfolder")
+
+local function ensureFolder()
+    if type(makefolderFn) ~= "function" then return false end
+    if type(isfolderFn) == "function" then
+        local ok, exists = pcall(isfolderFn, FOLDER)
+        if ok and exists then return true end
+    end
+    pcall(makefolderFn, FOLDER)
+    return true
+end
+
+ensureFolder()
+
+local memoryText = ""
+
+local function writeText(path, text)
+    if type(writefileFn) ~= "function" then return false end
+    local ok = pcall(writefileFn, path, tostring(text or ""))
+    return ok
+end
+
+local function appendText(path, text)
+    text = tostring(text or "")
+    if type(appendfileFn) == "function" then
+        local ok = pcall(appendfileFn, path, text)
+        if ok then return true end
+    end
+    if path == LATEST then
+        memoryText = memoryText .. text
+        if #memoryText > MAX_MEMORY_BYTES then
+            memoryText = memoryText:sub(#memoryText - 2600000)
+            memoryText = "{\"event\":\"trimmed\",\"reason\":\"max_memory_bytes\"}\n" .. memoryText
+        end
+        return writeText(path, memoryText)
+    end
+    return writeText(path, text)
+end
+
+writeText(LATEST, "")
+writeText(STATUS, "boot: " .. VERSION .. "\n")
+writeText(CRASH, "")
+
+local function nowIso()
+    local ok, d = pcall(os.date, "!%Y-%m-%dT%H:%M:%SZ")
+    if ok and d then return d end
+    return tostring(os.time())
+end
+
+local function clockNow()
+    if type(os.clock) == "function" then
+        local ok, v = pcall(os.clock)
+        if ok then return v end
+    end
+    return tick()
+end
+
+local function lower(s)
+    return string.lower(tostring(s or ""))
+end
+
+local function quote(s)
+    s = tostring(s or "")
+    s = s:gsub("\\", "\\\\")
+         :gsub("\"", "\\\"")
+         :gsub("\n", "\\n")
+         :gsub("\r", "\\r")
+         :gsub("\t", "\\t")
+    return "\"" .. s .. "\""
+end
+
+local function roundNum(n)
+    if type(n) ~= "number" then return n end
+    return math.floor(n * 10000 + 0.5) / 10000
+end
+
+local function encode(v, depth, seen)
+    depth = depth or 0
+    seen = seen or {}
+
+    local tv = typeof and typeof(v) or type(v)
+
+    if v == nil then return "null" end
+    if tv == "boolean" or tv == "number" then return tostring(v) end
+    if tv == "string" then return quote(v) end
+
+    if tv == "Vector3" then
+        return "{\"type\":\"Vector3\",\"x\":" .. tostring(roundNum(v.X)) ..
+            ",\"y\":" .. tostring(roundNum(v.Y)) ..
+            ",\"z\":" .. tostring(roundNum(v.Z)) .. "}"
+    end
+
+    if tv == "CFrame" then
+        local p = v.Position
+        return "{\"type\":\"CFrame\",\"pos\":{\"x\":" .. tostring(roundNum(p.X)) ..
+            ",\"y\":" .. tostring(roundNum(p.Y)) ..
+            ",\"z\":" .. tostring(roundNum(p.Z)) .. "}}"
+    end
+
+    if tv == "Instance" then
+        local path = ""
+        pcall(function() path = v:GetFullName() end)
+        return "{\"type\":\"Instance\",\"class\":" .. quote(v.ClassName) ..
+            ",\"name\":" .. quote(v.Name) ..
+            ",\"path\":" .. quote(path) .. "}"
+    end
+
+    if type(v) ~= "table" then
+        return quote(tostring(v))
+    end
+
+    if seen[v] then return quote("[circular]") end
+    if depth >= 5 then return quote("[max-depth]") end
+    seen[v] = true
+
+    local isArray = true
+    local count = 0
+    local max = 0
+    for k in pairs(v) do
+        count = count + 1
+        if type(k) ~= "number" or k < 1 or k % 1 ~= 0 then
+            isArray = false
+        else
+            if k > max then max = k end
         end
     end
-    return "[tostring unavailable]"
-end
+    if count ~= max then isArray = false end
 
-local function envTable()
-    local env = nil
-    if callable(getgenv) then
-        local ok, result = safeCall(getgenv)
-        if ok and _type(result) == "table" then
-            env = result
+    local parts = {}
+    if isArray then
+        for i = 1, max do
+            parts[#parts + 1] = encode(v[i], depth + 1, seen)
         end
+        seen[v] = nil
+        return "[" .. table.concat(parts, ",") .. "]"
     end
-    if _type(env) ~= "table" and _type(_G_ref) == "table" then
-        env = _G_ref
+
+    for k, item in pairs(v) do
+        parts[#parts + 1] = quote(k) .. ":" .. encode(item, depth + 1, seen)
     end
-    return env
+    table.sort(parts)
+    seen[v] = nil
+    return "{" .. table.concat(parts, ",") .. "}"
 end
 
-local function envFunction(name)
-    local env = envTable()
-    local value = env and env[name]
-    if callable(value) then
-        return value
-    end
-    local globalValue = nil
-    safeCall(function()
-        globalValue = _G_ref and _G_ref[name]
+local function vecInfo(v)
+    if typeof(v) ~= "Vector3" then return nil end
+    return { x = roundNum(v.X), y = roundNum(v.Y), z = roundNum(v.Z) }
+end
+
+local function cframeInfo(cf)
+    if typeof(cf) ~= "CFrame" then return nil end
+    return { position = vecInfo(cf.Position) }
+end
+
+local function fullName(inst)
+    local ok, r = pcall(function() return inst:GetFullName() end)
+    return ok and r or tostring(inst)
+end
+
+local function instInfo(inst)
+    if typeof(inst) ~= "Instance" then return nil end
+    local info = {
+        class = inst.ClassName,
+        name = inst.Name,
+        path = fullName(inst),
+    }
+    pcall(function()
+        if inst:IsA("BasePart") then
+            info.position = vecInfo(inst.Position)
+            info.velocity = vecInfo(inst.AssemblyLinearVelocity or inst.Velocity)
+            info.size = vecInfo(inst.Size)
+            info.anchored = inst.Anchored
+            info.canCollide = inst.CanCollide
+            info.canTouch = inst.CanTouch
+        elseif inst:IsA("Model") then
+            info.pivot = cframeInfo(inst:GetPivot())
+        elseif inst:IsA("Tool") then
+            local h = inst:FindFirstChild("Handle")
+            if h and h:IsA("BasePart") then
+                info.handle = instInfo(h)
+            end
+        end
     end)
-    if callable(globalValue) then
-        return globalValue
+    return info
+end
+
+local Scan = {
+    active = true,
+    conns = {},
+    buffer = {},
+    tracked = setmetatable({}, { __mode = "k" }),
+    projectileKeys = {},
+    lastActivationAt = 0,
+    lastActivationTool = "?",
+    lastKnifeTool = nil,
+    latestProjectile = "none",
+    projectileCount = 0,
+    nearHitCount = 0,
+    remoteCount = 0,
+}
+
+if ENV.__THROW_KNIFE_PROJECTILE_SCAN and type(ENV.__THROW_KNIFE_PROJECTILE_SCAN.Stop) == "function" then
+    pcall(function()
+        ENV.__THROW_KNIFE_PROJECTILE_SCAN:Stop("replaced")
+    end)
+end
+ENV.__THROW_KNIFE_PROJECTILE_SCAN = Scan
+
+local function log(record)
+    if not Scan.active then return end
+    record.time = nowIso()
+    local ok, line = pcall(function() return encode(record) end)
+    if not ok then
+        line = "{\"event\":\"encode_error\",\"message\":" .. quote(line) .. "}"
+    end
+    Scan.buffer[#Scan.buffer + 1] = line
+    if #Scan.buffer >= FLUSH_EVERY then
+        appendText(LATEST, table.concat(Scan.buffer, "\n") .. "\n")
+        Scan.buffer = {}
+    end
+end
+
+local function flush()
+    if #Scan.buffer > 0 then
+        appendText(LATEST, table.concat(Scan.buffer, "\n") .. "\n")
+        Scan.buffer = {}
+    end
+end
+
+local function status(extra)
+    local text = "running: " .. VERSION
+        .. "\nfile: " .. LATEST
+        .. "\nno hook: true"
+        .. "\nno remote fire: true"
+        .. "\nwritefile: " .. tostring(type(writefileFn) == "function")
+        .. "\nappendfile: " .. tostring(type(appendfileFn) == "function")
+        .. "\nprojectiles: " .. tostring(Scan.projectileCount)
+        .. "\nnearHits: " .. tostring(Scan.nearHitCount)
+        .. "\nremotes: " .. tostring(Scan.remoteCount)
+        .. "\nlastActivationTool: " .. tostring(Scan.lastActivationTool)
+        .. "\nlatestProjectile: " .. tostring(Scan.latestProjectile)
+        .. "\nextra: " .. tostring(extra or "")
+        .. "\n"
+    writeText(STATUS, text)
+end
+
+function Scan:Connect(sig, fn)
+    if not sig or type(fn) ~= "function" then return nil end
+    local ok, conn = pcall(function() return sig:Connect(fn) end)
+    if ok and conn then
+        self.conns[#self.conns + 1] = conn
+        return conn
     end
     return nil
 end
 
-local writefileFn = envFunction("writefile")
-local makefolderFn = envFunction("makefolder")
-local isfolderFn = envFunction("isfolder")
-
-local folder = "MMScan"
-local bootPath = "MMScan_boot.txt"
-local statusPath = "MMScan_status.txt"
-local crashPath = "MMScan_crash_last.txt"
-
-local function ensureFolder()
-    if not callable(makefolderFn) then
-        return false
+function Scan:Stop(reason)
+    if not self.active then return end
+    log({ event = "scan_stop", reason = tostring(reason or "manual") })
+    self.active = false
+    for _, c in ipairs(self.conns) do
+        pcall(function() c:Disconnect() end)
     end
-    if callable(isfolderFn) then
-        local ok, exists = safeCall(isfolderFn, folder)
-        if ok and exists == true then
+    flush()
+    status("stopped: " .. tostring(reason or "manual"))
+end
+
+local function hasAny(text, terms)
+    text = lower(text)
+    for _, t in ipairs(terms) do
+        if string.find(text, lower(t), 1, true) then
             return true
         end
     end
-    safeCall(makefolderFn, folder)
-    if callable(isfolderFn) then
-        local ok, exists = safeCall(isfolderFn, folder)
-        return ok and exists == true
-    end
-    return true
+    return false
 end
 
-local folderAvailable = ensureFolder()
+local KNIFE_TERMS = {
+    "knife", "throw", "thrown", "blade", "dagger", "projectile", "knifeproj",
+    "knife_projectile", "knifeclone", "knifehandle"
+}
 
-local function writeText(path, text)
-    if not callable(writefileFn) then
-        return false
-    end
-    local ok = safeCall(writefileFn, path, safeToString(text))
-    return ok == true
+local REMOTE_TERMS = {
+    "knife", "throw", "thrown", "stab", "touch", "hit", "weapon", "shoot"
+}
+
+local function isAlive(player)
+    local c = player and player.Character
+    local hum = c and c:FindFirstChildOfClass("Humanoid")
+    return hum and hum.Health > 0
 end
 
-writeText(bootPath, "boot reached: " .. VERSION .. "\n")
-writeText(statusPath, "boot reached: " .. VERSION .. "\n")
-if folderAvailable then
-    writeText(folder .. "/boot.txt", "boot reached: " .. VERSION .. "\n")
+local function partPosition(part)
+    local ok, pos = pcall(function() return part.Position end)
+    return ok and pos or nil
 end
 
-local function tracebackMessage(err)
-    local message = safeToString(err)
-    if _type(debug) == "table" and callable(debug.traceback) then
-        local ok, trace = safeCall(debug.traceback, message)
-        if ok and trace then
-            message = safeToString(trace)
-        end
-    end
-    return message
-end
-
-local function protected(name, fn, ...)
-    if not callable(fn) then
-        return false, "not_function"
-    end
-    local args = { ... }
-    args.n = _select("#", ...)
-    local function run()
-        if callable(_unpack) then
-            return fn(_unpack(args, 1, args.n))
-        end
-        return fn()
-    end
-    local handler = function(err)
-        return tracebackMessage(err)
-    end
-    local ok, result
-    if callable(_xpcall) then
-        ok, result = _xpcall(run, handler)
-    else
-        ok, result = safeCall(run)
-        if not ok then
-            result = handler(result)
-        end
-    end
-    if not ok then
-        local message = "section=" .. safeToString(name) .. "\n" .. safeToString(result)
-        writeText(crashPath, message)
-        writeText(statusPath, "crash in " .. safeToString(name) .. "\n" .. message)
-        if folderAvailable then
-            writeText(folder .. "/crash_last.txt", message)
-        end
-    end
-    return ok, result
-end
-
-local function main()
-    local function kind(value)
-        if callable(typeof) then
-            local ok, result = safeCall(typeof, value)
-            if ok then
-                return result
-            end
-        end
-        return _type(value)
-    end
-
-    local function getService(name)
-        local ok, service = safeCall(function()
-            return _game:GetService(name)
-        end)
-        if ok then
-            return service
-        end
-        return nil
-    end
-
-    local Players = getService("Players")
-    local LocalPlayer = Players and Players.LocalPlayer or nil
-    local RunService = getService("RunService")
-    local Workspace = getService("Workspace")
-    local ReplicatedStorage = getService("ReplicatedStorage")
-
-    local env = envTable()
-    if _type(env) ~= "table" then
-        env = {}
-    end
-
-    local previous = env.__MM_PASSIVE_SCAN
-    if _type(previous) == "table" and callable(previous.Stop) then
-        safeCall(function()
-            previous:Stop("replaced")
-        end)
-    end
-
-    local weakKeys = { __mode = "k" }
-    local Scan = {
-        active = true,
-        buffer = {},
-        conns = {},
-        counts = {},
-        fileText = "",
-        flushing = false,
-        discoveredRemotes = callable(_setmetatable) and _setmetatable({}, weakKeys) or {},
-        inboundRemotes = callable(_setmetatable) and _setmetatable({}, weakKeys) or {},
-        watchedValues = callable(_setmetatable) and _setmetatable({}, weakKeys) or {},
-        watchedAttributes = callable(_setmetatable) and _setmetatable({}, weakKeys) or {},
-        coinObjects = callable(_setmetatable) and _setmetatable({}, weakKeys) or {},
-        gunDropObjects = callable(_setmetatable) and _setmetatable({}, weakKeys) or {},
-        coinRemovedObjects = callable(_setmetatable) and _setmetatable({}, weakKeys) or {},
-        gunDropRemovedObjects = callable(_setmetatable) and _setmetatable({}, weakKeys) or {},
-        coinObjectKeys = {},
-        gunDropObjectKeys = {},
-        coinRemovedKeys = {},
-        gunDropRemovedKeys = {},
-        scannedRoots = callable(_setmetatable) and _setmetatable({}, weakKeys) or {},
-        summary = {
-            coinsSeen = 0,
-            gunDropsSeen = 0,
-            valueStatesSeen = 0,
-            currentPhase = "unknown",
-            lastRoundState = "unknown",
-            lastLobbySignal = "unknown",
-            lastRoundEndReason = "unknown",
-            lastRoleSignal = "unknown",
-            lastLocalRole = "unknown",
-            lastLocalWeapon = "unknown",
-            lastLocalGun = "unknown",
-            lastLocalKnife = "unknown",
-            lastCoinCount = "unknown",
-            lastCoinLimit = "unknown",
-            lastRoles = {},
-        },
-    }
-    env.__MM_PASSIVE_SCAN = Scan
-
-    local function timeNumber()
-        if _type(_os) == "table" and callable(_os.time) then
-            local ok, value = safeCall(_os.time)
-            if ok and value then
-                return value
-            end
-        end
-        if callable(tick) then
-            local ok, value = safeCall(tick)
-            if ok and value then
-                return value
-            end
-        end
-        return 0
-    end
-
-    local placeId = "unknown"
-    safeCall(function()
-        placeId = safeToString(_game.PlaceId or "unknown")
+local function partVelocity(part)
+    local ok, vel = pcall(function()
+        return part.AssemblyLinearVelocity or part.Velocity
     end)
+    return ok and vel or Vector3.zero
+end
 
-    local startedAt = safeToString(timeNumber())
-    local filePath = "MMScan_scan_" .. placeId .. "_" .. startedAt .. ".log"
-
-    local function now()
-        if _type(_os) == "table" and callable(_os.date) then
-            local ok, value = safeCall(_os.date, "!%Y-%m-%dT%H:%M:%SZ")
-            if ok and value then
-                return value
+local function getAllParts(obj)
+    local parts = {}
+    if typeof(obj) ~= "Instance" then return parts end
+    if obj:IsA("BasePart") then
+        parts[#parts + 1] = obj
+        return parts
+    end
+    local ok, desc = pcall(function() return obj:GetDescendants() end)
+    if ok then
+        for _, d in ipairs(desc) do
+            if d:IsA("BasePart") then
+                parts[#parts + 1] = d
             end
         end
-        return safeToString(timeNumber())
+    end
+    return parts
+end
+
+local function getMainPart(obj)
+    if typeof(obj) ~= "Instance" then return nil end
+    if obj:IsA("BasePart") then return obj end
+    if obj:IsA("Tool") then
+        local h = obj:FindFirstChild("Handle")
+        if h and h:IsA("BasePart") then return h end
+    end
+    if obj:IsA("Model") then
+        local pp = obj.PrimaryPart
+        if pp and pp:IsA("BasePart") then return pp end
+    end
+    local parts = getAllParts(obj)
+    return parts[1]
+end
+
+local function isDescendantOfLocalCharacter(inst)
+    local char = LocalPlayer and LocalPlayer.Character
+    if not char or typeof(inst) ~= "Instance" then return false end
+    local ok, r = pcall(function() return inst:IsDescendantOf(char) end)
+    return ok and r == true
+end
+
+local function isDescendantOfBackpack(inst)
+    local bp = LocalPlayer and LocalPlayer:FindFirstChildOfClass("Backpack")
+    if not bp or typeof(inst) ~= "Instance" then return false end
+    local ok, r = pcall(function() return inst:IsDescendantOf(bp) end)
+    return ok and r == true
+end
+
+local function likelyProjectile(inst)
+    if typeof(inst) ~= "Instance" then return false, "not_instance" end
+    if isDescendantOfLocalCharacter(inst) or isDescendantOfBackpack(inst) then
+        return false, "local_tool_or_character"
     end
 
-    local function prop(instance, name)
-        local ok, value = safeCall(function()
-            return instance[name]
-        end)
-        if ok then
-            return value
-        end
-        return nil
+    local path = fullName(inst)
+    local nameHit = hasAny(path, KNIFE_TERMS)
+    local main = getMainPart(inst)
+    if not main then
+        return false, "no_part"
     end
 
-    local function fullName(instance)
-        local ok, value = safeCall(function()
-            return instance:GetFullName()
-        end)
-        if ok then
-            return safeToString(value)
-        end
-        return safeToString(instance)
+    local vel = partVelocity(main)
+    local speed = vel.Magnitude
+    local activationAge = clockNow() - Scan.lastActivationAt
+
+    if nameHit and activationAge <= ACTIVATION_WINDOW + 2.0 then
+        return true, "knife_named_after_activation"
+    end
+    if nameHit and speed >= 8 then
+        return true, "knife_named_moving"
+    end
+    if activationAge <= ACTIVATION_WINDOW and speed >= 18 then
+        return true, "fast_object_after_activation"
+    end
+    if nameHit then
+        return true, "knife_named"
     end
 
-    local function isA(instance, className)
-        if kind(instance) ~= "Instance" then
-            return false
-        end
-        local ok, value = safeCall(function()
-            return instance:IsA(className)
-        end)
-        return ok and value == true
-    end
+    return false, "not_projectile"
+end
 
-    local function stringLower(text)
-        text = safeToString(text or "")
-        if _type(_string) == "table" and callable(_string.lower) then
-            local ok, result = safeCall(_string.lower, text)
-            if ok then
-                return result
-            end
-        end
-        return text
-    end
+local function playerRole(player)
+    local role = "?"
+    pcall(function()
+        role = player:GetAttribute("Role")
+            or player:GetAttribute("CurrentRole")
+            or player:GetAttribute("RoundRole")
+            or role
+    end)
+    local v = player:FindFirstChild("Role") or player:FindFirstChild("CurrentRole") or player:FindFirstChild("RoundRole")
+    if v and v:IsA("StringValue") then role = v.Value end
+    return tostring(role or "?")
+end
 
-    local function stringFind(text, pattern)
-        if _type(_string) == "table" and callable(_string.find) then
-            local ok, result = safeCall(_string.find, text, pattern, 1, true)
-            return ok and result ~= nil
-        end
-        return false
-    end
+local TARGET_PART_NAMES = {
+    "HumanoidRootPart",
+    "UpperTorso",
+    "LowerTorso",
+    "Torso",
+    "Head",
+    "LeftUpperArm",
+    "RightUpperArm",
+    "LeftUpperLeg",
+    "RightUpperLeg",
+}
 
-    local function containsAny(text, terms)
-        local lower = stringLower(text)
-        for _, term in _ipairs(terms) do
-            if stringFind(lower, stringLower(term)) then
-                return true
-            end
-        end
-        return false
-    end
-
-    local function stringGsub(text, pattern, repl)
-        if _type(_string) == "table" and callable(_string.gsub) then
-            local ok, result = safeCall(_string.gsub, text, pattern, repl)
-            if ok then
-                return result
-            end
-        end
-        return text
-    end
-
-    local function stringByte(char)
-        if _type(_string) == "table" and callable(_string.byte) then
-            local ok, result = safeCall(_string.byte, char)
-            if ok and result then
-                return result
-            end
-        end
-        return 0
-    end
-
-    local function stringFormat(fmt, ...)
-        if _type(_string) == "table" and callable(_string.format) then
-            local ok, result = safeCall(_string.format, fmt, ...)
-            if ok and result then
-                return result
-            end
-        end
-        return ""
-    end
-
-    local function stringSub(text, a, b)
-        if _type(_string) == "table" and callable(_string.sub) then
-            local ok, result = safeCall(_string.sub, text, a, b)
-            if ok then
-                return result
-            end
-        end
-        return text
-    end
-
-    local function quote(value)
-        value = safeToString(value or "")
-        value = stringGsub(value, "\\", "\\\\")
-        value = stringGsub(value, "\"", "\\\"")
-        value = stringGsub(value, "\b", "\\b")
-        value = stringGsub(value, "\f", "\\f")
-        value = stringGsub(value, "\n", "\\n")
-        value = stringGsub(value, "\r", "\\r")
-        value = stringGsub(value, "\t", "\\t")
-        value = stringGsub(value, "[%z\1-\31]", function(char)
-            return stringFormat("\\u%04x", stringByte(char))
-        end)
-        return "\"" .. value .. "\""
-    end
-
-    local function isArray(tbl)
-        if _type(tbl) ~= "table" then
-            return false
-        end
-        local count = 0
-        local maxIndex = 0
-        for key in _pairs(tbl) do
-            if _type(key) ~= "number" or key < 1 or key % 1 ~= 0 then
-                return false
-            end
-            count = count + 1
-            if key > maxIndex then
-                maxIndex = key
-            end
-        end
-        return count == maxIndex
-    end
-
-    local function encode(value, depth)
-        depth = depth or 0
-        local valueType = _type(value)
-        if value == nil then
-            return "null"
-        end
-        if valueType == "boolean" or valueType == "number" then
-            return safeToString(value)
-        end
-        if valueType == "string" then
-            return quote(value)
-        end
-        if valueType ~= "table" then
-            return quote(safeToString(value))
-        end
-        if depth > 6 then
-            return quote("[max-depth]")
-        end
-
-        local parts = {}
-        if isArray(value) then
-            for index = 1, #value do
-                parts[#parts + 1] = encode(value[index], depth + 1)
-            end
-            return "[" .. _table.concat(parts, ",") .. "]"
-        end
-
-        for key, item in _pairs(value) do
-            parts[#parts + 1] = quote(safeToString(key)) .. ":" .. encode(item, depth + 1)
-        end
-        if _type(_table) == "table" and callable(_table.sort) then
-            safeCall(_table.sort, parts)
-        end
-        return "{" .. _table.concat(parts, ",") .. "}"
-    end
-
-    local function shortString(value, maxLength)
-        value = safeToString(value)
-        maxLength = maxLength or 300
-        if #value > maxLength then
-            return stringSub(value, 1, maxLength) .. "...[truncated]"
-        end
-        return value
-    end
-
-    local function numberValue(value)
-        if _type(value) ~= "number" then
-            return safeToString(value)
-        end
-        if _type(_math) == "table" and callable(_math.floor) then
-            local ok, rounded = safeCall(function()
-                return _math.floor(value * 10000 + 0.5) / 10000
-            end)
-            if ok then
-                return rounded
-            end
-        end
-        return value
-    end
-
-    local function tableCount(tbl)
-        local count = 0
-        if _type(tbl) == "table" then
-            for _ in _pairs(tbl) do
-                count = count + 1
-            end
-        end
-        return count
-    end
-
-    local serialize
-    serialize = function(value, depth, seen)
-        depth = depth or 0
-        seen = seen or {}
-        local valueType = kind(value)
-        if value == nil then
-            return { type = "nil" }
-        end
-        if valueType == "boolean" or valueType == "number" then
-            return { type = valueType, value = value }
-        end
-        if valueType == "string" then
-            return { type = "string", value = shortString(value, 800), length = #value }
-        end
-        if valueType == "Instance" then
-            return {
-                type = "Instance",
-                class = safeToString(prop(value, "ClassName") or "Unknown"),
-                name = safeToString(prop(value, "Name") or "Unknown"),
-                path = fullName(value),
-            }
-        end
-        if valueType == "Vector2" then
-            return { type = "Vector2", x = numberValue(value.X), y = numberValue(value.Y) }
-        end
-        if valueType == "Vector3" then
-            return { type = "Vector3", x = numberValue(value.X), y = numberValue(value.Y), z = numberValue(value.Z) }
-        end
-        if valueType == "CFrame" then
-            local ok, components = safeCall(function()
-                return { value:GetComponents() }
-            end)
-            return { type = "CFrame", components = ok and components or safeToString(value) }
-        end
-        if valueType == "Color3" then
-            return { type = "Color3", r = numberValue(value.R), g = numberValue(value.G), b = numberValue(value.B) }
-        end
-        if valueType == "EnumItem" then
-            return { type = "EnumItem", value = safeToString(value) }
-        end
-        if valueType == "table" then
-            if seen[value] then
-                return { type = "table", circular = true }
-            end
-            if depth >= 3 then
-                return { type = "table", count = tableCount(value), truncated = "max-depth" }
-            end
-            seen[value] = true
-            local entries = {}
-            local total = 0
-            for key, item in _pairs(value) do
-                total = total + 1
-                if #entries < 35 then
-                    entries[#entries + 1] = {
-                        key = shortString(key, 120),
-                        keyType = kind(key),
-                        value = serialize(item, depth + 1, seen),
-                    }
-                end
-            end
-            seen[value] = nil
-            return { type = "table", count = total, entries = entries, truncated = total > #entries }
-        end
-        return { type = safeToString(valueType), value = shortString(value, 300) }
-    end
-
-    local function packArgs(...)
-        local count = _select("#", ...)
-        local rawArgs = { ... }
-        local values = {}
-        local limit = count
-        if limit > 20 then
-            limit = 20
-        end
-        for index = 1, limit do
-            local item = rawArgs[index]
-            local ok, result = safeCall(function()
-                return serialize(item)
-            end)
-            values[index] = ok and result or { type = "serialization_error", value = shortString(result, 300) }
-        end
-        return { count = count, values = values, truncated = count > limit }
-    end
-
-    local function instanceInfo(instance)
-        return {
-            class = safeToString(prop(instance, "ClassName") or "Unknown"),
-            name = safeToString(prop(instance, "Name") or "Unknown"),
-            path = fullName(instance),
-        }
-    end
-
-    local roleFieldTerms = {
-        "role", "murder", "sheriff", "innocent", "hero", "dead", "alive", "weapon",
-        "gun", "knife", "has", "team", "round", "escaped", "killer", "victim",
-        "coins", "bag", "xp", "level", "prestige", "perk", "effect", "victory",
-    }
-
-    local function primitiveSummary(value)
-        local valueType = kind(value)
-        if value == nil then
-            return { type = "nil" }
-        end
-        if valueType == "boolean" or valueType == "number" then
-            return { type = valueType, value = value }
-        end
-        if valueType == "string" then
-            return { type = "string", value = shortString(value, 200), length = #value }
-        end
-        if valueType == "Instance" then
-            return instanceInfo(value)
-        end
-        if valueType == "Vector3" or valueType == "CFrame" or valueType == "Color3" or valueType == "EnumItem" then
-            return serialize(value)
-        end
-        return nil
-    end
-
-    local function roleFromText(value)
-        local lower = stringLower(value or "")
-        if stringFind(lower, "murder") then
-            return "Murderer"
-        end
-        if stringFind(lower, "sheriff") then
-            return "Sheriff"
-        end
-        if stringFind(lower, "innocent") then
-            return "Innocent"
-        end
-        if stringFind(lower, "hero") then
-            return "Hero"
-        end
-        return nil
-    end
-
-    local function weaponRole(value)
-        local lower = stringLower(value or "")
-        if lower == "knife" then
-            return "Murderer"
-        end
-        if lower == "gun" then
-            return "Sheriff"
-        end
-        return nil
-    end
-
-    local function importantKey(key)
-        return containsAny(safeToString(key), roleFieldTerms)
-    end
-
-    local function tableKeys(tbl, limit)
-        local keys = {}
-        limit = limit or 40
-        if _type(tbl) ~= "table" then
-            return keys
-        end
-        for key in _pairs(tbl) do
-            if #keys >= limit then
-                break
-            end
-            keys[#keys + 1] = shortString(key, 80)
-        end
-        if _type(_table) == "table" and callable(_table.sort) then
-            safeCall(_table.sort, keys)
-        end
-        return keys
-    end
-
-    local function compactImportantFields(tbl, depth)
-        depth = depth or 0
-        if _type(tbl) ~= "table" then
-            return primitiveSummary(tbl) or { type = kind(tbl), value = shortString(tbl, 120) }
-        end
-        if depth > 2 then
-            return { type = "table", count = tableCount(tbl), truncated = "summary-depth" }
-        end
-
-        local fields = {}
-        local added = 0
-        for key, item in _pairs(tbl) do
-            local keyText = safeToString(key)
-            local scalar = primitiveSummary(item)
-            local roleMatch = scalar and scalar.value and roleFromText(scalar.value)
-            if importantKey(keyText) or roleMatch then
-                if scalar then
-                    fields[keyText] = scalar
-                else
-                    fields[keyText] = compactImportantFields(item, depth + 1)
-                end
-                added = added + 1
-                if added >= 30 then
-                    break
-                end
-            elseif _type(item) == "table" and depth < 1 then
-                local nested = compactImportantFields(item, depth + 1)
-                if nested and nested.fields and tableCount(nested.fields) > 0 then
-                    fields[keyText] = nested
-                    added = added + 1
-                end
-            end
-        end
-
-        return { type = "table", count = tableCount(tbl), keys = tableKeys(tbl, 35), fields = fields }
-    end
-
-    local function findRoleInTable(tbl, depth)
-        depth = depth or 0
-        if _type(tbl) ~= "table" or depth > 3 then
-            return nil
-        end
-        for key, item in _pairs(tbl) do
-            local keyText = safeToString(key)
-            if _type(item) == "string" then
-                local role = roleFromText(item)
-                if role and (importantKey(keyText) or roleFromText(keyText) or keyText == "Role") then
-                    return role
-                end
-            elseif _type(item) == "table" then
-                local role = findRoleInTable(item, depth + 1)
-                if role then
-                    return role
-                end
-            end
-        end
-        return nil
-    end
-
-    local function summarizePlayerData(data)
-        local summary = {
-            playerCount = tableCount(data),
-            players = {},
-            murderer = nil,
-            sheriff = nil,
-            hero = nil,
-            localPlayer = nil,
-        }
-        if _type(data) ~= "table" then
-            summary.raw = primitiveSummary(data) or serialize(data)
-            return summary
-        end
-
-        local localName = LocalPlayer and safeToString(prop(LocalPlayer, "Name") or "") or ""
-        for playerName, playerData in _pairs(data) do
-            local nameText = safeToString(playerName)
-            local role = findRoleInTable(playerData)
-            local entry = {
-                name = nameText,
-                role = role or "unknown",
-                data = compactImportantFields(playerData),
-            }
-            if #summary.players < 30 then
-                summary.players[#summary.players + 1] = entry
-            end
-            if role == "Murderer" then
-                summary.murderer = nameText
-            elseif role == "Sheriff" then
-                summary.sheriff = nameText
-            elseif role == "Hero" then
-                summary.hero = nameText
-            end
-            if localName ~= "" and nameText == localName then
-                summary.localPlayer = entry
-            end
-        end
-        return summary
-    end
-
-    local function inc(eventName)
-        eventName = eventName or "unknown"
-        Scan.counts[eventName] = (Scan.counts[eventName] or 0) + 1
-    end
-
-    local function flush()
-        if Scan.flushing or #Scan.buffer == 0 then
-            return
-        end
-        Scan.flushing = true
-        local chunk = _table.concat(Scan.buffer, "\n") .. "\n"
-        Scan.buffer = {}
-        Scan.fileText = (Scan.fileText or "") .. chunk
-        if #Scan.fileText > MAX_FILE_BYTES then
-            Scan.fileText = stringSub(Scan.fileText, #Scan.fileText - 3200000)
-            Scan.fileText = "{\"event\":\"scan_file_trimmed\",\"time\":" .. quote(now()) .. "}\n" .. Scan.fileText
-        end
-        writeText(filePath, Scan.fileText)
-        if folderAvailable then
-            writeText(folder .. "/latest.log", Scan.fileText)
-        end
-        Scan.flushing = false
-    end
-
-    local function logRecord(record)
-        if not Scan.active then
-            return
-        end
-        record.time = now()
-        local ok, encoded = safeCall(function()
-            return encode(record)
-        end)
-        if not ok then
-            encoded = encode({ event = "encode_error", message = shortString(encoded, 500), time = now() })
-        end
-        Scan.buffer[#Scan.buffer + 1] = encoded
-        inc(record.event or "unknown")
-        if #Scan.buffer >= FLUSH_EVERY then
-            flush()
+local function targetParts(player)
+    local char = player.Character
+    local parts = {}
+    if not char then return parts end
+    for _, name in ipairs(TARGET_PART_NAMES) do
+        local p = char:FindFirstChild(name)
+        if p and p:IsA("BasePart") then
+            parts[#parts + 1] = p
         end
     end
+    return parts
+end
 
-    function Scan:Connect(signal, callback)
-        if not self.active or not signal or not callable(callback) then
-            return nil
-        end
-        local ok, conn = safeCall(function()
-            if signal.Connect then
-                return signal:Connect(callback)
-            end
-            return nil
-        end)
-        if ok and conn then
-            self.conns[#self.conns + 1] = conn
-            return conn
-        end
-        return nil
+local function closestPointOnSegment(a, b, p)
+    local ab = b - a
+    local ab2 = ab:Dot(ab)
+    if ab2 <= 0.00001 then
+        return a, (p - a).Magnitude, 0
     end
+    local t = math.clamp((p - a):Dot(ab) / ab2, 0, 1)
+    local c = a + ab * t
+    return c, (p - c).Magnitude, t
+end
 
-    function Scan:Stop(reason)
-        if not self.active then
-            return
-        end
-        logRecord({ event = "scan_stop", reason = safeToString(reason or "manual") })
-        self.active = false
-        for _, conn in _ipairs(self.conns) do
-            safeCall(function()
-                if conn and conn.Disconnect then
-                    conn:Disconnect()
-                end
-            end)
-        end
-        flush()
-    end
-
-    local interestingTerms = {
-        "role", "round", "state", "status", "match", "mode", "map", "alive", "dead",
-        "murder", "sheriff", "innocent", "hero", "winner", "victory", "weapon",
-        "gun", "knife", "coin", "currency", "token", "bag", "cash", "drop",
-        "playerdata", "gameplay", "inventory",
-    }
-
-    local coinTerms = { "coin", "coincontainer", "coin_server", "currency", "token", "cash", "money", "candy" }
-    local gunDropTerms = { "gundrop", "gun drop", "droppedgun", "dropped gun", "dropgun", "gunpickup" }
-    local roundStartTerms = { "roundstart", "round_start", "gamestart", "matchstart", "giveweapon", "roleselect" }
-    local roundEndTerms = { "roundend", "round_end", "roundendfade", "victoryscreen", "defeatscreen", "losescreen", "winner", "murdererdied", "clear1v1", "cancelled1v1" }
-    local lobbyEndTerms = { "victoryscreen", "defeatscreen", "losescreen", "roundendfade" }
-    local roleTerms = { "role", "roleselect", "playerdatachanged", "murder", "sheriff", "innocent", "hero", "giveweapon" }
-
-    local function pathText(instance)
-        return fullName(instance)
-    end
-
-    local function inWorkspace(instance)
-        if instance == Workspace then
-            return true
-        end
-        local ok, result = safeCall(function()
-            return Workspace and instance:IsDescendantOf(Workspace)
-        end)
-        return ok and result == true
-    end
-
-    local function parentOf(instance)
-        return prop(instance, "Parent")
-    end
-
-    local function findChild(root, name, recursive)
-        if not root then
-            return nil
-        end
-        local result = nil
-        safeCall(function()
-            result = root:FindFirstChild(name, recursive == true)
-        end)
-        return result
-    end
-
-    local function ancestorNamed(instance, wantedName)
-        local wanted = stringLower(wantedName or "")
-        local current = instance
-        local limit = 0
-        while current and limit < 40 do
-            local currentName = stringLower(prop(current, "Name") or "")
-            if currentName == wanted then
-                return current
-            end
-            if current == Workspace then
-                return nil
-            end
-            current = parentOf(current)
-            limit = limit + 1
-        end
-        return nil
-    end
-
-    local function directChildInfos(root, limit)
-        local children = {}
-        limit = limit or 12
-        safeCall(function()
-            children = root:GetChildren()
-        end)
-        local result = {}
-        for _, child in _ipairs(children) do
-            if #result >= limit then
-                break
-            end
-            result[#result + 1] = {
-                class = safeToString(prop(child, "ClassName") or "Unknown"),
-                name = safeToString(prop(child, "Name") or "Unknown"),
-            }
-        end
-        return result
-    end
-
-    local function objectPosition(instance)
-        local pos = nil
-        if isA(instance, "BasePart") then
-            safeCall(function()
-                pos = instance.Position
-            end)
-        elseif isA(instance, "Model") then
-            safeCall(function()
-                pos = instance:GetPivot().Position
-            end)
-        elseif isA(instance, "Tool") then
-            local handle = nil
-            safeCall(function()
-                handle = instance:FindFirstChild("Handle")
-            end)
-            if handle then
-                safeCall(function()
-                    pos = handle.Position
-                end)
-            end
-        end
-        if pos then
-            return serialize(pos)
-        end
-        return nil
-    end
-
-    local function objectSignature(instance, position)
-        local path = pathText(instance)
-        if position and position.x and position.y and position.z then
-            return path .. "@" .. safeToString(position.x) .. "," .. safeToString(position.y) .. "," .. safeToString(position.z)
-        end
-        return path
-    end
-
-    local function attributesInfo(instance)
-        local attrs = nil
-        safeCall(function()
-            if instance.GetAttributes then
-                attrs = instance:GetAttributes()
-            end
-        end)
-        if _type(attrs) == "table" and tableCount(attrs) > 0 then
-            return serialize(attrs)
-        end
-        return nil
-    end
-
-    local function tagsForPath(path)
-        local tags = {}
-        if containsAny(path, coinTerms) then tags[#tags + 1] = "coin" end
-        if containsAny(path, gunDropTerms) then tags[#tags + 1] = "gun_drop" end
-        if containsAny(path, roundStartTerms) or containsAny(path, roundEndTerms) then tags[#tags + 1] = "round" end
-        if containsAny(path, roleTerms) then tags[#tags + 1] = "role" end
-        if containsAny(path, { "remote", "gameplay", "clientservice", "weaponservice" }) then tags[#tags + 1] = "event" end
-        if #tags == 0 and containsAny(path, interestingTerms) then tags[#tags + 1] = "interesting" end
-        return tags
-    end
-
-    local function isRemote(instance)
-        return isA(instance, "RemoteEvent") or isA(instance, "RemoteFunction")
-    end
-
-    local function setPhase(phase, source, reason, packedArgs)
-        if not phase or phase == "" then
-            return
-        end
-        if Scan.summary.currentPhase ~= phase then
-            Scan.summary.currentPhase = phase
-            logRecord({
-                event = "phase_signal",
-                phase = phase,
-                source = source,
-                reason = reason,
-                args = packedArgs,
-            })
-        else
-            Scan.summary.currentPhase = phase
-        end
-    end
-
-    local function inferRoundFromRemote(remote, packedArgs)
-        local path = pathText(remote)
-        if containsAny(path, roundStartTerms) then
-            Scan.summary.lastRoundState = "started_or_role_assignment"
-            logRecord({ event = "round_state_signal", state = Scan.summary.lastRoundState, source = instanceInfo(remote), args = packedArgs })
-            if stringFind(path, "RoleSelect") then
-                setPhase("role_select", instanceInfo(remote), "role_select_signal", packedArgs)
-            elseif stringFind(path, "RoundStart") or stringFind(path, "GiveWeapon") then
-                setPhase("in_round", instanceInfo(remote), "round_start_signal", packedArgs)
-            end
-        elseif containsAny(path, roundEndTerms) then
-            Scan.summary.lastRoundState = "ended_or_transition"
-            logRecord({ event = "round_state_signal", state = Scan.summary.lastRoundState, source = instanceInfo(remote), args = packedArgs })
-            if containsAny(path, lobbyEndTerms) then
-                Scan.summary.lastLobbySignal = path
-                setPhase("lobby", instanceInfo(remote), "round_end_lobby_signal", packedArgs)
-            elseif stringFind(path, "Clear1v1") or stringFind(path, "Cancelled1v1") then
-                Scan.summary.lastLobbySignal = path
-                setPhase("lobby_transition", instanceInfo(remote), "round_transition_signal", packedArgs)
-            end
-        end
-        if containsAny(path, roleTerms) then
-            Scan.summary.lastRoleSignal = path
-            logRecord({ event = "role_state_signal", source = instanceInfo(remote), args = packedArgs })
-        end
-    end
-
-    local function rawArg(rawArgs, index)
-        if _type(rawArgs) ~= "table" then
-            return nil
-        end
-        return rawArgs[index]
-    end
-
-    local function summaryFieldValue(entry, fieldName)
-        if _type(entry) ~= "table" or _type(entry.data) ~= "table" or _type(entry.data.fields) ~= "table" then
-            return nil
-        end
-        local field = entry.data.fields[fieldName]
-        if _type(field) == "table" then
-            return field.value
-        end
-        return nil
-    end
-
-    local function logSpecialInbound(remote, packedArgs, rawArgs)
-        local path = pathText(remote)
-
-        if stringFind(path, "PlayerDataChanged") then
-            local playerSummary = summarizePlayerData(rawArg(rawArgs, 1))
-            Scan.summary.lastRoleSignal = path
-            if (playerSummary.playerCount or 0) > 0 then
-                Scan.summary.lastRoles = {
-                    murderer = playerSummary.murderer,
-                    sheriff = playerSummary.sheriff,
-                    hero = playerSummary.hero,
-                    localPlayer = playerSummary.localPlayer,
-                }
-                if playerSummary.localPlayer then
-                    local localRole = playerSummary.localPlayer.role
-                    if localRole and localRole ~= "unknown" then
-                        Scan.summary.lastLocalRole = localRole
+local function nearestPlayersToSegment(a, b, radius)
+    local results = {}
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer and isAlive(plr) then
+            local best = nil
+            for _, part in ipairs(targetParts(plr)) do
+                local pos = partPosition(part)
+                if pos then
+                    local closest, dist, t = closestPointOnSegment(a, b, pos)
+                    if not best or dist < best.distance then
+                        best = {
+                            player = plr.Name,
+                            userId = plr.UserId,
+                            role = playerRole(plr),
+                            part = part.Name,
+                            distance = roundNum(dist),
+                            t = roundNum(t),
+                            closest = vecInfo(closest),
+                            targetPosition = vecInfo(pos),
+                        }
                     end
-                    Scan.summary.lastLocalGun = summaryFieldValue(playerSummary.localPlayer, "Gun") or Scan.summary.lastLocalGun
-                    Scan.summary.lastLocalKnife = summaryFieldValue(playerSummary.localPlayer, "Knife") or Scan.summary.lastLocalKnife
                 end
             end
-            logRecord({
-                event = "player_data_summary",
-                source = instanceInfo(remote),
-                summary = playerSummary,
-                retainedAsLastRoles = (playerSummary.playerCount or 0) > 0,
-            })
-            return
-        end
-
-        if stringFind(path, "GiveWeapon") then
-            local weapon = rawArg(rawArgs, 1)
-            local weaponText = safeToString(weapon or "")
-            local role = weaponRole(weaponText)
-            Scan.summary.lastLocalWeapon = weaponText
-            if role then
-                Scan.summary.lastLocalRole = role
-            end
-            Scan.summary.lastRoundState = "started_or_role_assignment"
-            logRecord({
-                event = "give_weapon_signal",
-                source = instanceInfo(remote),
-                weapon = primitiveSummary(weapon),
-                inferredLocalRole = role or "unknown",
-                args = packedArgs,
-            })
-            return
-        end
-
-        if stringFind(path, "CoinCollected") then
-            local coinType = rawArg(rawArgs, 1)
-            local currentCount = rawArg(rawArgs, 2)
-            local coinLimit = rawArg(rawArgs, 3)
-            Scan.summary.lastCoinCount = currentCount or "unknown"
-            Scan.summary.lastCoinLimit = coinLimit or "unknown"
-            logRecord({
-                event = "coin_collected_signal",
-                source = instanceInfo(remote),
-                coinType = primitiveSummary(coinType),
-                currentCount = primitiveSummary(currentCount),
-                coinLimit = primitiveSummary(coinLimit),
-                metadata = serialize(rawArg(rawArgs, 4)),
-            })
-            return
-        end
-
-        if containsAny(path, { "victoryscreen", "defeatscreen", "losescreen" }) then
-            Scan.summary.lastRoundState = "ended_or_transition"
-            Scan.summary.lastLobbySignal = path
-            Scan.summary.lastRoundEndReason = safeToString(rawArg(rawArgs, 3) or "unknown")
-            setPhase("lobby", instanceInfo(remote), "end_screen", packedArgs)
-            logRecord({
-                event = "round_end_summary",
-                source = instanceInfo(remote),
-                phase = Scan.summary.currentPhase,
-                lobbyOnly = true,
-                didLocalWin = primitiveSummary(rawArg(rawArgs, 1)),
-                winningRole = primitiveSummary(rawArg(rawArgs, 2)),
-                reason = primitiveSummary(rawArg(rawArgs, 3)),
-                creditedPlayer = primitiveSummary(rawArg(rawArgs, 4)),
-                roundNumber = primitiveSummary(rawArg(rawArgs, 5)),
-                args = packedArgs,
-            })
-            return
-        end
-
-        if stringFind(path, "RoundEndFade") or stringFind(path, "Clear1v1") or stringFind(path, "Cancelled1v1") then
-            Scan.summary.lastRoundState = "ended_or_transition"
-            Scan.summary.lastLobbySignal = path
-            logRecord({
-                event = "round_transition_signal",
-                state = Scan.summary.lastRoundState,
-                phase = Scan.summary.currentPhase,
-                source = instanceInfo(remote),
-                args = packedArgs,
-            })
-            return
-        end
-    end
-
-    local function attachInbound(remote)
-        if Scan.inboundRemotes[remote] or not isA(remote, "RemoteEvent") then
-            return
-        end
-        Scan.inboundRemotes[remote] = true
-        local signal = prop(remote, "OnClientEvent")
-        Scan:Connect(signal, function(...)
-            protected("remote_inbound", function(...)
-                local rawArgs = { ... }
-                rawArgs.n = _select("#", ...)
-                local packed = packArgs(...)
-                logRecord({ event = "remote_inbound", method = "OnClientEvent", remote = instanceInfo(remote), tags = tagsForPath(pathText(remote)), args = packed })
-                inferRoundFromRemote(remote, packed)
-                logSpecialInbound(remote, packed, rawArgs)
-            end, ...)
-        end)
-    end
-
-    local function rememberRemote(remote)
-        if not isRemote(remote) or Scan.discoveredRemotes[remote] then
-            return
-        end
-        Scan.discoveredRemotes[remote] = true
-        local path = pathText(remote)
-        logRecord({ event = "remote_discovered", remote = instanceInfo(remote), tags = tagsForPath(path), attributes = attributesInfo(remote) })
-        attachInbound(remote)
-    end
-
-    local function readValue(instance)
-        local ok, value = safeCall(function()
-            return instance.Value
-        end)
-        if ok then
-            return serialize(value)
-        end
-        return { type = "read_error", value = shortString(value, 200) }
-    end
-
-    local function watchValue(instance, reason)
-        if Scan.watchedValues[instance] or not isA(instance, "ValueBase") then
-            return
-        end
-        local path = pathText(instance)
-        if not containsAny(path, interestingTerms) then
-            return
-        end
-        Scan.watchedValues[instance] = true
-        Scan.summary.valueStatesSeen = Scan.summary.valueStatesSeen + 1
-        logRecord({ event = "state_value_discovered", reason = reason, valueObject = instanceInfo(instance), value = readValue(instance), tags = tagsForPath(path), attributes = attributesInfo(instance) })
-        Scan:Connect(prop(instance, "Changed"), function()
-            protected("state_value_changed", function()
-                local value = readValue(instance)
-                local tags = tagsForPath(pathText(instance))
-                if containsAny(pathText(instance), roundStartTerms) then
-                    Scan.summary.lastRoundState = "value_started_or_active"
-                elseif containsAny(pathText(instance), roundEndTerms) then
-                    Scan.summary.lastRoundState = "value_ended_or_transition"
-                end
-                logRecord({ event = "state_value_changed", valueObject = instanceInfo(instance), value = value, tags = tags })
-            end)
-        end)
-    end
-
-    local function watchAttributes(instance, reason)
-        if Scan.watchedAttributes[instance] then
-            return
-        end
-        local path = pathText(instance)
-        if not containsAny(path, interestingTerms) then
-            return
-        end
-        local attrs = attributesInfo(instance)
-        if not attrs then
-            return
-        end
-        Scan.watchedAttributes[instance] = true
-        logRecord({ event = "attributes_discovered", reason = reason, instance = instanceInfo(instance), tags = tagsForPath(path), attributes = attrs })
-
-        local rawAttrs = nil
-        safeCall(function()
-            rawAttrs = instance:GetAttributes()
-        end)
-        if _type(rawAttrs) == "table" then
-            for attrName in _pairs(rawAttrs) do
-                safeCall(function()
-                    local signal = instance:GetAttributeChangedSignal(attrName)
-                    Scan:Connect(signal, function()
-                        protected("attribute_changed", function()
-                            local value = nil
-                            safeCall(function()
-                                value = instance:GetAttribute(attrName)
-                            end)
-                            logRecord({
-                                event = "attribute_changed",
-                                instance = instanceInfo(instance),
-                                attribute = safeToString(attrName),
-                                value = serialize(value),
-                                tags = tagsForPath(pathText(instance)),
-                            })
-                        end)
-                    end)
-                end)
+            if best and best.distance <= radius then
+                results[#results + 1] = best
             end
         end
     end
+    table.sort(results, function(x, y)
+        return (x.distance or 9999) < (y.distance or 9999)
+    end)
+    return results
+end
 
-    local function positionFromDescendant(root, childName)
-        local child = findChild(root, childName, true)
-        if child then
-            return objectPosition(child)
-        end
-        return nil
-    end
+local function keyFor(inst)
+    local id = ""
+    pcall(function() id = inst:GetDebugId(0) end)
+    return fullName(inst) .. "|" .. tostring(id)
+end
 
-    local function hasDescendantNamed(root, childName)
-        return findChild(root, childName, true) ~= nil
-    end
+local function trackProjectile(inst, reason)
+    if not Scan.active or typeof(inst) ~= "Instance" then return end
+    if Scan.tracked[inst] then return end
+    local main = getMainPart(inst)
+    if not main then return end
 
-    local function mapNameFor(instance)
-        local current = instance
-        local previous = nil
-        local limit = 0
-        while current and current ~= Workspace and limit < 40 do
-            previous = current
-            current = parentOf(current)
-            limit = limit + 1
-        end
-        if previous and previous ~= instance then
-            return safeToString(prop(previous, "Name") or "")
-        end
-        local parent = parentOf(instance)
-        return parent and safeToString(prop(parent, "Name") or "") or "unknown"
-    end
+    local key = keyFor(inst)
+    if Scan.projectileKeys[key] then return end
+    Scan.projectileKeys[key] = true
+    Scan.tracked[inst] = true
+    Scan.projectileCount = Scan.projectileCount + 1
+    Scan.latestProjectile = fullName(inst)
 
-    local function canonicalCoinRoot(instance)
-        if not inWorkspace(instance) then
-            return nil, nil
-        end
-
-        local root = ancestorNamed(instance, "Coin_Server")
-        if root then
-            return root, "coin_server_ancestor"
-        end
-        return nil, nil
-    end
-
-    local function canonicalGunDropRoot(instance)
-        if not inWorkspace(instance) then
-            return nil, nil
-        end
-        local root = ancestorNamed(instance, "GunDrop")
-        if root then
-            return root, "gundrop_ancestor"
-        end
-        return nil, nil
-    end
-
-    local function classifyWorldObject(instance)
-        if not inWorkspace(instance) then
-            return
-        end
-
-        local coinRoot, coinReason = canonicalCoinRoot(instance)
-        local coinPosition = coinRoot and (positionFromDescendant(coinRoot, "MainCoin") or objectPosition(coinRoot)) or nil
-        local coinKey = coinRoot and objectSignature(coinRoot, coinPosition) or nil
-        if coinRoot and coinKey and not Scan.coinObjectKeys[coinKey] then
-            Scan.coinObjects[coinRoot] = true
-            Scan.coinObjectKeys[coinKey] = true
-            Scan.coinRemovedObjects[coinRoot] = nil
-            Scan.coinRemovedKeys[coinKey] = nil
-            Scan.summary.coinsSeen = Scan.summary.coinsSeen + 1
-            logRecord({
-                event = "coin_object_discovered",
-                object = instanceInfo(coinRoot),
-                map = mapNameFor(coinRoot),
-                position = coinPosition,
-                signature = coinKey,
-                hasTouchInterest = hasDescendantNamed(coinRoot, "TouchInterest"),
-                attributes = attributesInfo(coinRoot),
-                reason = coinReason,
-            })
-        end
-
-        local gunDropRoot, gunDropReason = canonicalGunDropRoot(instance)
-        local gunDropPosition = gunDropRoot and objectPosition(gunDropRoot) or nil
-        local gunDropKey = gunDropRoot and objectSignature(gunDropRoot, gunDropPosition) or nil
-        if gunDropRoot and gunDropKey and not Scan.gunDropObjectKeys[gunDropKey] then
-            Scan.gunDropObjects[gunDropRoot] = true
-            Scan.gunDropObjectKeys[gunDropKey] = true
-            Scan.gunDropRemovedObjects[gunDropRoot] = nil
-            Scan.gunDropRemovedKeys[gunDropKey] = nil
-            Scan.summary.gunDropsSeen = Scan.summary.gunDropsSeen + 1
-            logRecord({
-                event = "gun_drop_object_discovered",
-                object = instanceInfo(gunDropRoot),
-                map = mapNameFor(gunDropRoot),
-                position = gunDropPosition,
-                signature = gunDropKey,
-                hasTouchInterest = hasDescendantNamed(gunDropRoot, "TouchInterest"),
-                children = directChildInfos(gunDropRoot, 12),
-                attributes = attributesInfo(gunDropRoot),
-                reason = gunDropReason,
-            })
-        end
-    end
-
-    local function inspectInstance(instance, reason)
-        if not instance or not Scan.active then
-            return
-        end
-        rememberRemote(instance)
-        watchValue(instance, reason)
-        watchAttributes(instance, reason)
-        classifyWorldObject(instance)
-    end
-
-    local function safeWait(seconds)
-        if _type(task) == "table" and callable(task.wait) then
-            local ok = safeCall(task.wait, seconds)
-            if ok then
-                return
-            end
-        end
-        if callable(wait) then
-            safeCall(wait, seconds)
-            return
-        end
-        if RunService then
-            local heartbeat = prop(RunService, "Heartbeat")
-            if heartbeat and heartbeat.Wait then
-                safeCall(function()
-                    heartbeat:Wait()
-                end)
-            end
-        end
-    end
-
-    local function scanRoot(root, reason)
-        if not root or not Scan.active then
-            return
-        end
-        local firstRootScan = Scan.scannedRoots[root] ~= true
-        Scan.scannedRoots[root] = true
-
-        inspectInstance(root, reason)
-        local ok, descendants = safeCall(function()
-            return root:GetDescendants()
-        end)
-        if ok and _type(descendants) == "table" then
-            for index, instance in _ipairs(descendants) do
-                inspectInstance(instance, reason)
-                if index % 300 == 0 then
-                    safeWait()
-                end
-            end
-        end
-
-        if not firstRootScan then
-            return
-        end
-
-        local addedSignal = prop(root, "DescendantAdded")
-        Scan:Connect(addedSignal, function(instance)
-            if _type(task) == "table" and callable(task.defer) then
-                local okDefer = safeCall(task.defer, function()
-                    protected("descendant_added", function()
-                        inspectInstance(instance, "descendant_added")
-                    end)
-                end)
-                if okDefer then
-                    return
-                end
-            end
-            protected("descendant_added_direct", function()
-                inspectInstance(instance, "descendant_added")
-            end)
-        end)
-
-        local removingSignal = prop(root, "DescendantRemoving")
-        Scan:Connect(removingSignal, function(instance)
-            protected("descendant_removing", function()
-                local coinRoot = canonicalCoinRoot(instance)
-                local coinPosition = coinRoot and (positionFromDescendant(coinRoot, "MainCoin") or objectPosition(coinRoot)) or nil
-                local coinKey = coinRoot and objectSignature(coinRoot, coinPosition) or nil
-                if coinRoot and coinKey and Scan.coinObjectKeys[coinKey] and not Scan.coinRemovedKeys[coinKey] then
-                    Scan.coinRemovedObjects[coinRoot] = true
-                    Scan.coinRemovedKeys[coinKey] = true
-                    logRecord({ event = "coin_object_removed", object = instanceInfo(coinRoot), map = mapNameFor(coinRoot), position = coinPosition, signature = coinKey })
-                end
-                local gunDropRoot = canonicalGunDropRoot(instance)
-                local gunDropPosition = gunDropRoot and objectPosition(gunDropRoot) or nil
-                local gunDropKey = gunDropRoot and objectSignature(gunDropRoot, gunDropPosition) or nil
-                if gunDropRoot and gunDropKey and Scan.gunDropObjectKeys[gunDropKey] and not Scan.gunDropRemovedKeys[gunDropKey] then
-                    Scan.gunDropRemovedObjects[gunDropRoot] = true
-                    Scan.gunDropRemovedKeys[gunDropKey] = true
-                    logRecord({ event = "gun_drop_object_removed", object = instanceInfo(gunDropRoot), map = mapNameFor(gunDropRoot), position = gunDropPosition, signature = gunDropKey })
+    log({
+        event = "projectile_candidate_discovered",
+        reason = reason,
+        object = instInfo(inst),
+        mainPart = instInfo(main),
+        activationAge = roundNum(clockNow() - Scan.lastActivationAt),
+        localKnifeTool = Scan.lastActivationTool,
+        children = (function()
+            local list = {}
+            pcall(function()
+                for _, c in ipairs(inst:GetChildren()) do
+                    if #list < 25 then
+                        list[#list + 1] = { name = c.Name, class = c.ClassName }
+                    end
                 end
             end)
-        end)
-    end
-
-    local function roots()
-        local list = {}
-        local names = { "ReplicatedStorage", "ReplicatedFirst", "Workspace", "Lighting", "StarterGui", "StarterPack", "StarterPlayer" }
-        for _, name in _ipairs(names) do
-            local service = getService(name)
-            if service then
-                list[#list + 1] = service
-            end
-        end
-        if LocalPlayer then
-            list[#list + 1] = LocalPlayer
-            local playerGui = prop(LocalPlayer, "PlayerGui")
-            local backpack = prop(LocalPlayer, "Backpack")
-            local character = prop(LocalPlayer, "Character")
-            if playerGui then list[#list + 1] = playerGui end
-            if backpack then list[#list + 1] = backpack end
-            if character then list[#list + 1] = character end
-        end
-        return list
-    end
-
-    local function updateStatus()
-        local text = "running: " .. VERSION
-            .. "\nmode: passive state scan/no outbound hook/no remote firing"
-            .. "\nfile: " .. filePath
-            .. "\ncoinsSeen: " .. safeToString(Scan.summary.coinsSeen)
-            .. "\ngunDropsSeen: " .. safeToString(Scan.summary.gunDropsSeen)
-            .. "\nvalueStatesSeen: " .. safeToString(Scan.summary.valueStatesSeen)
-            .. "\ncurrentPhase: " .. safeToString(Scan.summary.currentPhase)
-            .. "\nlastRoundState: " .. safeToString(Scan.summary.lastRoundState)
-            .. "\nlastLobbySignal: " .. safeToString(Scan.summary.lastLobbySignal)
-            .. "\nlastRoundEndReason: " .. safeToString(Scan.summary.lastRoundEndReason)
-            .. "\nlastRoleSignal: " .. safeToString(Scan.summary.lastRoleSignal)
-            .. "\nlastLocalRole: " .. safeToString(Scan.summary.lastLocalRole)
-            .. "\nlastLocalWeapon: " .. safeToString(Scan.summary.lastLocalWeapon)
-            .. "\nlastLocalGun: " .. safeToString(Scan.summary.lastLocalGun)
-            .. "\nlastLocalKnife: " .. safeToString(Scan.summary.lastLocalKnife)
-            .. "\nlastCoinCount: " .. safeToString(Scan.summary.lastCoinCount) .. "/" .. safeToString(Scan.summary.lastCoinLimit)
-            .. "\n"
-        writeText(statusPath, text)
-        if folderAvailable then
-            writeText(folder .. "/status.txt", text)
-        end
-    end
-
-    local function spawnTask(name, callback)
-        local runner = function()
-            protected(name, callback)
-        end
-        if _type(task) == "table" and callable(task.spawn) then
-            local ok = safeCall(task.spawn, runner)
-            if ok then
-                return
-            end
-        end
-        if callable(spawn) then
-            local ok = safeCall(spawn, runner)
-            if ok then
-                return
-            end
-        end
-        if _type(_coroutine) == "table" and callable(_coroutine.wrap) then
-            local ok, wrapped = safeCall(_coroutine.wrap, runner)
-            if ok and callable(wrapped) then
-                safeCall(wrapped)
-                return
-            end
-        end
-        runner()
-    end
-
-    writeText(filePath, "")
-
-    logRecord({
-        event = "scan_start",
-        version = VERSION,
-        file = filePath,
-        placeId = prop(_game, "PlaceId"),
-        jobId = safeToString(prop(_game, "JobId") or ""),
-        localPlayer = LocalPlayer and { name = safeToString(prop(LocalPlayer, "Name") or ""), userId = prop(LocalPlayer, "UserId") } or nil,
-        capabilities = {
-            writefile = callable(writefileFn),
-            outboundHook = false,
-            remoteFiring = false,
-        },
-        focus = {
-            "coin_server_only_deduped",
-            "gundrop_deduped",
-            "round_state",
-            "phase_lobby_detection",
-            "player_data_role_summary",
-            "give_weapon_local_role",
-            "remote_names",
-            "inbound_events",
-        },
+            return list
+        end)(),
     })
 
-    spawnTask("initial_scan", function()
-        for _, root in _ipairs(roots()) do
-            if Scan.active then
-                scanRoot(root, "initial_scan")
+    task.spawn(function()
+        local started = clockNow()
+        local lastPos = partPosition(main)
+        local lastLog = 0
+        local sample = 0
+
+        while Scan.active and inst.Parent and main.Parent and clockNow() - started <= PROJECTILE_TRACK_SECONDS do
+            local pos = partPosition(main)
+            local vel = partVelocity(main)
+            if pos and lastPos then
+                local distMoved = (pos - lastPos).Magnitude
+                local speed = vel.Magnitude
+                local radius = NEAR_HIT_RADIUS
+
+                local near = nearestPlayersToSegment(lastPos, pos, radius)
+                if #near > 0 then
+                    Scan.nearHitCount = Scan.nearHitCount + 1
+                    log({
+                        event = "projectile_near_player",
+                        projectile = instInfo(inst),
+                        mainPart = instInfo(main),
+                        sample = sample,
+                        from = vecInfo(lastPos),
+                        to = vecInfo(pos),
+                        speed = roundNum(speed),
+                        moved = roundNum(distMoved),
+                        radius = radius,
+                        near = near,
+                    })
+                elseif clockNow() - lastLog >= 0.22 then
+                    log({
+                        event = "projectile_sample",
+                        projectile = { name = inst.Name, class = inst.ClassName, path = fullName(inst) },
+                        mainPart = { name = main.Name, class = main.ClassName, path = fullName(main) },
+                        sample = sample,
+                        position = vecInfo(pos),
+                        velocity = vecInfo(vel),
+                        speed = roundNum(speed),
+                        moved = roundNum(distMoved),
+                    })
+                    lastLog = clockNow()
+                end
+
+                lastPos = pos
+                sample = sample + 1
             end
+            task.wait(PROJECTILE_SAMPLE_DT)
         end
-        if LocalPlayer then
-            Scan:Connect(prop(LocalPlayer, "CharacterAdded"), function(character)
-                protected("character_added", function()
-                    scanRoot(character, "character_added")
-                end)
-            end)
-        end
-        logRecord({ event = "initial_scan_complete", summary = Scan.summary })
+
+        log({
+            event = "projectile_track_end",
+            projectile = instInfo(inst),
+            lived = roundNum(clockNow() - started),
+            parentStillExists = inst.Parent ~= nil,
+        })
         flush()
-        updateStatus()
+        status("projectile_track_end")
+    end)
+end
+
+local function scanExistingProjectiles(reason)
+    local ok, desc = pcall(function() return Workspace:GetDescendants() end)
+    if not ok then return end
+    for i, inst in ipairs(desc) do
+        local yes, why = likelyProjectile(inst)
+        if yes then
+            trackProjectile(inst, reason .. ":" .. why)
+        end
+        if i % 500 == 0 then task.wait() end
+    end
+end
+
+local function scanRemotes()
+    local function inspect(root)
+        local ok, desc = pcall(function() return root:GetDescendants() end)
+        if not ok then return end
+        for _, inst in ipairs(desc) do
+            if inst:IsA("RemoteEvent") or inst:IsA("RemoteFunction") then
+                local path = fullName(inst)
+                if hasAny(path, REMOTE_TERMS) then
+                    Scan.remoteCount = Scan.remoteCount + 1
+                    log({
+                        event = "interesting_remote_discovered",
+                        remote = instInfo(inst),
+                        tags = {
+                            knife = hasAny(path, {"knife"}),
+                            throw = hasAny(path, {"throw", "thrown"}),
+                            touch = hasAny(path, {"touch"}),
+                            hit = hasAny(path, {"hit"}),
+                            weapon = hasAny(path, {"weapon"}),
+                        },
+                    })
+                end
+            end
+        end
+    end
+    inspect(ReplicatedStorage)
+    if LocalPlayer then
+        local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
+        if bp then inspect(bp) end
+        if LocalPlayer.Character then inspect(LocalPlayer.Character) end
+    end
+end
+
+local function markActivation(tool, source)
+    Scan.lastActivationAt = clockNow()
+    Scan.lastActivationTool = tool and fullName(tool) or tostring(source or "?")
+    Scan.lastKnifeTool = tool
+
+    log({
+        event = "knife_activation_detected",
+        source = source,
+        tool = tool and instInfo(tool) or nil,
+        character = LocalPlayer and LocalPlayer.Character and instInfo(LocalPlayer.Character) or nil,
+    })
+    status("knife_activation_detected")
+
+    task.defer(function()
+        task.wait(0.08)
+        scanExistingProjectiles("activation_rescan_0.08")
+        task.wait(0.22)
+        scanExistingProjectiles("activation_rescan_0.30")
+        task.wait(0.45)
+        scanExistingProjectiles("activation_rescan_0.75")
+    end)
+end
+
+local watchedTools = setmetatable({}, { __mode = "k" })
+
+local function maybeWatchKnifeTool(tool)
+    if typeof(tool) ~= "Instance" or not tool:IsA("Tool") or watchedTools[tool] then return end
+    local path = fullName(tool)
+    if not hasAny(path, {"knife", "blade", "dagger"}) then return end
+
+    watchedTools[tool] = true
+    log({
+        event = "knife_tool_discovered",
+        tool = instInfo(tool),
+        children = (function()
+            local list = {}
+            pcall(function()
+                for _, c in ipairs(tool:GetDescendants()) do
+                    if #list < 40 and (c:IsA("RemoteEvent") or c:IsA("RemoteFunction") or c:IsA("BasePart")) then
+                        list[#list + 1] = instInfo(c)
+                    end
+                end
+            end)
+            return list
+        end)(),
+    })
+
+    Scan:Connect(tool.Activated, function()
+        markActivation(tool, "Tool.Activated")
     end)
 
-    spawnTask("periodic_rescan", function()
+    Scan:Connect(tool.Equipped, function()
+        log({ event = "knife_tool_equipped", tool = instInfo(tool) })
+    end)
+
+    Scan:Connect(tool.Unequipped, function()
+        log({ event = "knife_tool_unequipped", tool = instInfo(tool) })
+    end)
+end
+
+local function watchContainer(container)
+    if not container then return end
+    pcall(function()
+        for _, child in ipairs(container:GetDescendants()) do
+            maybeWatchKnifeTool(child)
+        end
+    end)
+    Scan:Connect(container.DescendantAdded, function(inst)
+        maybeWatchKnifeTool(inst)
+    end)
+end
+
+local function setupCharacter(char)
+    watchContainer(char)
+    log({ event = "character_watch", character = char and instInfo(char) or nil })
+end
+
+local function setupPlayer()
+    if not LocalPlayer then return end
+    watchContainer(LocalPlayer:FindFirstChildOfClass("Backpack"))
+    if LocalPlayer.Character then
+        setupCharacter(LocalPlayer.Character)
+    end
+    Scan:Connect(LocalPlayer.CharacterAdded, function(char)
+        task.wait(0.25)
+        setupCharacter(char)
+    end)
+    Scan:Connect(LocalPlayer.ChildAdded, function(child)
+        if child:IsA("Backpack") then
+            task.wait(0.1)
+            watchContainer(child)
+        end
+    end)
+end
+
+Scan:Connect(Workspace.DescendantAdded, function(inst)
+    task.defer(function()
+        if not Scan.active then return end
+        local yes, why = likelyProjectile(inst)
+        if yes then
+            trackProjectile(inst, "DescendantAdded:" .. why)
+        end
+    end)
+end)
+
+Scan:Connect(Workspace.DescendantRemoving, function(inst)
+    if Scan.tracked[inst] then
+        log({ event = "tracked_projectile_removing", projectile = instInfo(inst) })
+        flush()
+    end
+end)
+
+task.spawn(function()
+    local ok, err = pcall(function()
+        log({
+            event = "scan_start",
+            version = VERSION,
+            placeId = game.PlaceId,
+            jobId = game.JobId,
+            localPlayer = LocalPlayer and { name = LocalPlayer.Name, userId = LocalPlayer.UserId } or nil,
+            mode = "passive_projectile_workspace_scan",
+            doesNotHookNamecall = true,
+            doesNotFireRemotes = true,
+        })
+
+        scanRemotes()
+        setupPlayer()
+        scanExistingProjectiles("initial")
+        flush()
+        status("started")
+
         while Scan.active do
-            safeWait(12)
-            if Workspace then
-                scanRoot(Workspace, "periodic_workspace_rescan")
-            end
-            if ReplicatedStorage then
-                scanRoot(ReplicatedStorage, "periodic_replicated_rescan")
-            end
-            logRecord({ event = "scan_heartbeat", counts = Scan.counts, bufferSize = #Scan.buffer, summary = Scan.summary })
+            task.wait(2)
+            scanExistingProjectiles("periodic")
+            log({
+                event = "heartbeat",
+                projectiles = Scan.projectileCount,
+                nearHits = Scan.nearHitCount,
+                latestProjectile = Scan.latestProjectile,
+                lastActivationTool = Scan.lastActivationTool,
+            })
             flush()
-            updateStatus()
+            status("heartbeat")
         end
     end)
 
-    spawnTask("flush_loop", function()
-        while Scan.active do
-            safeWait(2)
-            flush()
-            updateStatus()
+    if not ok then
+        local msg = tostring(err)
+        if type(debug) == "table" and type(debug.traceback) == "function" then
+            msg = debug.traceback(msg)
         end
-    end)
-
-    flush()
-    updateStatus()
-end
-
-local ok = protected("main", main)
-if not ok then
-    writeText(statusPath, "main failed; check " .. crashPath .. "\n")
-end
+        writeText(CRASH, msg)
+        status("crash: " .. msg)
+    end
+end)
