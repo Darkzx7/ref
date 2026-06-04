@@ -1,5 +1,29 @@
 -- ref_universal | Murder Mystery tester
--- v2026-06-04-v49-stable-throwingknife-watcher
+-- v2026-06-04-v50-safe-boot-rollback-no-throwingknife-watcher
+
+-- PREBOOT GUARD: runs before any Roblox :GetService/namecall.
+-- Older V42-V44 Throw Hitbox builds installed a namecall hook that reads getgenv handler keys.
+-- If those keys are nil/broken, even game:GetService can fail at line 1 in some executors.
+do
+    local function __ref_noop_throw_handler()
+        return false
+    end
+    local ok, env = pcall(function()
+        if type(getgenv) == "function" then
+            return getgenv()
+        end
+        return _G
+    end)
+    if ok and type(env) == "table" then
+        env["__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER"] = __ref_noop_throw_handler
+        env["__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER_V41"] = __ref_noop_throw_handler
+        env["__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER_V42"] = __ref_noop_throw_handler
+        env["__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER_V43_SAFE"] = __ref_noop_throw_handler
+        env["__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER_V45_SAFE"] = __ref_noop_throw_handler
+        env["__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER_V47_SAFE"] = __ref_noop_throw_handler
+        env["__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER_V48_SAFE"] = __ref_noop_throw_handler
+    end
+end
 
 local Players          = game:GetService("Players")
 local TweenService     = game:GetService("TweenService")
@@ -11,66 +35,23 @@ local LocalPlayer = Players.LocalPlayer
 
 -- ─── compat ────────────────────────────────────────────────────────────────────
 
-local _rawPcall = type(pcall) == "function" and pcall or nil
-
-local function _pcall(fn, ...)
-    if type(fn) ~= "function" then
-        return false, "attempted to call a non-function value: " .. tostring(fn)
-    end
-    if _rawPcall then
-        return _rawPcall(fn, ...)
-    end
-    return true, fn(...)
-end
-
-local function _warn(msg)
-    if type(warn) == "function" then
-        _pcall(warn, msg)
-    end
-end
-
-local function _clamp(v, lo, hi)
-    v = tonumber(v) or 0
-    lo = tonumber(lo) or v
-    hi = tonumber(hi) or lo
-    if lo > hi then lo, hi = hi, lo end
-    if v < lo then return lo end
-    if v > hi then return hi end
-    return v
-end
-
-if type(math) == "table" and type(math.clamp) ~= "function" then
-    math.clamp = _clamp
-end
-
 local function _wait(n)
     if type(task) == "table" and type(task.wait) == "function" then
         return task.wait(n or 0)
     end
-    if type(wait) == "function" then
-        return wait(n or 0)
-    end
-    return nil
+    return wait(n or 0)
 end
 
 local function _spawn(fn)
-    if type(fn) ~= "function" then
-        return false
-    end
-    local wrapped = function()
-        local ok, err = _pcall(fn)
-        if not ok then
-            _warn("spawn error: " .. tostring(err))
-        end
-    end
     if type(task) == "table" and type(task.spawn) == "function" then
-        task.spawn(wrapped)
-    elseif type(spawn) == "function" then
-        spawn(wrapped)
+        task.spawn(fn)
     else
-        wrapped()
+        spawn(fn)
     end
-    return true
+end
+
+local function _pcall(fn, ...)
+    return pcall(fn, ...)
 end
 
 -- V46 safety: older V42-V44 builds could leave namecall hooks alive in the same session.
@@ -98,10 +79,7 @@ _pcall(function()
     end
 end)
 if type(previousCleanup) == "function" then
-    local okCleanup, cleanupErr = _pcall(previousCleanup)
-    if not okCleanup then
-        _warn("previous cleanup failed: " .. tostring(cleanupErr))
-    end
+    _pcall(previousCleanup)
 end
 
 -- ─── helpers ───────────────────────────────────────────────────────────────────
@@ -1918,317 +1896,52 @@ function Tester.CycleCooldown()
     return COOLDOWN_OPTIONS[State.cooldownIndex]
 end
 
--- ─── safe throw hitbox ThrowingKnife watcher V49 ───────────────────────────────
+-- ─── safe throw hitbox input ───────────────────────────────────────────────────
 
 local function stopThrowHitboxSafe()
     State.throwRangeOn = false
     State.throwRangeStatus = "Idle"
     safeDisconnect(State._throwHitboxConn)
     State._throwHitboxConn = nil
-    State._throwHitboxLoop = false
 end
 
-local function isInstanceSafe(v)
-    if type(typeof) == "function" then
-        local ok, kind = _pcall(typeof, v)
-        return ok and kind == "Instance"
-    end
-    return false
-end
-
-local function findDescSafe(root, name)
-    if not isInstanceSafe(root) then return nil end
-    local obj = nil
-    _pcall(function()
-        obj = root:FindFirstChild(name, true)
-    end)
-    return obj
-end
-
-local function vectorFromValueSafe(obj)
-    if not isInstanceSafe(obj) then return nil end
-    local value = nil
-    _pcall(function()
-        if obj:IsA("Vector3Value") then
-            value = obj.Value
-        elseif obj:IsA("CFrameValue") then
-            value = obj.Value.Position
-        end
-    end)
-    if type(typeof) == "function" and typeof(value) == "Vector3" then
-        return value
-    end
-    return nil
-end
-
-local function pointFromObjectSafe(obj)
-    if not isInstanceSafe(obj) then return nil end
-    local pos = nil
-    _pcall(function()
-        if obj:IsA("BasePart") then
-            pos = obj.Position
-        elseif obj:IsA("Attachment") then
-            pos = obj.WorldPosition
-        elseif obj:IsA("Vector3Value") then
-            pos = obj.Value
-        elseif obj:IsA("CFrameValue") then
-            pos = obj.Value.Position
-        elseif obj:IsA("Model") then
-            pos = obj:GetPivot().Position
-        end
-    end)
-    if type(typeof) == "function" and typeof(pos) == "Vector3" then
-        return pos
-    end
-    return nil
-end
-
-local function getThrowingKnifeRoot(inst)
-    if not isInstanceSafe(inst) then return nil end
-    local cur = inst
-    local limit = 0
-    while cur and cur ~= workspace and limit < 24 do
-        local name = nil
-        _pcall(function() name = cur.Name end)
-        if name == "ThrowingKnife" then
-            return cur
-        end
-        _pcall(function() cur = cur.Parent end)
-        limit = limit + 1
-    end
-    return nil
-end
-
-local function throwingKnifePoint(model)
-    if not isInstanceSafe(model) then return nil, "no model" end
-    local candidates = {
-        findDescSafe(model, "BladePosition"),
-        findDescSafe(model, "KnifeVisual"),
-        findDescSafe(model, "Handle"),
-    }
-    for _, obj in ipairs(candidates) do
-        local p = pointFromObjectSafe(obj)
-        if p then
-            local n = "object"
-            _pcall(function() n = obj.Name end)
-            return p, n
-        end
-    end
-    local p = pointFromObjectSafe(model)
-    if p then return p, "model" end
-    return nil, "no point"
-end
-
-local function throwingKnifeDirection(model, startPos)
-    local dir = vectorFromValueSafe(findDescSafe(model, "ThrowDirection"))
-    if dir and dir.Magnitude > 0.01 then
-        return dir.Unit, "ThrowDirection"
-    end
-    local root = getRoot()
-    local rp = root and partPos(root)
-    if rp and startPos and (startPos - rp).Magnitude > 1 then
-        return (startPos - rp).Unit, "RootToStart"
-    end
-    local cam = workspace.CurrentCamera
-    if cam then
-        return cam.CFrame.LookVector, "Camera"
-    end
-    return nil, "no direction"
-end
-
-local function canThrowHitboxNow()
-    if not Alive or not State.throwRangeOn then return false end
-    if State.localDead then
-        State.throwRangeStatus = "Dead"
-        return false
-    end
-    local myRole = roleOfPlayer(LocalPlayer)
-    if myRole and myRole ~= "Murderer" then
-        State.throwRangeStatus = "Need Murderer"
-        return false
-    end
+local function hookCurrentKnifeForThrowHitbox()
+    safeDisconnect(State._throwHitboxConn)
+    State._throwHitboxConn = nil
     local tool = findTool("Knife")
-    local events = tool and findChild(tool, "Events")
-    local remote = events and findChild(events, "HandleTouched")
-    if not remote then
-        State.throwRangeStatus = "No HandleTouched"
-        return false
-    end
-    return true
-end
-
-local function applyThrowHitboxSegment(segA, segB, source)
-    if not segA or not segB then return false end
-    if not canThrowHitboxNow() then return false end
-    local target, part, gap = getThrowHitboxTargetOnSegment(segA, segB, State.throwRangeRadius or 22)
-    if not target then
-        State.throwRangeStatus = tostring(source or "Throw") .. ": no target"
-        return false
-    end
-    local ok = pulseThrowHitboxTouch(target, part)
-    if ok then
-        State.throwRangeStatus = tostring(source or "Throw") .. ": " .. target.Name .. " | gap " .. tostring(math.floor((gap or 0) + 0.5))
-    else
-        State.throwRangeStatus = tostring(source or "Throw") .. ": touch failed"
-    end
-    return ok
-end
-
-local function safeKeyForInstance(inst)
-    local key = tostring(inst)
-    _pcall(function()
-        if inst.GetDebugId then
-            key = inst:GetDebugId(0)
-        end
-    end)
-    return key
-end
-
-local function processStuckKnifeV49(inst)
-    if not Alive or not State.throwRangeOn or not isInstanceSafe(inst) then return end
-    local name = nil
-    _pcall(function() name = inst.Name end)
-    if name ~= "StuckKnife" then return end
-    State._stuckSeenKeys = State._stuckSeenKeys or {}
-    local key = safeKeyForInstance(inst)
-    if State._stuckSeenKeys[key] then return end
-    State._stuckSeenKeys[key] = true
-    _spawn(function()
-        _wait(0.025)
+    if not tool then return false end
+    State._throwHitboxConn = trackConn(tool.Activated:Connect(function()
         if not Alive or not State.throwRangeOn then return end
-        local endPos = pointFromObjectSafe(inst)
-        if not endPos then return end
-        local startPos = State._lastThrowPoint
-        if startPos and State._lastThrowClock and testerTime() - State._lastThrowClock < 2.5 then
-            applyThrowHitboxSegment(startPos, endPos, "StuckKnife")
-        else
-            local root = getRoot()
-            local rp = root and partPos(root)
-            if rp then
-                applyThrowHitboxSegment(rp + Vector3.new(0, 1.5, 0), endPos, "StuckKnife")
-            end
-        end
-    end)
-end
-
-local function processThrowingKnifeV49(inst)
-    if not Alive or not State.throwRangeOn then return end
-    local model = getThrowingKnifeRoot(inst)
-    if not model then return end
-    State._throwSeenKeys = State._throwSeenKeys or {}
-    local key = safeKeyForInstance(model)
-    if State._throwSeenKeys[key] then return end
-    State._throwSeenKeys[key] = true
-
-    _spawn(function()
-        local ok, err = _pcall(function()
-            local started = testerTime()
-            local startPos = nil
-            local lastPos = nil
-            local firedAny = false
-            State.throwRangeStatus = "Watching ThrowingKnife"
-
-            while Alive and State.throwRangeOn and model and model.Parent and testerTime() - started < 1.35 do
-                local pos = nil
-                pos = throwingKnifePoint(model)
-                if pos then
-                    if not startPos then
-                        startPos = pos
-                        lastPos = pos
-                        State._lastThrowPoint = pos
-                        State._lastThrowClock = testerTime()
-                        local dir = throwingKnifeDirection(model, pos)
-                        if dir and dir.Magnitude > 0.01 then
-                            firedAny = applyThrowHitboxSegment(pos, pos + dir.Unit * 180, "ThrowingKnife dir") or firedAny
-                        end
-                    elseif lastPos and (pos - lastPos).Magnitude >= 0.2 then
-                        State._lastThrowPoint = lastPos
-                        State._lastThrowClock = testerTime()
-                        firedAny = applyThrowHitboxSegment(lastPos, pos, "ThrowingKnife path") or firedAny
-                        lastPos = pos
-                    end
-                end
-                _wait(firedAny and 0.06 or 0.035)
-            end
-
-            local finalPos = nil
-            if model and model.Parent then
-                finalPos = throwingKnifePoint(model)
-            end
-            if lastPos and finalPos and (finalPos - lastPos).Magnitude > 0.2 then
-                State._lastThrowPoint = lastPos
-                State._lastThrowClock = testerTime()
-                applyThrowHitboxSegment(lastPos, finalPos, "ThrowingKnife final")
-            end
+        local t = testerTime()
+        if State._throwLastPulse and t - State._throwLastPulse < 0.35 then return end
+        State._throwLastPulse = t
+        _spawn(function()
+            _wait(0.085)
+            Tester.ThrowHitboxFromAim()
         end)
-        if not ok then
-            State.throwRangeStatus = "Watcher error: " .. tostring(err)
-        end
-    end)
-end
-
-local function scanThrowObjectsV49()
-    local list = {}
-    _pcall(function()
-        local tk = workspace:FindFirstChild("ThrowingKnife")
-        if tk then list[#list + 1] = tk end
-        local sk = workspace:FindFirstChild("StuckKnife")
-        if sk then list[#list + 1] = sk end
-    end)
-    for _, inst in ipairs(list) do
-        local name = nil
-        _pcall(function() name = inst.Name end)
-        if name == "ThrowingKnife" then
-            processThrowingKnifeV49(inst)
-        elseif name == "StuckKnife" then
-            processStuckKnifeV49(inst)
-        end
-    end
+    end))
+    return true
 end
 
 local function startThrowHitboxSafe()
     if State._throwHitboxLoop then return end
-    safeDisconnect(State._throwHitboxConn)
-    State._throwHitboxConn = nil
     State._throwHitboxLoop = true
-    State._throwSeenKeys = {}
-    State._stuckSeenKeys = {}
-    State.throwRangeStatus = "Waiting ThrowingKnife"
-
-    local okConn, connOrErr = _pcall(function()
-        return workspace.ChildAdded:Connect(function(inst)
-            local ok, err = _pcall(function()
-                if not Alive or not State.throwRangeOn then return end
-                local name = nil
-                _pcall(function() name = inst.Name end)
-                if name == "ThrowingKnife" then
-                    processThrowingKnifeV49(inst)
-                elseif name == "StuckKnife" then
-                    processStuckKnifeV49(inst)
-                end
-            end)
-            if not ok then
-                State.throwRangeStatus = "Watcher callback error: " .. tostring(err)
-            end
-        end)
-    end)
-    if okConn and connOrErr then
-        State._throwHitboxConn = trackConn(connOrErr)
-    else
-        State.throwRangeStatus = "Watcher connect failed"
-    end
-
+    State.throwRangeStatus = "Safe passive - no hook"
+    hookCurrentKnifeForThrowHitbox()
     _spawn(function()
+        local lastTool = nil
         while Alive and State.throwRangeOn do
-            scanThrowObjectsV49()
-            _wait(0.4)
+            local tool = findTool("Knife")
+            if tool ~= lastTool then
+                lastTool = tool
+                hookCurrentKnifeForThrowHitbox()
+            end
+            _wait(0.5)
         end
         State._throwHitboxLoop = false
         safeDisconnect(State._throwHitboxConn)
         State._throwHitboxConn = nil
-        if not State.throwRangeOn then
-            State.throwRangeStatus = "Idle"
-        end
+        if not State.throwRangeOn then State.throwRangeStatus = "Idle" end
     end)
 end
 
