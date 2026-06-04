@@ -1,5 +1,5 @@
 -- ref_universal | Murder Mystery tester
--- v2026-06-03-v31-afk-strict-regular-lobby-spawn
+-- v2026-06-03-v32-afk-active-round-detect
 
 local Players          = game:GetService("Players")
 local TweenService     = game:GetService("TweenService")
@@ -1022,6 +1022,87 @@ local function getRoundMapSpawnCF()
     return nil, nil, nil
 end
 
+
+local function getValidLocalAfkRole()
+    local role = State.localRole or State.roles[LocalPlayer.Name]
+    if type(role) ~= "string" or role == "" or role == "?" then
+        return nil
+    end
+    return role
+end
+
+local function isRootNearRegularLobby(maxDistance)
+    local root = getRoot()
+    if not root then return false end
+    local lobbyCF = getRegularLobbySpawnBaseCF()
+    if not lobbyCF then return false end
+    local ok, dist = _pcall(function()
+        return (root.Position - lobbyCF.Position).Magnitude
+    end)
+    return ok and dist and dist <= (maxDistance or 260)
+end
+
+local function getSpawnReferenceCFFromCandidate(candidate)
+    if not candidate then return nil end
+    return candidate.referenceCF or candidate.locationCF or getSpawnLocationCF(candidate.spawn) or (candidate.spawn and instanceWorldCFrame(candidate.spawn))
+end
+
+local function detectAfkRoundMapContext()
+    local root = getRoot()
+    if not root then return nil end
+
+    local candidates = collectRoundMapCandidates()
+    if #candidates == 0 then return nil end
+
+    local rootPos = root.Position
+    local best, bestDist = nil, math.huge
+    for _, candidate in ipairs(candidates) do
+        local refs = {}
+        local spawnCF = candidate.spawn and getSpawnLocationCF(candidate.spawn)
+        if spawnCF then refs[#refs + 1] = spawnCF end
+        if candidate.locationCF then refs[#refs + 1] = candidate.locationCF end
+        if candidate.referenceCF then refs[#refs + 1] = candidate.referenceCF end
+
+        for _, cf in ipairs(refs) do
+            local ok, dist = _pcall(function()
+                return (rootPos - cf.Position).Magnitude
+            end)
+            if ok and dist and dist < bestDist then
+                bestDist = dist
+                best = candidate
+            end
+        end
+    end
+
+    if best and bestDist <= 2200 and not isRootNearRegularLobby(360) then
+        return best, bestDist
+    end
+
+    return nil
+end
+
+local function afkLooksLikeRoundContext()
+    if State.currentPhase == "Round" or State.currentPhase == "Role Select" or State.currentPhase == "Loading Map" then
+        return true
+    end
+    if State.currentPhase == "Ending" then
+        return false
+    end
+
+    local role = getValidLocalAfkRole()
+    if not role then return false end
+
+    local candidate = detectAfkRoundMapContext()
+    if candidate then
+        State._afkActiveMapName = candidate.map.Name
+        State._afkActiveMapCF = candidate.locationCF or getMapLocationCF(candidate.map)
+        State._afkActiveSpawnName = candidate.spawn and candidate.spawn.Name or nil
+        return true
+    end
+
+    return false
+end
+
 local function updateAfkActiveMapHint(reason)
     local candidates = collectRoundMapCandidates()
     local chosen = candidates[1]
@@ -1050,9 +1131,6 @@ end
 
 local function canStartAfkFarmHold()
     if not State.afkFarm then return false, "Off" end
-    if State.currentPhase == "Lobby" or State.currentPhase == "Unknown" then
-        return false, "Armed - waiting for round"
-    end
     if State.currentPhase == "Ending" then
         return false, "Round ending - waiting for lobby"
     end
@@ -1060,9 +1138,18 @@ local function canStartAfkFarmHold()
         return false, "Dead - waiting"
     end
 
-    local role = State.localRole or State.roles[LocalPlayer.Name]
-    if not role or role == "?" then
+    local role = getValidLocalAfkRole()
+    if not role then
         return false, "No role - waiting"
+    end
+
+    if not afkLooksLikeRoundContext() then
+        return false, "Armed - waiting for round"
+    end
+
+    if State.currentPhase == "Lobby" or State.currentPhase == "Unknown" then
+        State.currentPhase = "Round"
+        State.lastRoundSignal = "AFK map detect"
     end
 
     return true, "OK"
@@ -1244,10 +1331,12 @@ end
 
 local function armAfkFarm(reason)
     if not State.afkFarm then return end
-    local phase = State.currentPhase
-    if phase == "Lobby" or phase == "Unknown" then
-        State.afkStatus = "Armed - waiting for round"
-        return
+
+    if State.currentPhase == "Lobby" or State.currentPhase == "Unknown" then
+        if afkLooksLikeRoundContext() then
+            State.currentPhase = "Round"
+            State.lastRoundSignal = reason or "AFK map detect"
+        end
     end
 
     local allowed, why = canStartAfkFarmHold()
@@ -3949,6 +4038,15 @@ State._afkToggle = W:Toggle("Farm AFK", false, function(v)
             stopCoinCollect()
         end
         armAfkFarm("Manual")
+        _spawn(function()
+            for _ = 1, 12 do
+                if not Alive or not State.afkFarm or State._afkActive then break end
+                refreshCurrentPlayerData()
+                armAfkFarm("ManualRetry")
+                if State._afkActive then break end
+                _wait(0.25)
+            end
+        end)
     else
         if State.currentPhase ~= "Lobby" and State.currentPhase ~= "Unknown" and State.currentPhase ~= "Ending" then
             updateAfkActiveMapHint("ManualReturn")
@@ -4018,7 +4116,7 @@ _spawn(function()
         if State.currentPhase == "Lobby" then
             rememberAfkLobbyBase(false)
         end
-        if State.afkFarm and not State._afkActive and State.currentPhase ~= "Lobby" and State.currentPhase ~= "Unknown" and State.currentPhase ~= "Ending" then
+        if State.afkFarm and not State._afkActive and State.currentPhase ~= "Ending" then
             armAfkFarm("StatusRetry")
         end
         local parts = {}
