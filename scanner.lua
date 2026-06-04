@@ -1,30 +1,6 @@
 -- ref_universal | Murder Mystery tester
 -- v2026-06-04-v49-stable-throwingknife-watcher
 
-local __REF_FATAL_PREFIX = "[ref_universal fatal] "
-local function __ref_traceback(err)
-    local text = tostring(err)
-    if type(debug) == "table" and type(debug.traceback) == "function" then
-        if type(pcall) == "function" then
-            local ok, trace = pcall(debug.traceback, text, 2)
-            if ok and trace then
-                return trace
-            end
-        else
-            return debug.traceback(text, 2)
-        end
-    end
-    return text
-end
-
-local function __ref_warn_fatal(err)
-    if type(warn) == "function" then
-        warn(__REF_FATAL_PREFIX .. tostring(err))
-    end
-end
-
-local function __ref_main()
-
 local Players          = game:GetService("Players")
 local TweenService     = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
@@ -81,14 +57,12 @@ local function _spawn(fn)
     if type(fn) ~= "function" then
         return false
     end
-
     local wrapped = function()
         local ok, err = _pcall(fn)
         if not ok then
             _warn("spawn error: " .. tostring(err))
         end
     end
-
     if type(task) == "table" and type(task.spawn) == "function" then
         task.spawn(wrapped)
     elseif type(spawn) == "function" then
@@ -117,8 +91,18 @@ _pcall(function()
 end)
 
 local SESSION_KEY = "__REF_UNIVERSAL_MM_TESTER_CLEANUP"
--- Boot-safe: do not call stale cleanup from older builds here. Some old hook builds could leave
--- broken cleanup/namecall state in the executor session. The UI itself still removes the old GUI.
+local previousCleanup = nil
+_pcall(function()
+    if type(getgenv) == "function" then
+        previousCleanup = getgenv()[SESSION_KEY]
+    end
+end)
+if type(previousCleanup) == "function" then
+    local okCleanup, cleanupErr = _pcall(previousCleanup)
+    if not okCleanup then
+        _warn("previous cleanup failed: " .. tostring(cleanupErr))
+    end
+end
 
 -- ─── helpers ───────────────────────────────────────────────────────────────────
 
@@ -4585,17 +4569,7 @@ end
 
 -- ─── BUILD UI ──────────────────────────────────────────────────────────────────
 
-local okWindow, W = _pcall(function()
-    if not RefLib or type(RefLib.Window) ~= "function" then
-        return nil
-    end
-    return RefLib.Window("ref_universal | tester")
-end)
-
-if not okWindow or not W then
-    _warn("ref_universal failed to create UI: " .. tostring(W))
-    return
-end
+local W = RefLib.Window("ref_universal | tester")
 
 -- ── WEAPON TESTER ──────────────────────────────────────────────────────────────
 
@@ -4795,38 +4769,13 @@ _spawn(function()
 end)
 -- ─── INIT ──────────────────────────────────────────────────────────────────────
 
-local function bootStep(label, fn)
-    local ok, err = _pcall(fn)
-    if not ok then
-        _warn("ref_universal boot step failed [" .. tostring(label) .. "]: " .. tostring(err))
-    end
-    return ok
-end
-
-bootStep("listenRoles", listenRoles)
-bootStep("listenRoundSignals", listenRoundSignals)
-bootStep("listenPlayerRespawns", listenPlayerRespawns)
-bootStep("installManualSilent", installManualSilent)
+listenRoles()
+listenRoundSignals()
+listenPlayerRespawns()
+installManualSilent()
 _spawn(function()
     _wait(0.5)
     if Alive and State.currentPhase ~= "Lobby" then
-        bootStep("refreshRolesBurst", function()
-            refreshRolesBurst("Init")
-        end)
+        refreshRolesBurst("Init")
     end
 end)
-
-end
-
-local __ref_ok, __ref_err
-if type(xpcall) == "function" then
-    __ref_ok, __ref_err = xpcall(__ref_main, __ref_traceback)
-elseif type(pcall) == "function" then
-    __ref_ok, __ref_err = pcall(__ref_main)
-else
-    __ref_ok, __ref_err = true, __ref_main()
-end
-
-if not __ref_ok then
-    __ref_warn_fatal(__ref_err)
-end
