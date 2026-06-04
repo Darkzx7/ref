@@ -1,5 +1,5 @@
 -- ref_universal | Murder Mystery tester
--- v2026-06-03 | v44 preserved auto throw + passive KnifeThrown hitbox
+-- v2026-06-03 | v45 no-hook thrown projectile hitbox + restored auto throw
 
 local Players          = game:GetService("Players")
 local TweenService     = game:GetService("TweenService")
@@ -43,6 +43,18 @@ end)
 if type(previousCleanup) == "function" then
     _pcall(previousCleanup)
 end
+
+-- Fully neutralize older Throw Hitbox namecall handlers.
+-- Old hookmetamethod chains cannot be unhooked reliably in many executors,
+-- but all older versions read these getgenv handler keys before doing work.
+_pcall(function()
+    if type(getgenv) == "function" then
+        local env = getgenv()
+        env["__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER"] = nil
+        env["__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER_V43_SAFE"] = nil
+        env["__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER_V45_SAFE"] = nil
+    end
+end)
 
 -- ─── helpers ───────────────────────────────────────────────────────────────────
 
@@ -1962,9 +1974,18 @@ function Tester.ThrowKnifeAtPart(targetPart, bypassCooldown)
     local handle = findChild(tool, "Handle") or getPart(getChar(), "HumanoidRootPart")
     local oc, tc = makeCFrames(handle, targetPart)
     if not oc then return false end
-    local ok = _pcall(function()
+    local ok, err = _pcall(function()
         remote:FireServer(oc, tc)
     end)
+
+    if not ok and type(err) == "string" and string.find(string.lower(err), "string", 1, true) then
+        -- Some builds expect a leading action string for KnifeThrown.
+        -- Keep the old CFrame,CFrame format first, then use this only as fallback.
+        ok = _pcall(function()
+            remote:FireServer("Throw", oc, tc)
+        end)
+    end
+
     if ok then
         State.throwRangeStatus = "Auto throw sent"
     else
@@ -2127,156 +2148,210 @@ function Tester.CycleCooldown()
     return COOLDOWN_OPTIONS[State.cooldownIndex]
 end
 
-local function isKnifeThrownRemote(inst)
-    local ok, res = _pcall(function()
-        if not inst or not inst.IsA then return false end
-        if not inst:IsA("RemoteEvent") then return false end
-        if inst.Name ~= "KnifeThrown" then return false end
-        local parent = inst.Parent
-        if not parent or parent.Name ~= "Events" then return false end
-        local tool = parent.Parent
-        return tool and tool.Name == "Knife"
-    end)
-    return ok and res == true
-end
 
-local function installThrowHitboxNamecallHook()
-    local env = nil
+local function neutralizeThrowHitboxLegacyHandlers()
     _pcall(function()
-        if type(getgenv) == "function" then env = getgenv() end
+        if type(getgenv) == "function" then
+            local env = getgenv()
+            env["__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER"] = nil
+            env["__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER_V43_SAFE"] = nil
+            env["__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER_V45_SAFE"] = nil
+        end
     end)
-    if not env then
-        State.throwRangeStatus = "No hook env"
-        return false
-    end
-
-    env[THROW_HITBOX_HANDLER_KEY] = function(remote, args)
-        if not Alive or not State.throwRangeOn then return end
-        if not isKnifeThrownRemote(remote) then return end
-
-        local t = testerTime()
-        if t - (State._throwHitboxLastThrow or 0) < 0.06 then return end
-        State._throwHitboxLastThrow = t
-        State.throwRangeStatus = "KnifeThrown detected"
-
-        local copied = {}
-        if type(args) == "table" then
-            for i = 1, #args do copied[i] = args[i] end
-        end
-
-        _spawn(function()
-            _wait(0.025)
-            if Alive and State.throwRangeOn then
-                Tester.ThrowHitboxFromThrownArgs(copied, false)
-            end
-        end)
-    end
-
-    if env[THROW_HITBOX_HOOKED_KEY] == true then
-        State._throwHitboxHookInstalled = true
-        return true
-    end
-
-    if type(hookmetamethod) ~= "function" or type(getnamecallmethod) ~= "function" then
-        State.throwRangeStatus = "Namecall hook unavailable"
-        return false
-    end
-
-    local oldNamecall
-    local fn = function(self, ...)
-        local method = nil
-        _pcall(function() method = getnamecallmethod() end)
-
-        local shouldHandle = false
-        local copied = nil
-        if method == "FireServer" and isKnifeThrownRemote(self) then
-            shouldHandle = true
-            copied = {...}
-        end
-
-        -- Preserve the original remote call first. Do not modify, reorder, or replace arguments.
-        local results = { oldNamecall(self, ...) }
-
-        if shouldHandle then
-            local handler = env[THROW_HITBOX_HANDLER_KEY]
-            if type(handler) == "function" then
-                _spawn(function()
-                    _wait(0.035)
-                    _pcall(handler, self, copied)
-                end)
-            end
-        end
-
-        local unpackFn = table.unpack or unpack
-        if unpackFn then
-            return unpackFn(results)
-        end
-        return nil
-    end
-
-    if type(newcclosure) == "function" then
-        fn = newcclosure(fn)
-    end
-
-    local ok, hooked = _pcall(function()
-        oldNamecall = hookmetamethod(game, "__namecall", fn)
-        return oldNamecall ~= nil
-    end)
-
-    if ok and hooked then
-        env[THROW_HITBOX_HOOKED_KEY] = true
-        State._throwHitboxHookInstalled = true
-        return true
-    end
-
-    State.throwRangeStatus = "Namecall hook failed"
-    return false
 end
 
-local function triggerManualThrowHitbox(source)
-    State.throwRangeStatus = "Waiting for KnifeThrown"
-    return false
+local function cacheThrowHitboxTouchRemote()
+    local tool = findTool("Knife")
+    local events = tool and findChild(tool, "Events")
+    local touchRemote = events and findChild(events, "HandleTouched")
+    if touchRemote then
+        State._throwHitboxTouchRemote = touchRemote
+    end
+    return State._throwHitboxTouchRemote
 end
 
-local function hookThrowHitboxKnifeActivated()
+local function isUnderLocalContainers(inst)
     local char = getChar()
-    State._throwHitboxHookedKnife = char and findChild(char, "Knife") or nil
+    local bp = getBackpack()
+    if char and inst:IsDescendantOf(char) then return true end
+    if bp and inst:IsDescendantOf(bp) then return true end
+    local gui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    if gui and inst:IsDescendantOf(gui) then return true end
+    return false
+end
+
+local function isUnderAnyCharacter(inst)
+    local pl = Players:GetPlayers()
+    for _, p in ipairs(pl) do
+        local char = p.Character
+        if char and inst:IsDescendantOf(char) then
+            return true
+        end
+    end
+    return false
+end
+
+local function lowerName(inst)
+    local s = ""
+    _pcall(function() s = tostring(inst.Name or "") end)
+    return string.lower(s)
+end
+
+local function looksLikeThrownKnifePart(obj)
+    local ok, isPart = _pcall(function() return obj and obj:IsA("BasePart") end)
+    if not ok or not isPart then return false end
+    if isUnderLocalContainers(obj) then return false end
+    if isUnderAnyCharacter(obj) then return false end
+
+    local n = lowerName(obj)
+    local pn = obj.Parent and lowerName(obj.Parent) or ""
+    local gpn = obj.Parent and obj.Parent.Parent and lowerName(obj.Parent.Parent) or ""
+
+    local nameHit = string.find(n, "knife", 1, true)
+        or string.find(n, "blade", 1, true)
+        or string.find(pn, "knife", 1, true)
+        or string.find(pn, "blade", 1, true)
+        or string.find(gpn, "knife", 1, true)
+        or string.find(gpn, "blade", 1, true)
+
+    if not nameHit then return false end
+
+    local anchored = false
+    _pcall(function() anchored = obj.Anchored end)
+    -- Real thrown objects are usually unanchored or moved frequently.
+    -- Keep anchored objects only if they actually move between scans.
+    if anchored and not State._throwProjectilePositions[obj] then
+        return false
+    end
+
+    return true
+end
+
+local function getThrownKnifeParts()
+    local list = {}
+    local all = nil
+    _pcall(function() all = workspace:GetDescendants() end)
+    if not all then return list end
+
+    for _, obj in ipairs(all) do
+        if looksLikeThrownKnifePart(obj) then
+            list[#list + 1] = obj
+            if #list >= 24 then break end
+        end
+    end
+    return list
+end
+
+local function processThrownKnifePart(part)
+    if not part or not part.Parent then return false end
+    if not State.throwRangeOn then return false end
+    if State.localDead then return false end
+    if roleOfPlayer(LocalPlayer) ~= "Murderer" then return false end
+
+    local touchRemote = cacheThrowHitboxTouchRemote()
+    if not touchRemote then
+        State.throwRangeStatus = "No HandleTouched"
+        return false
+    end
+
+    local pos = partPos(part)
+    if not pos then return false end
+
+    State._throwProjectilePositions = State._throwProjectilePositions or {}
+    State._throwHitboxTouched = State._throwHitboxTouched or {}
+
+    local prev = State._throwProjectilePositions[part]
+    State._throwProjectilePositions[part] = pos
+
+    if not prev then return false end
+
+    local delta = pos - prev
+    local dist = delta.Magnitude
+    if dist < 0.12 then return false end
+
+    local dir = delta.Unit
+    local segA = prev - dir * 3
+    local segB = pos + dir * math.clamp(dist * 1.7 + 8, 8, 42)
+
+    local targets, why = collectThrowHitboxRayTargets(State.throwRangeRadius, segA, segB)
+    local entry = targets and targets[1]
+    if not entry or not entry.player or not entry.part then
+        State.throwRangeStatus = why or "Watching thrown knife"
+        return false
+    end
+
+    local key = entry.player.Name
+    local t = testerTime()
+    if State._throwHitboxTouched[key] and t - State._throwHitboxTouched[key] < 0.55 then
+        return false
+    end
+    State._throwHitboxTouched[key] = t
+
+    local ok = pulseThrowHitboxTouch(touchRemote, entry.player, entry.part, false)
+    if ok then
+        State.throwRangeStatus = "Projectile hitbox: "..entry.player.Name.." | gap "..tostring(math.floor((entry.rayDist or 0) + 0.5))
+    else
+        State.throwRangeStatus = "Projectile hitbox failed"
+    end
+    return ok
+end
+
+function Tester.ThrowHitboxFromThrownArgs(args, allowWhenToggleOff)
+    -- V45: no longer used for manual throws. Kept only as a safe helper for debug.
+    local segA, segB, why = throwSegmentFromRemoteArgs(args)
+    if not segA or not segB then
+        State.throwRangeStatus = why or "No KnifeThrown path"
+        return false
+    end
+    return Tester.ThrowHitboxFromSegment(segA, segB, "Debug path", allowWhenToggleOff)
 end
 
 local function startThrowRangeLoop()
     if State._throwRangeLoop then return end
     State._throwRangeLoop = true
-    installThrowHitboxNamecallHook()
+    State._throwProjectilePositions = {}
+    State._throwHitboxTouched = {}
+    neutralizeThrowHitboxLegacyHandlers()
+
     _spawn(function()
         while Alive and State.throwRangeOn do
-            hookThrowHitboxKnifeActivated()
+            neutralizeThrowHitboxLegacyHandlers()
+            cacheThrowHitboxTouchRemote()
+
             if State.currentPhase == "Lobby" or State.currentPhase == "Ending" or State.currentPhase == "Loading" then
                 State.throwRangeStatus = "Passive - waiting for round"
             elseif State.localDead then
                 State.throwRangeStatus = "Dead"
             elseif roleOfPlayer(LocalPlayer) ~= "Murderer" then
                 State.throwRangeStatus = "Need Murderer"
-            elseif not findTool("Knife") then
-                State.throwRangeStatus = "Passive - no knife"
-            elseif State._throwHitboxHookInstalled then
-                State.throwRangeStatus = "Passive - safe hook waiting KnifeThrown"
             else
-                State.throwRangeStatus = "Hook unavailable - scan button only"
-            end
-            _wait(0.35)
-        end
-        State._throwRangeLoop = false
-        safeDisconnect(State._throwHitboxActivatedConn)
-        State._throwHitboxActivatedConn = nil
-        State._throwHitboxHookedKnife = nil
-        _pcall(function()
-            if type(getgenv) == "function" then
-                getgenv()[THROW_HITBOX_HANDLER_KEY] = nil
-                if THROW_HITBOX_OLD_HANDLER_KEY then
-                    getgenv()[THROW_HITBOX_OLD_HANDLER_KEY] = nil
+                local parts = getThrownKnifeParts()
+                if #parts == 0 then
+                    State.throwRangeStatus = "Watching thrown knife projectile"
+                else
+                    local hit = false
+                    for _, part in ipairs(parts) do
+                        if processThrownKnifePart(part) then
+                            hit = true
+                            break
+                        end
+                    end
+                    if not hit and (State.throwRangeStatus == "Watching thrown knife projectile" or State.throwRangeStatus == nil) then
+                        State.throwRangeStatus = "Projectile tracked"
+                    end
                 end
             end
-        end)
+
+            _wait(0.045)
+        end
+
+        State._throwRangeLoop = false
+        State._throwProjectilePositions = {}
+        State._throwHitboxTouched = {}
+        State._throwHitboxHookInstalled = false
+        State._throwHitboxActivatedConn = nil
+        State._throwHitboxHookedKnife = nil
+        neutralizeThrowHitboxLegacyHandlers()
         if not State.throwRangeOn then
             State.throwRangeStatus = "Idle"
         end
@@ -2286,17 +2361,13 @@ end
 local function stopThrowRangeLoop()
     State.throwRangeOn = false
     State.throwRangeStatus = "Idle"
+    State._throwProjectilePositions = {}
+    State._throwHitboxTouched = {}
+    State._throwHitboxHookInstalled = false
     safeDisconnect(State._throwHitboxActivatedConn)
     State._throwHitboxActivatedConn = nil
     State._throwHitboxHookedKnife = nil
-    _pcall(function()
-        if type(getgenv) == "function" then
-            getgenv()[THROW_HITBOX_HANDLER_KEY] = nil
-            if THROW_HITBOX_OLD_HANDLER_KEY then
-                getgenv()[THROW_HITBOX_OLD_HANDLER_KEY] = nil
-            end
-        end
-    end)
+    neutralizeThrowHitboxLegacyHandlers()
 end
 
 -- ─── manual silent input ───────────────────────────────────────────────────────
@@ -4665,7 +4736,7 @@ W:Button("Shoot Murderer", function()
         _spawn(function() _wait(0.1) end)
     end
 end)
-W:Button("Throw Knife: Manual Only",  function() State.throwRangeStatus = "Use manual throw" end)
+W:Button("Throw Knife",  function() Tester.ThrowKnife()  end)
 W:Button("Stab Nearest",  function() Tester.StabTarget()  end)
 W:Button("Touch Nearest", function() Tester.TouchTarget() end)
 
