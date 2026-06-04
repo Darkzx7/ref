@@ -1,5 +1,5 @@
 -- ref_universal | Murder Mystery tester
--- v2026-06-03-v30-afk-role-guard-regular-lobby
+-- v2026-06-03-v31-afk-strict-regular-lobby-spawn
 
 local Players          = game:GetService("Players")
 local TweenService     = game:GetService("TweenService")
@@ -560,9 +560,89 @@ local function rememberAfkLobbyBase(force)
     end
 end
 
+local function getRegularLobbyRootStrict()
+    local lobby = nil
+    _pcall(function()
+        lobby = workspace:FindFirstChild("RegularLobby")
+    end)
+    return lobby
+end
+
+local function getRegularLobbySpawnsStrict()
+    local lobby = getRegularLobbyRootStrict()
+    if not lobby then return nil end
+    local spawns = nil
+    _pcall(function()
+        spawns = lobby:FindFirstChild("Spawns")
+    end)
+    return spawns
+end
+
+local function isBasePartEarly(obj)
+    local ok, res = _pcall(function()
+        return obj and obj:IsA("BasePart")
+    end)
+    return ok and res == true
+end
+
+local function getRegularLobbySpawnPartStrict()
+    local spawns = getRegularLobbySpawnsStrict()
+    if not spawns then return nil end
+
+    local exact = nil
+    _pcall(function()
+        exact = spawns:FindFirstChild("Spawn")
+    end)
+    if exact and isBasePartEarly(exact) then
+        return exact
+    end
+
+    local best = nil
+    _pcall(function()
+        for _, obj in ipairs(spawns:GetChildren()) do
+            if isBasePartEarly(obj) and tostring(obj.Name):lower() == "spawn" then
+                best = obj
+                break
+            end
+        end
+    end)
+    if best then return best end
+
+    _pcall(function()
+        for _, obj in ipairs(spawns:GetChildren()) do
+            if isBasePartEarly(obj) then
+                best = obj
+                break
+            end
+        end
+    end)
+    if best then return best end
+
+    _pcall(function()
+        for _, obj in ipairs(spawns:GetDescendants()) do
+            if isBasePartEarly(obj) then
+                best = obj
+                break
+            end
+        end
+    end)
+    return best
+end
+
+local function getRegularLobbySpawnBaseCF()
+    local spawnPart = getRegularLobbySpawnPartStrict()
+    if not spawnPart then return nil, nil end
+    local cf = nil
+    _pcall(function() cf = spawnPart.CFrame end)
+    return cf, spawnPart.Name
+end
+
 local function getAfkHighPlatformPos()
+    local baseCF = getRegularLobbySpawnBaseCF()
     local root = getRoot()
-    local baseCF = State._afkLobbyBaseCF or (root and root.CFrame) or CFrame.new(0, 0, 0)
+    if not baseCF then
+        baseCF = State._afkLobbyBaseCF or (root and root.CFrame) or CFrame.new(0, 0, 0)
+    end
     local pos = baseCF.Position
     return Vector3.new(pos.X, pos.Y + 6500, pos.Z)
 end
@@ -921,21 +1001,8 @@ local function cframeAboveSpawn(spawnPart)
 end
 
 local function getRegularLobbySpawnCF()
-    local lobby = nil
-    _pcall(function()
-        lobby = workspace:FindFirstChild("RegularLobby")
-            or workspace:FindFirstChild("Regular Lobby")
-            or workspace:FindFirstChild("Lobby")
-    end)
-    if not lobby then return nil end
-
-    local spawns = findSpawnsFolder(lobby)
-    if not spawns then return nil end
-
-    local referenceCF = instanceWorldCFrame(lobby)
-    local spawnPart = pickSpawnPart(spawns, referenceCF)
+    local spawnPart = getRegularLobbySpawnPartStrict()
     if not spawnPart then return nil end
-
     return cframeAboveSpawn(spawnPart), spawnPart.Name
 end
 
@@ -1086,7 +1153,7 @@ local function startAfkFarmHold(reason)
     end
 
     if State._afkActive and State._afkPlatform and State._afkPlatform.Parent and State._afkHoldCF then
-        State.afkStatus = "High lobby hold"
+        State.afkStatus = "High hold above RegularLobby.Spawns.Spawn"
         return true
     end
 
@@ -1129,7 +1196,7 @@ local function startAfkFarmHold(reason)
     State._afkPlatform = platform
     State._afkHoldCF = CFrame.new(platformPos + Vector3.new(0, 4.2, 0))
     State._afkActive = true
-    State.afkStatus = "High lobby hold"
+    State.afkStatus = "High hold above RegularLobby.Spawns.Spawn"
 
     _pcall(function()
         State._afkSavedRootAnchored = root.Anchored
