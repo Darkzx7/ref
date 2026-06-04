@@ -57,12 +57,20 @@ local function _spawn(fn)
     if type(fn) ~= "function" then
         return false
     end
+
+    local wrapped = function()
+        local ok, err = _pcall(fn)
+        if not ok then
+            _warn("spawn error: " .. tostring(err))
+        end
+    end
+
     if type(task) == "table" and type(task.spawn) == "function" then
-        task.spawn(fn)
+        task.spawn(wrapped)
     elseif type(spawn) == "function" then
-        spawn(fn)
+        spawn(wrapped)
     else
-        _pcall(fn)
+        wrapped()
     end
     return true
 end
@@ -2181,13 +2189,18 @@ local function startThrowHitboxSafe()
 
     local okConn, connOrErr = _pcall(function()
         return workspace.ChildAdded:Connect(function(inst)
-            if not Alive or not State.throwRangeOn then return end
-            local name = nil
-            _pcall(function() name = inst.Name end)
-            if name == "ThrowingKnife" then
-                processThrowingKnifeV49(inst)
-            elseif name == "StuckKnife" then
-                processStuckKnifeV49(inst)
+            local ok, err = _pcall(function()
+                if not Alive or not State.throwRangeOn then return end
+                local name = nil
+                _pcall(function() name = inst.Name end)
+                if name == "ThrowingKnife" then
+                    processThrowingKnifeV49(inst)
+                elseif name == "StuckKnife" then
+                    processStuckKnifeV49(inst)
+                end
+            end)
+            if not ok then
+                State.throwRangeStatus = "Watcher callback error: " .. tostring(err)
             end
         end)
     end)
