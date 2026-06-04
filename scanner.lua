@@ -11,23 +11,60 @@ local LocalPlayer = Players.LocalPlayer
 
 -- ─── compat ────────────────────────────────────────────────────────────────────
 
+local _rawPcall = type(pcall) == "function" and pcall or nil
+
+local function _pcall(fn, ...)
+    if type(fn) ~= "function" then
+        return false, "attempted to call a non-function value: " .. tostring(fn)
+    end
+    if _rawPcall then
+        return _rawPcall(fn, ...)
+    end
+    return true, fn(...)
+end
+
+local function _warn(msg)
+    if type(warn) == "function" then
+        _pcall(warn, msg)
+    end
+end
+
+local function _clamp(v, lo, hi)
+    v = tonumber(v) or 0
+    lo = tonumber(lo) or v
+    hi = tonumber(hi) or lo
+    if lo > hi then lo, hi = hi, lo end
+    if v < lo then return lo end
+    if v > hi then return hi end
+    return v
+end
+
+if type(math) == "table" and type(math.clamp) ~= "function" then
+    math.clamp = _clamp
+end
+
 local function _wait(n)
     if type(task) == "table" and type(task.wait) == "function" then
         return task.wait(n or 0)
     end
-    return wait(n or 0)
+    if type(wait) == "function" then
+        return wait(n or 0)
+    end
+    return nil
 end
 
 local function _spawn(fn)
+    if type(fn) ~= "function" then
+        return false
+    end
     if type(task) == "table" and type(task.spawn) == "function" then
         task.spawn(fn)
-    else
+    elseif type(spawn) == "function" then
         spawn(fn)
+    else
+        _pcall(fn)
     end
-end
-
-local function _pcall(fn, ...)
-    return pcall(fn, ...)
+    return true
 end
 
 -- V46 safety: older V42-V44 builds could leave namecall hooks alive in the same session.
@@ -4511,7 +4548,17 @@ end
 
 -- ─── BUILD UI ──────────────────────────────────────────────────────────────────
 
-local W = RefLib.Window("ref_universal | tester")
+local okWindow, W = _pcall(function()
+    if not RefLib or type(RefLib.Window) ~= "function" then
+        return nil
+    end
+    return RefLib.Window("ref_universal | tester")
+end)
+
+if not okWindow or not W then
+    _warn("ref_universal failed to create UI: " .. tostring(W))
+    return
+end
 
 -- ── WEAPON TESTER ──────────────────────────────────────────────────────────────
 
@@ -4711,13 +4758,23 @@ _spawn(function()
 end)
 -- ─── INIT ──────────────────────────────────────────────────────────────────────
 
-listenRoles()
-listenRoundSignals()
-listenPlayerRespawns()
-installManualSilent()
+local function bootStep(label, fn)
+    local ok, err = _pcall(fn)
+    if not ok then
+        _warn("ref_universal boot step failed [" .. tostring(label) .. "]: " .. tostring(err))
+    end
+    return ok
+end
+
+bootStep("listenRoles", listenRoles)
+bootStep("listenRoundSignals", listenRoundSignals)
+bootStep("listenPlayerRespawns", listenPlayerRespawns)
+bootStep("installManualSilent", installManualSilent)
 _spawn(function()
     _wait(0.5)
     if Alive and State.currentPhase ~= "Lobby" then
-        refreshRolesBurst("Init")
+        bootStep("refreshRolesBurst", function()
+            refreshRolesBurst("Init")
+        end)
     end
 end)
