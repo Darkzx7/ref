@@ -1,5 +1,5 @@
 -- ref_universal | Murder Mystery tester
--- v2026-06-03-v33-afk-immediate-high-platform
+-- v2026-06-03-v34-afk-extra-high-platform
 
 local Players          = game:GetService("Players")
 local TweenService     = game:GetService("TweenService")
@@ -644,7 +644,7 @@ local function getAfkHighPlatformPos()
         baseCF = State._afkLobbyBaseCF or (root and root.CFrame) or CFrame.new(0, 0, 0)
     end
     local pos = baseCF.Position
-    return Vector3.new(pos.X, pos.Y + 6500, pos.Z)
+    return Vector3.new(pos.X, pos.Y + 25000, pos.Z)
 end
 
 local AFK_ROUND_MAP_NAMES = {
@@ -1256,7 +1256,7 @@ local function startAfkFarmHold(reason)
     end
 
     if State._afkActive and State._afkPlatform and State._afkPlatform.Parent and State._afkHoldCF then
-        State.afkStatus = "High platform active"
+        State.afkStatus = "Extra high platform active"
         return true
     end
 
@@ -1301,7 +1301,7 @@ local function startAfkFarmHold(reason)
     State._afkPlatform = platform
     State._afkHoldCF = CFrame.new(platformPos + Vector3.new(0, 4.2, 0))
     State._afkActive = true
-    State.afkStatus = "High platform active"
+    State.afkStatus = "Extra high platform active"
 
     _pcall(function()
         State._afkSavedRootAnchored = root.Anchored
