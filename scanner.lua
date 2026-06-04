@@ -1,5 +1,5 @@
 -- ref_universal | Murder Mystery tester
--- v2026-06-03-v38-afk-500-under-map-gundrop-return
+-- v2026-06-03 | v39 throw range-v38-afk-500-under-map-gundrop-return
 
 local Players          = game:GetService("Players")
 local TweenService     = game:GetService("TweenService")
@@ -113,6 +113,11 @@ local State = {
     cooldownIndex      = 2,
     lastAction         = 0,
     manualSilent       = false,
+    throwRangeOn      = false,
+    throwRangeRadius  = 22,
+    throwRangeStatus  = "Idle",
+    _throwRangeLoop   = false,
+    _throwRangeToggle = nil,
     coinCollect        = false,
     coinSpeed          = 4,
     collecting         = false,
@@ -1639,6 +1644,68 @@ local function nearestKnifeTarget()
     end, "no knife target")
 end
 
+local function isValidThrowRangeTarget(player)
+    if not isValidCombatTarget(player) then return false end
+    local myRole = roleOfPlayer(LocalPlayer)
+    local targetRole = roleOfPlayer(player)
+    if myRole == "Murderer" and targetRole == "Murderer" then return false end
+    return true
+end
+
+local function nearestThrowRangeTarget(radius)
+    radius = tonumber(radius) or State.throwRangeRadius or 22
+    local myRoot = getPart(getChar(), "HumanoidRootPart")
+    local myPos = myRoot and partPos(myRoot)
+    if not myPos then return nil, nil, "no local position" end
+
+    local best, bestPart, bestDist = nil, nil, radius + 0.001
+    for _, p in ipairs(getPlayerList()) do
+        if isValidThrowRangeTarget(p) then
+            local pt = getPart(p.Character, State.selectedPart)
+                or getPart(p.Character, "HumanoidRootPart")
+                or getPart(p.Character, "UpperTorso")
+                or getPart(p.Character, "Torso")
+            local pos = pt and partPos(pt)
+            if pos then
+                local d = (myPos - pos).Magnitude
+                if d <= radius and d < bestDist then
+                    best = p
+                    bestPart = pt
+                    bestDist = d
+                end
+            end
+        end
+    end
+
+    if not bestPart then return nil, nil, "no target in range" end
+    return best, bestPart, "range:"..best.Name.." @"..tostring(math.floor(bestDist + 0.5))
+end
+
+local function getThrowContactParts(char, preferred)
+    local parts = {}
+    local names = {
+        preferred,
+        "HumanoidRootPart",
+        "UpperTorso",
+        "Torso",
+        "LowerTorso",
+        "Head",
+        "LeftUpperArm",
+        "RightUpperArm",
+        "LeftUpperLeg",
+        "RightUpperLeg"
+    }
+    local used = {}
+    for _, name in ipairs(names) do
+        if type(name) == "string" and not used[name] then
+            used[name] = true
+            local p = findChild(char, name)
+            if p then parts[#parts + 1] = p end
+        end
+    end
+    return parts
+end
+
 local function makeCFrames(originPart, targetPart, originOverride)
     local op = originOverride or partPos(originPart)
     local tp = predictedPos(targetPart)
@@ -1674,18 +1741,74 @@ function Tester.ShootTarget()
     return Tester.ShootMurderer()
 end
 
-function Tester.ThrowKnife()
-    if not canAct("Throw") then return false end
+function Tester.ThrowKnifeAtPart(targetPart, bypassCooldown)
+    if not bypassCooldown and not canAct("Throw") then return false end
     local tool = equipTool("Knife")
     local events = tool and findChild(tool, "Events")
     local remote = events and findChild(events, "KnifeThrown")
-    if not remote then return false end
-    local _, targetPart = nearestKnifeTarget()
-    if not targetPart then return false end
+    if not remote or not targetPart then return false end
     local handle = findChild(tool, "Handle") or getPart(getChar(), "HumanoidRootPart")
     local oc, tc = makeCFrames(handle, targetPart)
     if not oc then return false end
     _pcall(function() remote:FireServer(oc, tc) end)
+    return true
+end
+
+function Tester.ThrowKnife()
+    local _, targetPart = nearestKnifeTarget()
+    if not targetPart then return false end
+    return Tester.ThrowKnifeAtPart(targetPart, false)
+end
+
+function Tester.ThrowRangeHit()
+    if not canAct("ThrowRange") then return false end
+    if State.localDead then
+        State.throwRangeStatus = "Dead"
+        return false
+    end
+
+    local myRole = roleOfPlayer(LocalPlayer)
+    if myRole and myRole ~= "Murderer" then
+        State.throwRangeStatus = "Need Murderer"
+        return false
+    end
+
+    local tool = equipTool("Knife")
+    if not tool then
+        State.throwRangeStatus = "No knife"
+        return false
+    end
+
+    local events = findChild(tool, "Events")
+    local touchRemote = events and findChild(events, "HandleTouched")
+    local targetPlayer, targetPart, why = nearestThrowRangeTarget(State.throwRangeRadius)
+    if not targetPlayer or not targetPart then
+        State.throwRangeStatus = why or "No target"
+        return false
+    end
+
+    local ok = Tester.ThrowKnifeAtPart(targetPart, true)
+    if not ok then
+        State.throwRangeStatus = "Throw failed"
+        return false
+    end
+
+    if touchRemote then
+        _spawn(function()
+            _wait(0.035)
+            if not Alive or not State.throwRangeOn then return end
+            if not targetPlayer.Character or not isAlive(targetPlayer.Character) then return end
+            local hitParts = getThrowContactParts(targetPlayer.Character, State.selectedPart)
+            for _, part in ipairs(hitParts) do
+                if part and part.Parent then
+                    _pcall(function() touchRemote:FireServer(part) end)
+                    _wait(0.015)
+                end
+            end
+        end)
+    end
+
+    State.throwRangeStatus = why or "Thrown"
     return true
 end
 
@@ -1732,6 +1855,37 @@ function Tester.CycleCooldown()
     State.cooldownIndex = State.cooldownIndex + 1
     if State.cooldownIndex > #COOLDOWN_OPTIONS then State.cooldownIndex = 1 end
     return COOLDOWN_OPTIONS[State.cooldownIndex]
+end
+
+local function startThrowRangeLoop()
+    if State._throwRangeLoop then return end
+    State._throwRangeLoop = true
+    _spawn(function()
+        while Alive and State.throwRangeOn do
+            local waitTime = 0.12
+            local ok = false
+            if State.currentPhase == "Lobby" or State.currentPhase == "Ending" or State.currentPhase == "Loading" then
+                State.throwRangeStatus = "Waiting for round"
+                waitTime = 0.35
+            elseif State.localDead then
+                State.throwRangeStatus = "Dead"
+                waitTime = 0.35
+            else
+                ok = Tester.ThrowRangeHit()
+                waitTime = ok and math.max((COOLDOWN_OPTIONS[State.cooldownIndex] or 0.25) * 0.75, 0.08) or 0.16
+            end
+            _wait(waitTime)
+        end
+        State._throwRangeLoop = false
+        if not State.throwRangeOn then
+            State.throwRangeStatus = "Idle"
+        end
+    end)
+end
+
+local function stopThrowRangeLoop()
+    State.throwRangeOn = false
+    State.throwRangeStatus = "Idle"
 end
 
 -- ─── manual silent input ───────────────────────────────────────────────────────
@@ -4102,6 +4256,19 @@ W:Button("Throw Knife Nearest",  function() Tester.ThrowKnife()  end)
 W:Button("Stab Nearest",  function() Tester.StabTarget()  end)
 W:Button("Touch Nearest", function() Tester.TouchTarget() end)
 
+State._throwRangeToggle = W:Toggle("Throw Range", false, function(v)
+    State.throwRangeOn = v
+    if v then startThrowRangeLoop() else stopThrowRangeLoop() end
+end)
+
+W:Slider("Throw Range Radius", 8, 70, State.throwRangeRadius, function(v)
+    State.throwRangeRadius = v
+end)
+
+W:Button("Throw Range Once", function()
+    Tester.ThrowRangeHit()
+end)
+
 
 -- ── COIN COLLECT ───────────────────────────────────────────────────────────────
 
@@ -4221,6 +4388,7 @@ local statusLbl = W:Label("Ready.")
 local phaseLbl = W:Label("Phase: Unknown")
 local dataLbl = W:Label("Role: ? | Coins: 0/40")
 local gunDropLbl = W:Label("GunDrop: Missing | N/A")
+local throwRangeLbl = W:Label("Throw Range: Idle")
 local afkLbl = W:Label("Farm AFK: Idle")
 
 _spawn(function()
@@ -4238,6 +4406,7 @@ _spawn(function()
         if State.espOn then parts[#parts+1] = "esp" end
         if State.gunDropOn then parts[#parts+1] = "gundrop" end
         if State.gunDropEspOn then parts[#parts+1] = "gundrop esp" end
+        if State.throwRangeOn then parts[#parts+1] = "throw range" end
         local activeText = #parts > 0 and ("Active: "..table.concat(parts, ", ")) or "Inactive"
         local localRole = State.currentPhase == "Lobby" and "?" or (State.localRole or State.roles[LocalPlayer.Name] or "?")
         local endText = ""
@@ -4249,6 +4418,7 @@ _spawn(function()
             phaseLbl.Text = "Phase: "..tostring(State.currentPhase or "Unknown").." | Signal: "..tostring(State.lastRoundSignal or "None")..endText
             dataLbl.Text = "Role: "..tostring(localRole).." | Coins: "..tostring(State.coinCount or 0).."/"..tostring(State.coinLimit or 40).." | Coin: "..tostring(State.coinStatus or "Idle")
             gunDropLbl.Text = "GunDrop: "..tostring(State.lastGunDropStatus or "Missing").." | "..tostring(State.lastGunDropDistance or "N/A").." | GiveWeapon: "..tostring(State._lastGiveWeaponName or "None")
+            throwRangeLbl.Text = "Throw Range: "..tostring(State.throwRangeStatus or "Idle").." | Radius: "..tostring(State.throwRangeRadius or 0)
             afkLbl.Text = "Farm AFK: "..tostring(State.afkStatus or "Idle")
         end)
     end
