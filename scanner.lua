@@ -1,5 +1,5 @@
 -- ref_universal | Murder Mystery tester
--- v2026-06-03-v32-afk-active-round-detect
+-- v2026-06-03-v33-afk-immediate-high-platform
 
 local Players          = game:GetService("Players")
 local TweenService     = game:GetService("TweenService")
@@ -1129,12 +1129,26 @@ local function findAfkMapReturnCF()
     return nil
 end
 
+local function afkLocalAliveNow()
+    local char = getChar()
+    if not char then return false end
+    local hum = nil
+    _pcall(function() hum = char:FindFirstChildOfClass("Humanoid") end)
+    if hum then
+        local hp = 0
+        _pcall(function() hp = hum.Health end)
+        if hp <= 0 then return false end
+    end
+    local root = getRoot()
+    return root ~= nil
+end
+
 local function canStartAfkFarmHold()
     if not State.afkFarm then return false, "Off" end
     if State.currentPhase == "Ending" then
         return false, "Round ending - waiting for lobby"
     end
-    if State.localDead == true or not isLocalAlive() then
+    if State.localDead == true or not afkLocalAliveNow() then
         return false, "Dead - waiting"
     end
 
@@ -1143,13 +1157,15 @@ local function canStartAfkFarmHold()
         return false, "No role - waiting"
     end
 
-    if not afkLooksLikeRoundContext() then
-        return false, "Armed - waiting for round"
+    -- If the player is physically still in RegularLobby, stay armed.
+    -- If the phase is stale but the player is already in the round map, start immediately.
+    if State.currentPhase == "Lobby" and isRootNearRegularLobby(520) then
+        return false, "Lobby - waiting for map"
     end
 
     if State.currentPhase == "Lobby" or State.currentPhase == "Unknown" then
         State.currentPhase = "Round"
-        State.lastRoundSignal = "AFK map detect"
+        State.lastRoundSignal = "AFK manual map detect"
     end
 
     return true, "OK"
@@ -1240,12 +1256,12 @@ local function startAfkFarmHold(reason)
     end
 
     if State._afkActive and State._afkPlatform and State._afkPlatform.Parent and State._afkHoldCF then
-        State.afkStatus = "High hold above RegularLobby.Spawns.Spawn"
+        State.afkStatus = "High platform active"
         return true
     end
 
     local currentCF = root.CFrame
-    local shouldSaveReturnCF = State.currentPhase ~= "Lobby" and State.currentPhase ~= "Unknown"
+    local shouldSaveReturnCF = not isRootNearRegularLobby(520)
     local mapSpawnCF, mapName, spawnName = nil, nil, nil
     if shouldSaveReturnCF then
         updateAfkActiveMapHint(reason)
@@ -1262,6 +1278,8 @@ local function startAfkFarmHold(reason)
             State._afkActiveMapName = mapName
             State._afkActiveSpawnName = spawnName
         elseif not State._afkReturnCF then
+            -- Fallback: the exact place where the player was in the round map
+            -- before being sent to the high AFK platform.
             State._afkReturnCF = currentCF
         end
     end
@@ -1283,7 +1301,7 @@ local function startAfkFarmHold(reason)
     State._afkPlatform = platform
     State._afkHoldCF = CFrame.new(platformPos + Vector3.new(0, 4.2, 0))
     State._afkActive = true
-    State.afkStatus = "High hold above RegularLobby.Spawns.Spawn"
+    State.afkStatus = "High platform active"
 
     _pcall(function()
         State._afkSavedRootAnchored = root.Anchored
@@ -4048,7 +4066,11 @@ State._afkToggle = W:Toggle("Farm AFK", false, function(v)
             end
         end)
     else
-        if State.currentPhase ~= "Lobby" and State.currentPhase ~= "Unknown" and State.currentPhase ~= "Ending" then
+        local shouldReturnToMap = false
+        if State._afkActive and State.currentPhase ~= "Ending" and afkLocalAliveNow() and getValidLocalAfkRole() then
+            shouldReturnToMap = true
+        end
+        if shouldReturnToMap then
             updateAfkActiveMapHint("ManualReturn")
             releaseAfkFarm("Returned to map spawn", true)
         else
