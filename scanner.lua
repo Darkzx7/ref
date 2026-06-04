@@ -1,5 +1,5 @@
 -- ref_universal | Murder Mystery tester
--- v2026-06-04-v50-safe-boot-rollback-no-throwingknife-watcher
+-- v2026-06-04-v51-safe-throwingknife-hitbox
 
 -- PREBOOT GUARD: runs before any Roblox :GetService/namecall.
 -- Older V42-V44 Throw Hitbox builds installed a namecall hook that reads getgenv handler keys.
@@ -160,6 +160,9 @@ local State = {
     _throwHitboxConn   = nil,
     _throwHitboxLoop   = false,
     _throwLastPulse    = 0,
+    _throwWorkspaceConn = nil,
+    _throwProcessToken = 0,
+    _throwSeen         = {},
     coinCollect        = false,
     coinSpeed          = 4,
     collecting         = false,
@@ -1896,51 +1899,215 @@ function Tester.CycleCooldown()
     return COOLDOWN_OPTIONS[State.cooldownIndex]
 end
 
--- ─── safe throw hitbox input ───────────────────────────────────────────────────
+-- ─── safe throw hitbox watcher ─────────────────────────────────────────────────
+
+local function throwInstKey(inst)
+    local key = nil
+    _pcall(function()
+        if inst and inst.GetDebugId then
+            key = inst:GetDebugId(0)
+        end
+    end)
+    if not key then
+        key = tostring(inst)
+    end
+    return key
+end
+
+local function partPositionSafe(obj)
+    local pos = nil
+    _pcall(function()
+        if obj and obj:IsA("BasePart") then
+            pos = obj.Position
+        elseif obj and obj:IsA("Model") then
+            pos = obj:GetPivot().Position
+        end
+    end)
+    return pos
+end
+
+local function vectorValueSafe(obj)
+    local value = nil
+    _pcall(function()
+        if obj and obj:IsA("Vector3Value") then
+            value = obj.Value
+        end
+    end)
+    return value
+end
+
+local function findThrowingKnifeRoot(inst)
+    if not inst then return nil end
+    local cur = inst
+    for _ = 1, 8 do
+        if not cur then return nil end
+        if cur.Name == "ThrowingKnife" then return cur end
+        cur = cur.Parent
+    end
+    return nil
+end
+
+local function getThrowingKnifeSegment(model)
+    if not model or not model.Parent then return nil, nil, "no model" end
+
+    local blade = findChild(model, "BladePosition")
+    local dirObj = findChild(model, "ThrowDirection")
+    local visual = findChild(model, "KnifeVisual")
+
+    local startPos = partPositionSafe(blade) or partPositionSafe(visual) or partPositionSafe(model)
+    local dir = vectorValueSafe(dirObj)
+
+    if (not dir) or dir.Magnitude < 0.01 then
+        _pcall(function()
+            dir = model:GetPivot().LookVector
+        end)
+    end
+    if (not dir) or dir.Magnitude < 0.01 then
+        local root = getRoot()
+        if root then dir = root.CFrame.LookVector end
+    end
+
+    if not startPos then return nil, nil, "no blade position" end
+    if not dir or dir.Magnitude < 0.01 then return nil, nil, "no throw direction" end
+
+    dir = dir.Unit
+    return startPos, startPos + dir * 520, "throwingknife"
+end
+
+local function getStuckKnifeSegment(stuck)
+    local endPos = partPositionSafe(stuck)
+    if not endPos then return nil, nil, "no stuck position" end
+
+    local startPos = State._lastThrowStart
+    if not startPos then
+        local root = getRoot()
+        if root then startPos = root.Position end
+    end
+    if not startPos then return nil, nil, "no stuck start" end
+
+    return startPos, endPos, "stuckknife"
+end
+
+local function processThrowHitboxSegment(segA, segB, source)
+    if not Alive or not State.throwRangeOn then return false end
+    if State.localDead then State.throwRangeStatus = "Dead"; return false end
+    if roleOfPlayer(LocalPlayer) ~= "Murderer" then State.throwRangeStatus = "Need Murderer"; return false end
+    if not segA or not segB then State.throwRangeStatus = "No throw segment"; return false end
+
+    local target, part, gap = getThrowHitboxTargetOnSegment(segA, segB, State.throwRangeRadius or 22)
+    if not target then
+        State.throwRangeStatus = tostring(source or "Throw")..": no target"
+        return false
+    end
+
+    local ok = pulseThrowHitboxTouch(target, part)
+    State.throwRangeStatus = ok
+        and (tostring(source or "Throw")..": "..target.Name.." | gap "..tostring(math.floor((gap or 0) + 0.5)))
+        or  (tostring(source or "Throw")..": touch failed")
+    return ok
+end
+
+local function processThrowingKnifeModel(model, reason)
+    if not Alive or not State.throwRangeOn or not model or not model.Parent then return end
+    local key = "tk:"..throwInstKey(model)
+    if State._throwSeen[key] then return end
+    State._throwSeen[key] = true
+
+    _spawn(function()
+        State.throwRangeStatus = "ThrowingKnife detected"
+        for i = 1, 8 do
+            if not Alive or not State.throwRangeOn or not model.Parent then break end
+            local segA, segB, why = getThrowingKnifeSegment(model)
+            if segA and segB then
+                State._lastThrowStart = segA
+                local ok = processThrowHitboxSegment(segA, segB, "ThrowingKnife")
+                if ok then break end
+            else
+                State.throwRangeStatus = "ThrowingKnife: "..tostring(why or "no segment")
+            end
+            _wait(0.035)
+        end
+    end)
+end
+
+local function processStuckKnifePart(stuck, reason)
+    if not Alive or not State.throwRangeOn or not stuck or not stuck.Parent then return end
+    local key = "sk:"..throwInstKey(stuck)
+    if State._throwSeen[key] then return end
+    State._throwSeen[key] = true
+
+    _spawn(function()
+        State.throwRangeStatus = "StuckKnife detected"
+        _wait(0.015)
+        local segA, segB, why = getStuckKnifeSegment(stuck)
+        if segA and segB then
+            processThrowHitboxSegment(segA, segB, "StuckKnife")
+        else
+            State.throwRangeStatus = "StuckKnife: "..tostring(why or "no segment")
+        end
+    end)
+end
+
+local function inspectThrowHitboxInstance(inst, reason)
+    if not Alive or not State.throwRangeOn or not inst then return end
+    _pcall(function()
+        if inst.Name == "ThrowingKnife" then
+            processThrowingKnifeModel(inst, reason)
+            return
+        end
+        local root = findThrowingKnifeRoot(inst)
+        if root then
+            processThrowingKnifeModel(root, reason)
+            return
+        end
+        if inst.Name == "StuckKnife" then
+            processStuckKnifePart(inst, reason)
+        end
+    end)
+end
+
+local function scanExistingThrowObjects()
+    _pcall(function()
+        local tk = workspace:FindFirstChild("ThrowingKnife")
+        if tk then inspectThrowHitboxInstance(tk, "existing") end
+        local sk = workspace:FindFirstChild("StuckKnife")
+        if sk then inspectThrowHitboxInstance(sk, "existing") end
+    end)
+end
 
 local function stopThrowHitboxSafe()
     State.throwRangeOn = false
     State.throwRangeStatus = "Idle"
     safeDisconnect(State._throwHitboxConn)
     State._throwHitboxConn = nil
-end
-
-local function hookCurrentKnifeForThrowHitbox()
-    safeDisconnect(State._throwHitboxConn)
-    State._throwHitboxConn = nil
-    local tool = findTool("Knife")
-    if not tool then return false end
-    State._throwHitboxConn = trackConn(tool.Activated:Connect(function()
-        if not Alive or not State.throwRangeOn then return end
-        local t = testerTime()
-        if State._throwLastPulse and t - State._throwLastPulse < 0.35 then return end
-        State._throwLastPulse = t
-        _spawn(function()
-            _wait(0.085)
-            Tester.ThrowHitboxFromAim()
-        end)
-    end))
-    return true
+    safeDisconnect(State._throwWorkspaceConn)
+    State._throwWorkspaceConn = nil
+    State._throwHitboxLoop = false
 end
 
 local function startThrowHitboxSafe()
+    safeDisconnect(State._throwHitboxConn)
+    State._throwHitboxConn = nil
+    safeDisconnect(State._throwWorkspaceConn)
+    State._throwWorkspaceConn = nil
+
+    State._throwSeen = {}
+    State.throwRangeStatus = "Watching ThrowingKnife"
+    State._throwWorkspaceConn = trackConn(workspace.DescendantAdded:Connect(function(inst)
+        if not Alive or not State.throwRangeOn then return end
+        inspectThrowHitboxInstance(inst, "descendant_added")
+    end))
+
     if State._throwHitboxLoop then return end
     State._throwHitboxLoop = true
-    State.throwRangeStatus = "Safe passive - no hook"
-    hookCurrentKnifeForThrowHitbox()
     _spawn(function()
-        local lastTool = nil
         while Alive and State.throwRangeOn do
-            local tool = findTool("Knife")
-            if tool ~= lastTool then
-                lastTool = tool
-                hookCurrentKnifeForThrowHitbox()
-            end
-            _wait(0.5)
+            scanExistingThrowObjects()
+            _wait(0.12)
         end
         State._throwHitboxLoop = false
-        safeDisconnect(State._throwHitboxConn)
-        State._throwHitboxConn = nil
+        safeDisconnect(State._throwWorkspaceConn)
+        State._throwWorkspaceConn = nil
         if not State.throwRangeOn then State.throwRangeStatus = "Idle" end
     end)
 end
@@ -4322,7 +4489,7 @@ W:Slider("Throw Hitbox Radius", 4, 45, 22, function(v)
     State.throwRangeRadius = v
 end)
 
-W:Button("Throw Hitbox Scan Once", function()
+W:Button("Throw Hitbox Debug Aim", function()
     Tester.ThrowHitboxFromAim()
 end)
 
