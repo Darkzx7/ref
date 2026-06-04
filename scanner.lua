@@ -1,5 +1,5 @@
 -- ref_universal | Murder Mystery tester
--- v2026-06-03-v37-afk-under-round-map-platform
+-- v2026-06-03-v38-afk-500-under-map-gundrop-return
 
 local Players          = game:GetService("Players")
 local TweenService     = game:GetService("TweenService")
@@ -194,6 +194,7 @@ local State = {
     _afkActiveMapCF    = nil,
     _afkActiveSpawnName = nil,
     _afkReleaseToMap   = false,
+    _afkPauseForGunDrop = false,
     lastEndReason      = nil,
     lastWinnerRole     = nil,
     lastCreditedPlayer = nil,
@@ -1047,19 +1048,19 @@ local function getAfkUnderRoundMapPlatformPos()
             State._afkActiveMapName = chosen.map.Name
             State._afkActiveMapCF = chosen.locationCF or getMapLocationCF(chosen.map)
             State._afkActiveSpawnName = chosen.spawn and chosen.spawn.Name or nil
-            return Vector3.new(pos.X, bottomY - 1000, pos.Z), chosen.map.Name
+            return Vector3.new(pos.X, bottomY - 500, pos.Z), chosen.map.Name
         end
     end
 
     local root = getRoot()
     if root then
         local pos = root.Position
-        return Vector3.new(pos.X, pos.Y - 1000, pos.Z), "CurrentMap"
+        return Vector3.new(pos.X, pos.Y - 500, pos.Z), "CurrentMap"
     end
 
     local lobbyCF = getRegularLobbySpawnBaseCF()
     local pos = lobbyCF and lobbyCF.Position or Vector3.new(0, 0, 0)
-    return Vector3.new(pos.X, pos.Y - 1000, pos.Z), "Fallback"
+    return Vector3.new(pos.X, pos.Y - 500, pos.Z), "Fallback"
 end
 
 local function getValidLocalAfkRole()
@@ -1262,6 +1263,7 @@ local function releaseAfkFarm(statusText, returnToRoundMap)
     State._afkSavedJumpPower = nil
     State._afkEndWaitToken = nil
     State._afkReleaseToMap = false
+    State._afkPauseForGunDrop = false
     if not returnToRoundMap then
         State._afkReturnCF = nil
     end
@@ -1364,6 +1366,10 @@ local function startAfkFarmHold(reason)
     State._afkHoldConn = trackConn(RunService.Heartbeat:Connect(function()
         if not Alive or not State.afkFarm or not State._afkActive then
             releaseAfkFarm(State.afkFarm and "Armed - waiting for round" or "Idle", false)
+            return
+        end
+
+        if State._afkPauseForGunDrop then
             return
         end
 
@@ -3561,6 +3567,52 @@ local function collectGunDrop(gd)
     return collected
 end
 
+local function collectGunDropWithAfkReturn(gd)
+    local wasAfk = State.afkFarm and State._afkActive and State._afkHoldCF ~= nil
+    local afkCF = wasAfk and State._afkHoldCF or nil
+
+    if wasAfk then
+        State._afkPauseForGunDrop = true
+        State.afkStatus = "GunDrop pickup"
+        local root = getRoot()
+        if root then
+            _pcall(function()
+                root.Anchored = false
+                root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+            end)
+        end
+    end
+
+    local ok, result = _pcall(function()
+        return collectGunDrop(gd)
+    end)
+
+    if wasAfk then
+        State._afkPauseForGunDrop = false
+        if Alive and State.afkFarm and State._afkActive and afkCF and afkLocalAliveNow() then
+            local root = getRoot()
+            if root then
+                _pcall(function()
+                    root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                    root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+                    root.CFrame = afkCF
+                    root.Anchored = true
+                end)
+                State._afkHoldCF = afkCF
+                State.afkStatus = "Returned to AFK platform"
+            end
+        end
+    end
+
+    if not ok then
+        State.lastGunDropStatus = "GunDrop error"
+        return false
+    end
+
+    return result
+end
+
 local function startGunDropWatch()
     if State._gunDropWatch then return end
     State._gunDropWatch = true
@@ -3579,7 +3631,7 @@ local function startGunDropWatch()
                 local can = canCollectGunDrop()
                 if Alive and State.gunDropOn and can and gd and gd.Parent then
                     updateGunDropState(gd)
-                    collectGunDrop(gd)
+                    collectGunDropWithAfkReturn(gd)
                 end
             end)
         end
@@ -3591,7 +3643,7 @@ local function startGunDropWatch()
             updateGunDropState(gd)
             local can, why = canCollectGunDrop()
             if gd and can then
-                collectGunDrop(gd)
+                collectGunDropWithAfkReturn(gd)
                 _wait(0.22)
             else
                 if not can then State.lastGunDropStatus = why end
@@ -4159,7 +4211,7 @@ W:Button("Collect GunDrop Now", function()
     updateGunDropState(gd)
     if gd then
         _spawn(function()
-            collectGunDrop(gd)
+            collectGunDropWithAfkReturn(gd)
         end)
     end
 end)
