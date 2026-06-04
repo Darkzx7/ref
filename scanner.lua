@@ -1,5 +1,5 @@
 -- ref_universal | Murder Mystery tester
--- v2026-06-03-v29-afk-map-location-spawns
+-- v2026-06-03-v30-afk-role-guard-regular-lobby
 
 local Players          = game:GetService("Players")
 local TweenService     = game:GetService("TweenService")
@@ -920,6 +920,25 @@ local function cframeAboveSpawn(spawnPart)
     return cf
 end
 
+local function getRegularLobbySpawnCF()
+    local lobby = nil
+    _pcall(function()
+        lobby = workspace:FindFirstChild("RegularLobby")
+            or workspace:FindFirstChild("Regular Lobby")
+            or workspace:FindFirstChild("Lobby")
+    end)
+    if not lobby then return nil end
+
+    local spawns = findSpawnsFolder(lobby)
+    if not spawns then return nil end
+
+    local referenceCF = instanceWorldCFrame(lobby)
+    local spawnPart = pickSpawnPart(spawns, referenceCF)
+    if not spawnPart then return nil end
+
+    return cframeAboveSpawn(spawnPart), spawnPart.Name
+end
+
 local function getRoundMapSpawnCF()
     local candidates = collectRoundMapCandidates()
     local chosen = candidates[1]
@@ -962,12 +981,39 @@ local function findAfkMapReturnCF()
     return nil
 end
 
+local function canStartAfkFarmHold()
+    if not State.afkFarm then return false, "Off" end
+    if State.currentPhase == "Lobby" or State.currentPhase == "Unknown" then
+        return false, "Armed - waiting for round"
+    end
+    if State.currentPhase == "Ending" then
+        return false, "Round ending - waiting for lobby"
+    end
+    if State.localDead == true or not isLocalAlive() then
+        return false, "Dead - waiting"
+    end
+
+    local role = State.localRole or State.roles[LocalPlayer.Name]
+    if not role or role == "?" then
+        return false, "No role - waiting"
+    end
+
+    return true, "OK"
+end
+
 local function releaseAfkFarm(statusText, returnToRoundMap)
     safeDisconnect(State._afkHoldConn)
     State._afkHoldConn = nil
 
     local root = getRoot()
     local targetCF = returnToRoundMap and findAfkMapReturnCF() or nil
+    if not targetCF and not returnToRoundMap and State.currentPhase == "Lobby" then
+        local lobbyCF, lobbySpawnName = getRegularLobbySpawnCF()
+        if lobbyCF then
+            targetCF = lobbyCF
+            State.afkStatus = "Returning to RegularLobby spawn"
+        end
+    end
     if root then
         _pcall(function()
             root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
@@ -1022,6 +1068,17 @@ end
 
 local function startAfkFarmHold(reason)
     if not Alive or not State.afkFarm then return false end
+
+    local allowed, why = canStartAfkFarmHold()
+    if not allowed then
+        if State._afkActive then
+            releaseAfkFarm(why, false)
+        else
+            State.afkStatus = why
+        end
+        return false
+    end
+
     local root = getRoot()
     if not root then
         State.afkStatus = "Waiting for character"
@@ -1098,6 +1155,13 @@ local function startAfkFarmHold(reason)
             releaseAfkFarm(State.afkFarm and "Armed - waiting for round" or "Idle", false)
             return
         end
+
+        local allowedNow, whyNow = canStartAfkFarmHold()
+        if not allowedNow then
+            releaseAfkFarm(whyNow, false)
+            return
+        end
+
         local r = getRoot()
         if not r or not State._afkHoldCF then return end
         _pcall(function()
@@ -1118,6 +1182,13 @@ local function armAfkFarm(reason)
         State.afkStatus = "Armed - waiting for round"
         return
     end
+
+    local allowed, why = canStartAfkFarmHold()
+    if not allowed then
+        State.afkStatus = why
+        return
+    end
+
     startAfkFarmHold(reason)
 end
 
@@ -3812,10 +3883,12 @@ State._afkToggle = W:Toggle("Farm AFK", false, function(v)
         end
         armAfkFarm("Manual")
     else
-        if State.currentPhase ~= "Lobby" and State.currentPhase ~= "Unknown" then
+        if State.currentPhase ~= "Lobby" and State.currentPhase ~= "Unknown" and State.currentPhase ~= "Ending" then
             updateAfkActiveMapHint("ManualReturn")
+            releaseAfkFarm("Returned to map spawn", true)
+        else
+            releaseAfkFarm("Returned to RegularLobby spawn", false)
         end
-        releaseAfkFarm("Returned to map spawn", true)
     end
 end)
 
@@ -3877,6 +3950,9 @@ _spawn(function()
         _wait(1)
         if State.currentPhase == "Lobby" then
             rememberAfkLobbyBase(false)
+        end
+        if State.afkFarm and not State._afkActive and State.currentPhase ~= "Lobby" and State.currentPhase ~= "Unknown" and State.currentPhase ~= "Ending" then
+            armAfkFarm("StatusRetry")
         end
         local parts = {}
         if State.coinCollect then parts[#parts+1] = "coins" end
