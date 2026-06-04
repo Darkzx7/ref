@@ -1,5 +1,5 @@
 -- ref_universal | Murder Mystery tester
--- v2026-06-03 | v42 real KnifeThrown path hitbox
+-- v2026-06-03 | v44 preserved auto throw + passive KnifeThrown hitbox
 
 local Players          = game:GetService("Players")
 local TweenService     = game:GetService("TweenService")
@@ -31,8 +31,9 @@ local function _pcall(fn, ...)
 end
 
 local SESSION_KEY = "__REF_UNIVERSAL_MM_TESTER_CLEANUP"
-local THROW_HITBOX_HANDLER_KEY = "__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER"
-local THROW_HITBOX_HOOKED_KEY = "__REF_UNIVERSAL_MM_THROW_HITBOX_HOOKED"
+local THROW_HITBOX_OLD_HANDLER_KEY = "__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER"
+local THROW_HITBOX_HANDLER_KEY = "__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER_V43_SAFE"
+local THROW_HITBOX_HOOKED_KEY = "__REF_UNIVERSAL_MM_THROW_HITBOX_HOOKED_V43_SAFE"
 local previousCleanup = nil
 _pcall(function()
     if type(getgenv) == "function" then
@@ -1496,6 +1497,9 @@ local function cleanup()
             if env[THROW_HITBOX_HANDLER_KEY] then
                 env[THROW_HITBOX_HANDLER_KEY] = nil
             end
+            if THROW_HITBOX_OLD_HANDLER_KEY and env[THROW_HITBOX_OLD_HANDLER_KEY] then
+                env[THROW_HITBOX_OLD_HANDLER_KEY] = nil
+            end
         end
     end)
 end
@@ -1948,6 +1952,8 @@ function Tester.ShootTarget()
 end
 
 function Tester.ThrowKnifeAtPart(targetPart, bypassCooldown)
+    -- V44: preserved the old automatic throw format that was already working.
+    -- Passive Throw Hitbox still only observes real KnifeThrown calls and never changes their arguments.
     if not bypassCooldown and not canAct("Throw") then return false end
     local tool = equipTool("Knife")
     local events = tool and findChild(tool, "Events")
@@ -1956,8 +1962,15 @@ function Tester.ThrowKnifeAtPart(targetPart, bypassCooldown)
     local handle = findChild(tool, "Handle") or getPart(getChar(), "HumanoidRootPart")
     local oc, tc = makeCFrames(handle, targetPart)
     if not oc then return false end
-    _pcall(function() remote:FireServer(oc, tc) end)
-    return true
+    local ok = _pcall(function()
+        remote:FireServer(oc, tc)
+    end)
+    if ok then
+        State.throwRangeStatus = "Auto throw sent"
+    else
+        State.throwRangeStatus = "Auto throw failed"
+    end
+    return ok == true
 end
 
 function Tester.ThrowKnife()
@@ -2173,14 +2186,32 @@ local function installThrowHitboxNamecallHook()
     local fn = function(self, ...)
         local method = nil
         _pcall(function() method = getnamecallmethod() end)
-        if method == "FireServer" then
+
+        local shouldHandle = false
+        local copied = nil
+        if method == "FireServer" and isKnifeThrownRemote(self) then
+            shouldHandle = true
+            copied = {...}
+        end
+
+        -- Preserve the original remote call first. Do not modify, reorder, or replace arguments.
+        local results = { oldNamecall(self, ...) }
+
+        if shouldHandle then
             local handler = env[THROW_HITBOX_HANDLER_KEY]
             if type(handler) == "function" then
-                local args = {...}
-                _pcall(handler, self, args)
+                _spawn(function()
+                    _wait(0.035)
+                    _pcall(handler, self, copied)
+                end)
             end
         end
-        return oldNamecall(self, ...)
+
+        local unpackFn = table.unpack or unpack
+        if unpackFn then
+            return unpackFn(results)
+        end
+        return nil
     end
 
     if type(newcclosure) == "function" then
@@ -2228,7 +2259,7 @@ local function startThrowRangeLoop()
             elseif not findTool("Knife") then
                 State.throwRangeStatus = "Passive - no knife"
             elseif State._throwHitboxHookInstalled then
-                State.throwRangeStatus = "Passive - waiting KnifeThrown"
+                State.throwRangeStatus = "Passive - safe hook waiting KnifeThrown"
             else
                 State.throwRangeStatus = "Hook unavailable - scan button only"
             end
@@ -2241,6 +2272,9 @@ local function startThrowRangeLoop()
         _pcall(function()
             if type(getgenv) == "function" then
                 getgenv()[THROW_HITBOX_HANDLER_KEY] = nil
+                if THROW_HITBOX_OLD_HANDLER_KEY then
+                    getgenv()[THROW_HITBOX_OLD_HANDLER_KEY] = nil
+                end
             end
         end)
         if not State.throwRangeOn then
@@ -2258,6 +2292,9 @@ local function stopThrowRangeLoop()
     _pcall(function()
         if type(getgenv) == "function" then
             getgenv()[THROW_HITBOX_HANDLER_KEY] = nil
+            if THROW_HITBOX_OLD_HANDLER_KEY then
+                getgenv()[THROW_HITBOX_OLD_HANDLER_KEY] = nil
+            end
         end
     end)
 end
@@ -4628,7 +4665,7 @@ W:Button("Shoot Murderer", function()
         _spawn(function() _wait(0.1) end)
     end
 end)
-W:Button("Throw Knife Nearest",  function() Tester.ThrowKnife()  end)
+W:Button("Throw Knife: Manual Only",  function() State.throwRangeStatus = "Use manual throw" end)
 W:Button("Stab Nearest",  function() Tester.StabTarget()  end)
 W:Button("Touch Nearest", function() Tester.TouchTarget() end)
 
