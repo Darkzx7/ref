@@ -1,5 +1,5 @@
 -- ref_universal | Murder Mystery tester
--- v61: stable main rollback, no integrated stab hitbox
+-- v62: v54 stable + isolated embedded stab hitbox patch
 -- v2026-06-04-v52-stable-childadded-throwingknife-hitbox
 
 -- PREBOOT GUARD: runs before any Roblox :GetService/namecall.
@@ -4715,3 +4715,559 @@ _spawn(function()
         refreshRolesBurst("Init")
     end
 end)
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- ISOLATED STAB HITBOX MODULE
+-- This is intentionally embedded as a delayed, sandboxed module.
+-- It behaves like the standalone patch that worked, but ships in this same file.
+-- It does not touch Throw Hitbox internals, does not hook __namecall,
+-- does not alter KnifeThrown, and skips itself when ThrowingKnife exists.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+do
+    local function __REF_RUN_ISOLATED_STAB_HITBOX_PATCH()
+        -- ref_stab_hitbox_patch_v1.lua
+        -- Standalone passive Stab Hitbox patch.
+        -- Run this AFTER the main ref script is loaded.
+        -- It does not hook __namecall, does not alter KnifeThrown, and does not touch Throw Hitbox.
+
+        local Players = game:GetService("Players")
+        local UserInputService = game:GetService("UserInputService")
+        local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+        local LocalPlayer = Players.LocalPlayer
+
+        local ENV = _G
+        pcall(function()
+            if type(getgenv) == "function" then
+                ENV = getgenv()
+            end
+        end)
+
+        local OLD = ENV.__REF_STAB_HITBOX_PATCH
+        if type(OLD) == "table" and type(OLD.Stop) == "function" then
+            pcall(function()
+                OLD:Stop("replaced")
+            end)
+        end
+
+        local Patch = {
+            Enabled = false,
+            Radius = 10,
+            Status = "Off",
+            Connections = {},
+            Roles = {},
+            LocalRole = nil,
+            LocalDead = false,
+            LastPulse = 0,
+            LastTargetHit = {},
+        }
+        ENV.__REF_STAB_HITBOX_PATCH = Patch
+
+        local function safe(fn, ...)
+            if type(fn) ~= "function" then
+                return false, "not_function"
+            end
+            return pcall(fn, ...)
+        end
+
+        local function connect(sig, fn)
+            if not sig or type(fn) ~= "function" then return nil end
+            local ok, conn = pcall(function()
+                return sig:Connect(fn)
+            end)
+            if ok and conn then
+                table.insert(Patch.Connections, conn)
+                return conn
+            end
+            return nil
+        end
+
+        function Patch:Stop(reason)
+            self.Enabled = false
+            self.Status = "Stopped: " .. tostring(reason or "manual")
+            for _, conn in ipairs(self.Connections) do
+                pcall(function()
+                    conn:Disconnect()
+                end)
+            end
+            self.Connections = {}
+            pcall(function()
+                if self.Gui then
+                    self.Gui:Destroy()
+                end
+            end)
+        end
+
+        local function waitSmall(t)
+            if type(task) == "table" and type(task.wait) == "function" then
+                return task.wait(t or 0)
+            end
+            return wait(t or 0)
+        end
+
+        local function spawnTask(fn)
+            if type(task) == "table" and type(task.spawn) == "function" then
+                return task.spawn(fn)
+            end
+            return spawn(fn)
+        end
+
+        local function now()
+            if type(os) == "table" and type(os.clock) == "function" then
+                local ok, v = pcall(os.clock)
+                if ok then return v end
+            end
+            return tick()
+        end
+
+        local function getChar(player)
+            player = player or LocalPlayer
+            return player and player.Character
+        end
+
+        local function getHumanoid(char)
+            return char and char:FindFirstChildOfClass("Humanoid")
+        end
+
+        local function isAliveChar(char)
+            local hum = getHumanoid(char)
+            if not hum then return false end
+            return hum.Health > 0
+        end
+
+        local function getRoot(char)
+            if not char then return nil end
+            return char:FindFirstChild("HumanoidRootPart")
+                or char:FindFirstChild("UpperTorso")
+                or char:FindFirstChild("Torso")
+        end
+
+        local function findKnifeEquipped()
+            local char = getChar(LocalPlayer)
+            return char and char:FindFirstChild("Knife")
+        end
+
+        local function findKnifeAny()
+            local char = getChar(LocalPlayer)
+            local bp = LocalPlayer and LocalPlayer:FindFirstChildOfClass("Backpack")
+            return (char and char:FindFirstChild("Knife")) or (bp and bp:FindFirstChild("Knife"))
+        end
+
+        local function getKnifeRemotes()
+            local tool = findKnifeAny()
+            local events = tool and tool:FindFirstChild("Events")
+            local stab = events and events:FindFirstChild("KnifeStabbed")
+            local touch = events and events:FindFirstChild("HandleTouched")
+            return stab, touch
+        end
+
+        local function roleOf(player)
+            if not player then return nil end
+            if player == LocalPlayer then
+                if Patch.LocalRole and Patch.LocalRole ~= "?" and Patch.LocalRole ~= "" then
+                    return Patch.LocalRole
+                end
+            end
+            local r = Patch.Roles[player.Name]
+            if r and r ~= "?" and r ~= "" then return r end
+
+            local attrRole = nil
+            pcall(function()
+                attrRole = player:GetAttribute("Role") or player:GetAttribute("CurrentRole") or player:GetAttribute("RoundRole")
+            end)
+            if type(attrRole) == "string" and attrRole ~= "" and attrRole ~= "?" then
+                return attrRole
+            end
+
+            local v = player:FindFirstChild("Role") or player:FindFirstChild("CurrentRole") or player:FindFirstChild("RoundRole")
+            if v and v:IsA("StringValue") and v.Value ~= "" and v.Value ~= "?" then
+                return v.Value
+            end
+
+            return nil
+        end
+
+        local function isLocalMurdererOrKnife()
+            local r = roleOf(LocalPlayer)
+            if r == "Murderer" then return true end
+            -- fallback when roles have not replicated but the knife is equipped
+            return findKnifeEquipped() ~= nil
+        end
+
+        local function isValidTarget(player)
+            if not player or player == LocalPlayer then return false end
+            local char = getChar(player)
+            if not isAliveChar(char) then return false end
+
+            local r = roleOf(player)
+            if r == "Murderer" then return false end
+            if r == "Innocent" or r == "Sheriff" or r == "Hero" then return true end
+
+            -- If roles are not known yet, allow fallback only when local has knife equipped.
+            -- This avoids blocking the patch in rounds where PlayerDataChanged arrived late.
+            if isLocalMurdererOrKnife() then
+                return true
+            end
+
+            return false
+        end
+
+        local TARGET_PARTS = {
+            "HumanoidRootPart",
+            "UpperTorso",
+            "LowerTorso",
+            "Torso",
+            "Head",
+            "LeftUpperArm",
+            "RightUpperArm",
+            "LeftUpperLeg",
+            "RightUpperLeg",
+        }
+
+        local function getTargetParts(char)
+            local out = {}
+            if not char then return out end
+            for _, name in ipairs(TARGET_PARTS) do
+                local p = char:FindFirstChild(name)
+                if p and p:IsA("BasePart") then
+                    table.insert(out, p)
+                end
+            end
+            return out
+        end
+
+        local function nearestTarget(radius)
+            local root = getRoot(getChar(LocalPlayer))
+            if not root then return nil, nil, nil end
+            local rootPos = root.Position
+
+            radius = tonumber(radius) or 10
+            local bestPlayer = nil
+            local bestPart = nil
+            local bestDist = math.huge
+
+            for _, player in ipairs(Players:GetPlayers()) do
+                if isValidTarget(player) then
+                    local char = getChar(player)
+                    for _, part in ipairs(getTargetParts(char)) do
+                        local dist = (rootPos - part.Position).Magnitude
+                        if dist <= radius and dist < bestDist then
+                            bestPlayer = player
+                            bestPart = part
+                            bestDist = dist
+                        end
+                    end
+                end
+            end
+
+            return bestPlayer, bestPart, bestDist
+        end
+
+        local function throwingKnifePresent()
+            local found = false
+            pcall(function()
+                found = workspace:FindFirstChild("ThrowingKnife") ~= nil
+            end)
+            return found
+        end
+
+        local function applyStab(target, firstPart)
+            if not target or not firstPart then return false end
+            if not isAliveChar(getChar(target)) then return false end
+
+            local t = now()
+            local last = Patch.LastTargetHit[target.Name]
+            if last and t - last < 0.22 then
+                return true
+            end
+            Patch.LastTargetHit[target.Name] = t
+
+            local stabRemote, touchRemote = getKnifeRemotes()
+            if not stabRemote or not touchRemote then
+                Patch.Status = "Missing Knife remotes"
+                return false
+            end
+
+            safe(function()
+                stabRemote:FireServer()
+            end)
+
+            local parts = { firstPart }
+            for _, p in ipairs(getTargetParts(getChar(target))) do
+                if p ~= firstPart then
+                    table.insert(parts, p)
+                end
+                if #parts >= 6 then break end
+            end
+
+            for _ = 1, 2 do
+                if not Patch.Enabled then return false end
+                for _, p in ipairs(parts) do
+                    if p and p.Parent then
+                        safe(function()
+                            touchRemote:FireServer(p)
+                        end)
+                        waitSmall(0.004)
+                    end
+                end
+                waitSmall(0.008)
+            end
+
+            return true
+        end
+
+        local function runFromInput()
+            if not Patch.Enabled then return end
+
+            local char = getChar(LocalPlayer)
+            if not isAliveChar(char) then
+                Patch.Status = "Dead"
+                return
+            end
+
+            if not findKnifeEquipped() then
+                Patch.Status = "Knife not equipped"
+                return
+            end
+
+            if not isLocalMurdererOrKnife() then
+                Patch.Status = "Need Murderer"
+                return
+            end
+
+            local t = now()
+            if Patch.LastPulse and t - Patch.LastPulse < 0.16 then
+                return
+            end
+            Patch.LastPulse = t
+
+            spawnTask(function()
+                waitSmall(0.075)
+
+                if not Patch.Enabled then return end
+
+                -- If a real throw object appeared, this was a throw. Let Throw Hitbox handle it.
+                if throwingKnifePresent() then
+                    Patch.Status = "Throw detected - skipped"
+                    return
+                end
+
+                local target, part, dist = nearestTarget(Patch.Radius)
+                if not target or not part then
+                    Patch.Status = "No target in range"
+                    return
+                end
+
+                local ok = applyStab(target, part)
+                if ok then
+                    Patch.Status = "Stab hitbox: " .. target.Name .. " | dist " .. tostring(math.floor((dist or 0) + 0.5))
+                else
+                    Patch.Status = "Stab failed"
+                end
+            end)
+        end
+
+        local function parsePlayerData(data)
+            if type(data) ~= "table" then return end
+
+            for key, value in pairs(data) do
+                if type(key) == "string" and type(value) == "table" then
+                    local role = value.Role or value.role
+                    if type(role) == "string" then
+                        Patch.Roles[key] = role
+                        if key == LocalPlayer.Name then
+                            Patch.LocalRole = role
+                            Patch.LocalDead = value.Dead == true or value.dead == true
+                        end
+                    end
+                elseif type(value) == "table" then
+                    local name = value.Name or value.PlayerName or value.Username
+                    local role = value.Role or value.role
+                    if type(name) == "string" and type(role) == "string" then
+                        Patch.Roles[name] = role
+                        if name == LocalPlayer.Name then
+                            Patch.LocalRole = role
+                            Patch.LocalDead = value.Dead == true or value.dead == true
+                        end
+                    end
+                end
+            end
+        end
+
+        local function listenRoles()
+            local remote = ReplicatedStorage:FindFirstChild("Remotes")
+                and ReplicatedStorage.Remotes:FindFirstChild("Gameplay")
+                and ReplicatedStorage.Remotes.Gameplay:FindFirstChild("PlayerDataChanged")
+
+            if remote and remote:IsA("RemoteEvent") then
+                connect(remote.OnClientEvent, function(...)
+                    local args = { ... }
+                    for _, arg in ipairs(args) do
+                        parsePlayerData(arg)
+                    end
+                end)
+            end
+
+            local endNames = { "VictoryScreen", "RoundEndFade" }
+            for _, name in ipairs(endNames) do
+                local r = ReplicatedStorage:FindFirstChild("Remotes")
+                    and ReplicatedStorage.Remotes:FindFirstChild("Gameplay")
+                    and ReplicatedStorage.Remotes.Gameplay:FindFirstChild(name)
+                if r and r:IsA("RemoteEvent") then
+                    connect(r.OnClientEvent, function()
+                        Patch.LocalRole = nil
+                        Patch.Roles = {}
+                        Patch.Status = "Round ended"
+                    end)
+                end
+            end
+        end
+
+        local function makeButton(parent, text, pos, size)
+            local b = Instance.new("TextButton")
+            b.Size = size or UDim2.new(1, -12, 0, 26)
+            b.Position = pos
+            b.BackgroundColor3 = Color3.fromRGB(35, 38, 48)
+            b.BorderSizePixel = 0
+            b.Text = text
+            b.TextColor3 = Color3.fromRGB(230, 235, 245)
+            b.TextSize = 12
+            b.Font = Enum.Font.GothamSemibold
+            b.Parent = parent
+            local c = Instance.new("UICorner")
+            c.CornerRadius = UDim.new(0, 6)
+            c.Parent = b
+            return b
+        end
+
+        local function buildGui()
+            local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+            if not pg then return end
+
+            local old = pg:FindFirstChild("RefStabHitboxPatch")
+            if old then old:Destroy() end
+
+            local gui = Instance.new("ScreenGui")
+            gui.Name = "RefStabHitboxPatch"
+            gui.ResetOnSpawn = false
+            gui.DisplayOrder = 999998
+            gui.Parent = pg
+
+            local frame = Instance.new("Frame")
+            frame.Size = UDim2.new(0, 210, 0, 132)
+            frame.Position = UDim2.new(0, 258, 0.5, -66)
+            frame.BackgroundColor3 = Color3.fromRGB(16, 17, 22)
+            frame.BorderSizePixel = 0
+            frame.Active = true
+            frame.Parent = gui
+
+            local corner = Instance.new("UICorner")
+            corner.CornerRadius = UDim.new(0, 10)
+            corner.Parent = frame
+
+            local title = Instance.new("TextLabel")
+            title.Size = UDim2.new(1, -12, 0, 25)
+            title.Position = UDim2.new(0, 8, 0, 4)
+            title.BackgroundTransparency = 1
+            title.Text = "Stab Hitbox Patch"
+            title.TextColor3 = Color3.fromRGB(220, 225, 240)
+            title.TextSize = 13
+            title.Font = Enum.Font.GothamBold
+            title.TextXAlignment = Enum.TextXAlignment.Left
+            title.Parent = frame
+
+            local toggle = makeButton(frame, "Stab Hitbox: OFF", UDim2.new(0, 6, 0, 32))
+            local minus = makeButton(frame, "-", UDim2.new(0, 6, 0, 64), UDim2.new(0, 40, 0, 26))
+            local plus = makeButton(frame, "+", UDim2.new(1, -46, 0, 64), UDim2.new(0, 40, 0, 26))
+
+            local radiusLbl = Instance.new("TextLabel")
+            radiusLbl.Size = UDim2.new(1, -96, 0, 26)
+            radiusLbl.Position = UDim2.new(0, 48, 0, 64)
+            radiusLbl.BackgroundTransparency = 1
+            radiusLbl.TextColor3 = Color3.fromRGB(200, 210, 230)
+            radiusLbl.TextSize = 12
+            radiusLbl.Font = Enum.Font.Gotham
+            radiusLbl.Text = "Range: " .. tostring(Patch.Radius)
+            radiusLbl.Parent = frame
+
+            local statusLbl = Instance.new("TextLabel")
+            statusLbl.Size = UDim2.new(1, -12, 0, 34)
+            statusLbl.Position = UDim2.new(0, 6, 0, 94)
+            statusLbl.BackgroundTransparency = 1
+            statusLbl.TextColor3 = Color3.fromRGB(150, 160, 180)
+            statusLbl.TextSize = 10
+            statusLbl.Font = Enum.Font.Gotham
+            statusLbl.TextWrapped = true
+            statusLbl.Text = "Status: Off"
+            statusLbl.Parent = frame
+
+            toggle.MouseButton1Click:Connect(function()
+                Patch.Enabled = not Patch.Enabled
+                Patch.Status = Patch.Enabled and "Waiting manual stab" or "Off"
+                toggle.Text = Patch.Enabled and "Stab Hitbox: ON" or "Stab Hitbox: OFF"
+            end)
+
+            minus.MouseButton1Click:Connect(function()
+                Patch.Radius = math.max(4, Patch.Radius - 1)
+                radiusLbl.Text = "Range: " .. tostring(Patch.Radius)
+            end)
+
+            plus.MouseButton1Click:Connect(function()
+                Patch.Radius = math.min(28, Patch.Radius + 1)
+                radiusLbl.Text = "Range: " .. tostring(Patch.Radius)
+            end)
+
+            connect(UserInputService.InputBegan, function(input, gp)
+                if gp or not Patch.Enabled then return end
+                local isClick = input.UserInputType == Enum.UserInputType.MouseButton1
+                    or input.UserInputType == Enum.UserInputType.Touch
+                if isClick then
+                    runFromInput()
+                end
+            end)
+
+            spawnTask(function()
+                while Patch.Gui and Patch.Gui.Parent do
+                    statusLbl.Text = "Status: " .. tostring(Patch.Status)
+                    toggle.Text = Patch.Enabled and "Stab Hitbox: ON" or "Stab Hitbox: OFF"
+                    radiusLbl.Text = "Range: " .. tostring(Patch.Radius)
+                    waitSmall(0.25)
+                end
+            end)
+
+            Patch.Gui = gui
+        end
+
+        listenRoles()
+        buildGui()
+
+        Patch.Status = "Loaded"
+    end
+
+    local function __REF_SAFE_START_ISOLATED_STAB_HITBOX_PATCH()
+        local ok, err = pcall(__REF_RUN_ISOLATED_STAB_HITBOX_PATCH)
+        if not ok then
+            pcall(function()
+                local env = _G
+                if type(getgenv) == "function" then
+                    local got = getgenv()
+                    if type(got) == "table" then
+                        env = got
+                    end
+                end
+                env.__REF_STAB_HITBOX_PATCH_ERROR = tostring(err)
+            end)
+        end
+    end
+
+    if type(task) == "table" and type(task.defer) == "function" then
+        task.defer(__REF_SAFE_START_ISOLATED_STAB_HITBOX_PATCH)
+    elseif type(task) == "table" and type(task.spawn) == "function" then
+        task.spawn(__REF_SAFE_START_ISOLATED_STAB_HITBOX_PATCH)
+    elseif type(spawn) == "function" then
+        spawn(__REF_SAFE_START_ISOLATED_STAB_HITBOX_PATCH)
+    else
+        __REF_SAFE_START_ISOLATED_STAB_HITBOX_PATCH()
+    end
+end
