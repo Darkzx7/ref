@@ -1,5 +1,5 @@
 -- ref_universal | Murder Mystery tester
--- v56: throw hitbox legit range tuning + passive stab hitbox + show hitbox
+-- v57: stable passive stab hitbox + safe show hitbox
 -- v2026-06-04-v52-stable-childadded-throwingknife-hitbox
 
 -- PREBOOT GUARD: runs before any Roblox :GetService/namecall.
@@ -293,6 +293,108 @@ local function safeDestroy(obj)
         _pcall(function() obj:Destroy() end)
     end
 end
+
+
+local function clearHitboxVisual()
+    local part = State and State._showHitboxPart
+    if part then
+        _pcall(function()
+            if part.Parent then
+                part:Destroy()
+            else
+                part:Destroy()
+            end
+        end)
+    end
+    if State then
+        State._showHitboxPart = nil
+        State.showHitboxStatus = "Hidden"
+    end
+end
+
+local function ensureHitboxVisual()
+    if State._showHitboxPart and State._showHitboxPart.Parent then
+        return State._showHitboxPart
+    end
+
+    local ok, part = _pcall(function()
+        local p = Instance.new("Part")
+        p.Name = "_REF_StabHitboxVisual"
+        p.Anchored = true
+        p.CanCollide = false
+        p.CanTouch = false
+        _pcall(function() p.CanQuery = false end)
+        _pcall(function() p.CastShadow = false end)
+        p.Material = Enum.Material.Neon
+        p.Color = Color3.fromRGB(165, 80, 255)
+        p.Transparency = 0.84
+        p.Shape = Enum.PartType.Ball
+        p.Size = Vector3.new(2, 2, 2)
+        p.Parent = workspace
+        return p
+    end)
+
+    if ok and part then
+        State._showHitboxPart = part
+        return part
+    end
+
+    State.showHitboxStatus = "Visual create failed"
+    return nil
+end
+
+local function stopShowHitbox()
+    if State then
+        State.showHitbox = false
+        State._showHitboxLoop = false
+    end
+    clearHitboxVisual()
+end
+
+local function startShowHitbox()
+    if State._showHitboxLoop then return end
+    State._showHitboxLoop = true
+    State.showHitboxStatus = "Visible"
+
+    _spawn(function()
+        while Alive and State.showHitbox do
+            local okLoop = _pcall(function()
+                local root = getRoot()
+                if not root then
+                    clearHitboxVisual()
+                    State.showHitboxStatus = "No character"
+                    return
+                end
+
+                local radius = tonumber(State.stabHitboxRadius) or 10
+                if radius < 1 then radius = 1 end
+
+                local part = ensureHitboxVisual()
+                if not part then
+                    return
+                end
+
+                part.Size = Vector3.new(radius * 2, radius * 2, radius * 2)
+                part.CFrame = CFrame.new(root.Position)
+                part.Transparency = State.stabHitboxOn and 0.84 or 0.91
+
+                State.showHitboxStatus = State.stabHitboxOn
+                    and ("Stab radius: "..tostring(radius))
+                    or ("Preview radius: "..tostring(radius))
+            end)
+
+            if not okLoop then
+                State.showHitboxStatus = "Visual guarded"
+            end
+
+            _wait(0.07)
+        end
+
+        clearHitboxVisual()
+        State._showHitboxLoop = false
+    end)
+end
+
 
 local function clearRuntimeForRoot(root)
     if not root then return end
@@ -1492,6 +1594,8 @@ local function cleanup()
     State.gunDropOn = false
     State.gunDropEspOn = false
     State.espOn = false
+    State.showHitbox = false
+    clearHitboxVisual()
 
     for _, conn in ipairs(Connections) do
         safeDisconnect(conn)
@@ -2020,83 +2124,6 @@ local function startStabHitboxSafe()
             State.stabHitboxStatus = "Idle"
         end
     end)
-end
-
-
-
--- ─── hitbox visual ─────────────────────────────────────────────────────────────
-
-local function clearHitboxVisual()
-    safeDestroy(State._showHitboxPart)
-    State._showHitboxPart = nil
-    State.showHitboxStatus = "Hidden"
-end
-
-local function ensureHitboxVisual()
-    if State._showHitboxPart and State._showHitboxPart.Parent then
-        return State._showHitboxPart
-    end
-
-    local part = Instance.new("Part")
-    part.Name = "_REF_StabHitboxVisual"
-    part.Shape = Enum.PartType.Ball
-    part.Anchored = true
-    part.CanCollide = false
-    part.CanTouch = false
-    part.CanQuery = false
-    part.CastShadow = false
-    part.Material = Enum.Material.Neon
-    part.Color = Color3.fromRGB(165, 80, 255)
-    part.Transparency = 0.82
-    part.Size = Vector3.new(1, 1, 1)
-    part.Parent = Workspace
-
-    State._showHitboxPart = part
-    return part
-end
-
-local function startShowHitbox()
-    if State._showHitboxLoop then return end
-    State._showHitboxLoop = true
-    State.showHitboxStatus = "Visible"
-
-    _spawn(function()
-        while Alive and State.showHitbox do
-            local okLoop = _pcall(function()
-                local root = getRoot()
-                if not root then
-                    clearHitboxVisual()
-                    State.showHitboxStatus = "No character"
-                    return
-                end
-
-                local radius = tonumber(State.stabHitboxRadius) or 10
-                if radius < 1 then radius = 1 end
-
-                local part = ensureHitboxVisual()
-                part.Size = Vector3.new(radius * 2, radius * 2, radius * 2)
-                part.CFrame = CFrame.new(root.Position)
-                part.Transparency = State.stabHitboxOn and 0.82 or 0.9
-                State.showHitboxStatus = State.stabHitboxOn
-                    and ("Stab radius: "..tostring(radius))
-                    or ("Preview radius: "..tostring(radius))
-            end)
-
-            if not okLoop then
-                State.showHitboxStatus = "Visual guarded"
-            end
-
-            _wait(0.05)
-        end
-
-        clearHitboxVisual()
-        State._showHitboxLoop = false
-    end)
-end
-
-local function stopShowHitbox()
-    State.showHitbox = false
-    clearHitboxVisual()
 end
 
 
@@ -4833,8 +4860,12 @@ W:Slider("Stab Hitbox Range", 4, 28, 10, function(v)
 end)
 
 W:Toggle("Show Hitbox", false, function(v)
-    State.showHitbox = v
-    if v then startShowHitbox() else stopShowHitbox() end
+    State.showHitbox = v == true
+    if State.showHitbox then
+        startShowHitbox()
+    else
+        stopShowHitbox()
+    end
 end)
 
 W:Toggle("Throw Hitbox", false, function(v)
