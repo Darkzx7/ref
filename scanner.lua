@@ -1,5 +1,5 @@
 -- ref_universal | Murder Mystery tester
--- v2026-06-03-v28-afk-map-spawns
+-- v2026-06-03-v29-afk-map-location-spawns
 
 local Players          = game:GetService("Players")
 local TweenService     = game:GetService("TweenService")
@@ -190,6 +190,9 @@ local State = {
     _afkEndWaitToken   = nil,
     _afkLobbyBaseCF    = nil,
     _afkReturnCF       = nil,
+    _afkActiveMapName  = nil,
+    _afkActiveMapCF    = nil,
+    _afkActiveSpawnName = nil,
     _afkReleaseToMap   = false,
     lastEndReason      = nil,
     lastWinnerRole     = nil,
@@ -608,13 +611,108 @@ for _, mapName in ipairs(AFK_ROUND_MAP_NAMES) do
     AFK_ROUND_MAP_SET[normalizeRoundMapName(mapName)] = true
 end
 
+local function safeIsA(obj, className)
+    local ok, res = _pcall(function() return obj and obj:IsA(className) end)
+    return ok and res == true
+end
+
 local function isKnownRoundMap(obj)
     return obj and AFK_ROUND_MAP_SET[normalizeRoundMapName(obj.Name)] == true
 end
 
+local function getKnownRoundMapFromDescendant(obj)
+    local cur = obj
+    while cur and cur ~= workspace and cur ~= game do
+        if isKnownRoundMap(cur) then
+            return cur
+        end
+        cur = cur.Parent
+    end
+    return nil
+end
+
+local function instanceWorldCFrame(obj)
+    if not obj then return nil end
+
+    if safeIsA(obj, "BasePart") then
+        local cf = nil
+        _pcall(function() cf = obj.CFrame end)
+        return cf
+    end
+
+    if safeIsA(obj, "Attachment") then
+        local cf = nil
+        _pcall(function() cf = obj.WorldCFrame end)
+        return cf
+    end
+
+    if safeIsA(obj, "CFrameValue") then
+        local cf = nil
+        _pcall(function() cf = obj.Value end)
+        return cf
+    end
+
+    if safeIsA(obj, "Vector3Value") then
+        local pos = nil
+        _pcall(function() pos = obj.Value end)
+        if pos then return CFrame.new(pos) end
+    end
+
+    if safeIsA(obj, "ObjectValue") then
+        local v = nil
+        _pcall(function() v = obj.Value end)
+        if v then return instanceWorldCFrame(v) end
+    end
+
+    if safeIsA(obj, "Model") then
+        local cf = nil
+        _pcall(function() cf = obj:GetPivot() end)
+        if cf then return cf end
+        _pcall(function()
+            local boxCF = obj:GetBoundingBox()
+            cf = boxCF
+        end)
+        return cf
+    end
+
+    return nil
+end
+
+local function getMapLocationCF(mapObj)
+    if not mapObj then return nil end
+
+    local loc = nil
+    _pcall(function()
+        loc = mapObj:FindFirstChild("Location")
+            or mapObj:FindFirstChild("location")
+            or mapObj:FindFirstChild("MapLocation")
+            or mapObj:FindFirstChild("Map Location")
+    end)
+
+    if not loc then
+        _pcall(function()
+            for _, d in ipairs(mapObj:GetDescendants()) do
+                local n = normalizeRoundMapName(d.Name)
+                if n == "location" or n == "maplocation" then
+                    loc = d
+                    break
+                end
+            end
+        end)
+    end
+
+    local cf = loc and instanceWorldCFrame(loc) or nil
+    if cf then return cf end
+
+    return instanceWorldCFrame(mapObj)
+end
+
 local function findSpawnsFolder(mapObj)
     if not mapObj then return nil end
-    local direct = mapObj:FindFirstChild("Spawns") or mapObj:FindFirstChild("spawns")
+    local direct = nil
+    _pcall(function()
+        direct = mapObj:FindFirstChild("Spawns") or mapObj:FindFirstChild("spawns")
+    end)
     if direct then return direct end
 
     local found = nil
@@ -629,86 +727,225 @@ local function findSpawnsFolder(mapObj)
     return found
 end
 
-local function pickSpawnPart(spawnsFolder)
+local function isUsableSpawnPart(obj)
+    if not safeIsA(obj, "BasePart") then return false end
+    local ok = true
+    _pcall(function()
+        if obj.Transparency >= 1 and obj.CanCollide == false and obj.CanTouch == false then
+            ok = false
+        end
+    end)
+    return ok
+end
+
+local function getSpawnLocationCF(spawnPart)
+    if not spawnPart then return nil end
+
+    local loc = nil
+    _pcall(function()
+        loc = spawnPart:FindFirstChild("Location")
+            or spawnPart:FindFirstChild("location")
+            or spawnPart:FindFirstChild("SpawnLocation")
+            or spawnPart:FindFirstChild("Spawn Location")
+    end)
+
+    local cf = loc and instanceWorldCFrame(loc) or nil
+    if cf then return cf end
+
+    return instanceWorldCFrame(spawnPart)
+end
+
+local function spawnScore(part, referenceCF)
+    if not part then return math.huge end
+    local score = 0
+    local pname = tostring(part.Name):lower()
+    if pname:find("spawn") then score = score - 1000 end
+    if safeIsA(part, "SpawnLocation") then score = score - 500 end
+
+    local spawnCF = getSpawnLocationCF(part)
+    local pos = spawnCF and spawnCF.Position or nil
+    if referenceCF and pos then
+        score = score + (pos - referenceCF.Position).Magnitude
+    elseif pos then
+        score = score + math.abs(pos.Y)
+    else
+        score = score + 999999
+    end
+
+    return score
+end
+
+local function pickSpawnPart(spawnsFolder, referenceCF)
     if not spawnsFolder then return nil end
 
-    if spawnsFolder:IsA("BasePart") then
+    if isUsableSpawnPart(spawnsFolder) then
         return spawnsFolder
     end
 
-    local root = getRoot()
-    local rootPos = root and root.Position
     local candidates = {}
-
     local children = nil
     _pcall(function() children = spawnsFolder:GetDescendants() end)
     if not children then return nil end
 
     for _, obj in ipairs(children) do
-        local ok, isPart = _pcall(function() return obj:IsA("BasePart") end)
-        if ok and isPart and obj.Parent then
-            local canUse = true
-            _pcall(function()
-                if obj.Transparency >= 1 and obj.CanCollide == false and obj.CanTouch == false then
-                    canUse = false
-                end
-            end)
-            if canUse then
-                candidates[#candidates + 1] = obj
-            end
+        if isUsableSpawnPart(obj) then
+            candidates[#candidates + 1] = obj
         end
     end
 
     if #candidates == 0 then return nil end
 
     table.sort(candidates, function(a, b)
-        local an = tostring(a.Name):lower()
-        local bn = tostring(b.Name):lower()
-        local ap = a.Position
-        local bp = b.Position
-        local aScore = 0
-        local bScore = 0
-        if an:find("spawn") then aScore = aScore - 1000 end
-        if bn:find("spawn") then bScore = bScore - 1000 end
-        if rootPos then
-            aScore = aScore + (ap - rootPos).Magnitude
-            bScore = bScore + (bp - rootPos).Magnitude
-        else
-            aScore = aScore + math.abs(ap.Y)
-            bScore = bScore + math.abs(bp.Y)
-        end
-        return aScore < bScore
+        return spawnScore(a, referenceCF) < spawnScore(b, referenceCF)
     end)
 
     return candidates[1]
 end
 
-local function getRoundMapSpawnCF()
-    local maps = nil
-    _pcall(function() maps = workspace:GetChildren() end)
-    if not maps then return nil, nil, nil end
+local function findRoundActivityReference()
+    local desc = nil
+    _pcall(function() desc = workspace:GetDescendants() end)
+    if not desc then return nil, nil, "none" end
 
-    for _, mapObj in ipairs(maps) do
-        if isKnownRoundMap(mapObj) then
-            local spawnsFolder = findSpawnsFolder(mapObj)
-            local spawnPart = pickSpawnPart(spawnsFolder)
-            if spawnPart then
-                local cf = nil
-                _pcall(function()
-                    local lift = 4.2
-                    if spawnPart.Size then
-                        lift = math.max(4.2, (spawnPart.Size.Y * 0.5) + 3.2)
+    local bestPart, bestMap, bestScore, bestReason = nil, nil, math.huge, "none"
+
+    for _, obj in ipairs(desc) do
+        local mapObj = getKnownRoundMapFromDescendant(obj)
+        if mapObj then
+            local isCoin = obj.Name == "Coin_Server"
+            local isGunDrop = obj.Name == "GunDrop"
+            if isCoin or isGunDrop then
+                local part = nil
+                if safeIsA(obj, "BasePart") then
+                    part = obj
+                else
+                    _pcall(function() part = obj:FindFirstChildWhichIsA("BasePart", true) end)
+                end
+                if part and part.Parent then
+                    local pos = nil
+                    _pcall(function() pos = part.Position end)
+                    if pos then
+                        local score = math.abs(pos.Y)
+                        if isCoin then score = score - 200000 end
+                        if isGunDrop then score = score - 150000 end
+                        if score < bestScore then
+                            bestPart = part
+                            bestMap = mapObj
+                            bestScore = score
+                            bestReason = isCoin and "coin" or "gundrop"
+                        end
                     end
-                    cf = spawnPart.CFrame * CFrame.new(0, lift, 0)
-                end)
-                if cf then
-                    return cf, mapObj.Name, spawnPart.Name
                 end
             end
         end
     end
 
+    if bestPart and bestMap then
+        local cf = nil
+        _pcall(function() cf = bestPart.CFrame end)
+        return cf, bestMap, bestReason
+    end
+
+    return nil, nil, "none"
+end
+
+local function collectRoundMapCandidates()
+    local candidates = {}
+    local maps = nil
+    _pcall(function() maps = workspace:GetChildren() end)
+    if not maps then return candidates end
+
+    local activityCF, activityMap, activityReason = findRoundActivityReference()
+
+    for _, mapObj in ipairs(maps) do
+        if isKnownRoundMap(mapObj) then
+            local spawnsFolder = findSpawnsFolder(mapObj)
+            if spawnsFolder then
+                local locationCF = getMapLocationCF(mapObj)
+                local referenceCF = activityMap == mapObj and activityCF or locationCF
+                local spawnPart = pickSpawnPart(spawnsFolder, referenceCF)
+                if spawnPart then
+                    local score = 0
+                    local normName = normalizeRoundMapName(mapObj.Name)
+
+                    if State._afkActiveMapName and normalizeRoundMapName(State._afkActiveMapName) == normName then
+                        score = score - 400000
+                    end
+
+                    if activityMap == mapObj then
+                        score = score - 300000
+                        if activityReason == "coin" then score = score - 80000 end
+                        if activityReason == "gundrop" then score = score - 50000 end
+                    end
+
+                    if State._afkActiveMapCF and locationCF then
+                        score = score + (locationCF.Position - State._afkActiveMapCF.Position).Magnitude
+                    elseif activityCF and locationCF then
+                        score = score + (locationCF.Position - activityCF.Position).Magnitude
+                    elseif State._afkReturnCF and locationCF then
+                        score = score + math.min((locationCF.Position - State._afkReturnCF.Position).Magnitude, 15000)
+                    end
+
+                    candidates[#candidates + 1] = {
+                        map = mapObj,
+                        spawns = spawnsFolder,
+                        spawn = spawnPart,
+                        locationCF = locationCF,
+                        referenceCF = referenceCF,
+                        score = score,
+                    }
+                end
+            end
+        end
+    end
+
+    table.sort(candidates, function(a, b)
+        return a.score < b.score
+    end)
+
+    return candidates
+end
+
+local function cframeAboveSpawn(spawnPart)
+    if not spawnPart then return nil end
+    local cf = nil
+    _pcall(function()
+        local lift = 4.2
+        if spawnPart.Size then
+            lift = math.max(4.2, (spawnPart.Size.Y * 0.5) + 3.2)
+        end
+        local baseCF = getSpawnLocationCF(spawnPart) or spawnPart.CFrame
+        cf = baseCF * CFrame.new(0, lift, 0)
+    end)
+    return cf
+end
+
+local function getRoundMapSpawnCF()
+    local candidates = collectRoundMapCandidates()
+    local chosen = candidates[1]
+    if not chosen then return nil, nil, nil end
+
+    local cf = cframeAboveSpawn(chosen.spawn)
+    if cf then
+        State._afkActiveMapName = chosen.map.Name
+        State._afkActiveMapCF = chosen.locationCF or getMapLocationCF(chosen.map)
+        State._afkActiveSpawnName = chosen.spawn.Name
+        return cf, chosen.map.Name, chosen.spawn.Name
+    end
+
     return nil, nil, nil
+end
+
+local function updateAfkActiveMapHint(reason)
+    local candidates = collectRoundMapCandidates()
+    local chosen = candidates[1]
+    if not chosen then return false end
+
+    State._afkActiveMapName = chosen.map.Name
+    State._afkActiveMapCF = chosen.locationCF or getMapLocationCF(chosen.map)
+    State._afkActiveSpawnName = chosen.spawn and chosen.spawn.Name or nil
+    State.afkStatus = "Map hint: "..tostring(chosen.map.Name)
+    return true
 end
 
 local function findAfkMapReturnCF()
@@ -720,46 +957,6 @@ local function findAfkMapReturnCF()
 
     if State._afkReturnCF then
         return State._afkReturnCF
-    end
-
-    local char = getChar()
-    local blacklist = {}
-    if char then blacklist[#blacklist + 1] = char end
-    if State._afkPlatform then blacklist[#blacklist + 1] = State._afkPlatform end
-    if State._coinStagePlatform then blacklist[#blacklist + 1] = State._coinStagePlatform end
-
-    local desc = nil
-    _pcall(function() desc = workspace:GetDescendants() end)
-    if desc then
-        local bestCoin, bestY = nil, math.huge
-        for _, obj in ipairs(desc) do
-            if obj and obj.Name == "Coin_Server" then
-                local part = nil
-                if obj:IsA("BasePart") then
-                    part = obj
-                else
-                    _pcall(function()
-                        part = obj:FindFirstChildWhichIsA("BasePart", true)
-                    end)
-                end
-                if part and part.Parent and part.Position.Y > -50 and part.Position.Y < bestY then
-                    bestCoin = part
-                    bestY = part.Position.Y
-                end
-            end
-        end
-
-        if bestCoin then
-            local params = RaycastParams.new()
-            params.FilterType = Enum.RaycastFilterType.Blacklist
-            params.FilterDescendantsInstances = blacklist
-            local hit = nil
-            _pcall(function()
-                hit = workspace:Raycast(bestCoin.Position + Vector3.new(0, 20, 0), Vector3.new(0, -140, 0), params)
-            end)
-            local p = hit and hit.Position or (bestCoin.Position - Vector3.new(0, 4, 0))
-            return CFrame.new(p + Vector3.new(0, 4.5, 0))
-        end
     end
 
     return nil
@@ -838,13 +1035,24 @@ local function startAfkFarmHold(reason)
 
     local currentCF = root.CFrame
     local shouldSaveReturnCF = State.currentPhase ~= "Lobby" and State.currentPhase ~= "Unknown"
+    local mapSpawnCF, mapName, spawnName = nil, nil, nil
+    if shouldSaveReturnCF then
+        updateAfkActiveMapHint(reason)
+        mapSpawnCF, mapName, spawnName = getRoundMapSpawnCF()
+    end
 
     releaseAfkFarm(nil, false)
 
     root = getRoot()
     if not root then return false end
-    if shouldSaveReturnCF and not State._afkReturnCF then
-        State._afkReturnCF = currentCF
+    if shouldSaveReturnCF then
+        if mapSpawnCF then
+            State._afkReturnCF = mapSpawnCF
+            State._afkActiveMapName = mapName
+            State._afkActiveSpawnName = spawnName
+        elseif not State._afkReturnCF then
+            State._afkReturnCF = currentCF
+        end
     end
     local hum = getHumanoid()
     local platformPos = getAfkHighPlatformPos()
@@ -2498,7 +2706,10 @@ local function listenRoundSignals()
         end
         refreshRolesBurst("RoundStart")
         if State.coinCollect then primeCoinEntry(State.lastRoundSignal) end
-        if State.afkFarm then startAfkFarmHold("RoundStart") end
+        if State.afkFarm then
+            updateAfkActiveMapHint("RoundStart")
+            startAfkFarmHold("RoundStart")
+        end
     end)
 
     bindRemoteEvent({"Remotes","Gameplay","RoleSelect"}, function(...)
@@ -2518,7 +2729,10 @@ local function listenRoundSignals()
                 end
             end)
         end
-        if State.afkFarm then startAfkFarmHold("RoleSelect") end
+        if State.afkFarm then
+            updateAfkActiveMapHint("RoleSelect")
+            startAfkFarmHold("RoleSelect")
+        end
     end)
 
     bindRemoteEvent({"Remotes","Gameplay","GiveWeapon"}, function(...)
@@ -2541,7 +2755,10 @@ local function listenRoundSignals()
         end
         refreshRolesBurst("GiveWeapon")
         if State.coinCollect then primeCoinEntry(State.lastRoundSignal) end
-        if State.afkFarm then startAfkFarmHold("GiveWeapon") end
+        if State.afkFarm then
+            updateAfkActiveMapHint("GiveWeapon")
+            startAfkFarmHold("GiveWeapon")
+        end
     end)
 
     bindRemoteEvent({"Remotes","Gameplay","LoadingMap"}, function(...)
@@ -2562,7 +2779,10 @@ local function listenRoundSignals()
                 end
             end)
         end
-        if State.afkFarm then startAfkFarmHold("LoadingMap") end
+        if State.afkFarm then
+            updateAfkActiveMapHint("LoadingMap")
+            startAfkFarmHold("LoadingMap")
+        end
     end)
 
     bindRemoteEvent({"Remotes","Gameplay","ShowRoleSelect"}, function(...)
@@ -2582,7 +2802,10 @@ local function listenRoundSignals()
                 end
             end)
         end
-        if State.afkFarm then startAfkFarmHold(State.lastRoundSignal or "RoleSelect") end
+        if State.afkFarm then
+            updateAfkActiveMapHint(State.lastRoundSignal or "RoleSelect")
+            startAfkFarmHold(State.lastRoundSignal or "RoleSelect")
+        end
     end)
 
     bindRemoteEvent({"Remotes","Gameplay","ShowRoleSelectNew"}, function(...)
@@ -2602,7 +2825,10 @@ local function listenRoundSignals()
                 end
             end)
         end
-        if State.afkFarm then startAfkFarmHold(State.lastRoundSignal or "RoleSelect") end
+        if State.afkFarm then
+            updateAfkActiveMapHint(State.lastRoundSignal or "RoleSelect")
+            startAfkFarmHold(State.lastRoundSignal or "RoleSelect")
+        end
     end)
 
     bindRemoteEvent({"Remotes","Gameplay","VictoryScreen"}, function(...)
@@ -2653,6 +2879,9 @@ local function listenRoundSignals()
         if State.afkFarm or State._afkActive then
             releaseAfkFarm(State.afkFarm and "Armed - waiting for round" or "Idle", false)
         end
+        State._afkActiveMapName = nil
+        State._afkActiveMapCF = nil
+        State._afkActiveSpawnName = nil
     end
 
     bindRemoteEvent({"Remotes","Gameplay","RoundEndFade"}, function() markLobby("RoundEndFade") end)
@@ -3583,6 +3812,9 @@ State._afkToggle = W:Toggle("Farm AFK", false, function(v)
         end
         armAfkFarm("Manual")
     else
+        if State.currentPhase ~= "Lobby" and State.currentPhase ~= "Unknown" then
+            updateAfkActiveMapHint("ManualReturn")
+        end
         releaseAfkFarm("Returned to map spawn", true)
     end
 end)
