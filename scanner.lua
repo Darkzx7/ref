@@ -644,7 +644,7 @@ local function getAfkHighPlatformPos()
         baseCF = State._afkLobbyBaseCF or (root and root.CFrame) or CFrame.new(0, 0, 0)
     end
     local pos = baseCF.Position
-    return Vector3.new(pos.X, pos.Y + 100000, pos.Z)
+    return Vector3.new(pos.X, pos.Y + 25000, pos.Z)
 end
 
 local AFK_ROUND_MAP_NAMES = {
