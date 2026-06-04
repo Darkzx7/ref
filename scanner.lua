@@ -1,5 +1,5 @@
 -- ref_universal | Murder Mystery tester
--- v2026-06-03-v35-afk-ultra-high-platform
+-- v2026-06-03-v37-afk-under-round-map-platform
 
 local Players          = game:GetService("Players")
 local TweenService     = game:GetService("TweenService")
@@ -1022,6 +1022,45 @@ local function getRoundMapSpawnCF()
     return nil, nil, nil
 end
 
+local function getAfkUnderRoundMapPlatformPos()
+    local candidates = collectRoundMapCandidates()
+    local chosen = candidates[1]
+
+    if chosen and chosen.map then
+        local referenceCF = chosen.referenceCF
+            or chosen.locationCF
+            or getSpawnLocationCF(chosen.spawn)
+            or instanceWorldCFrame(chosen.map)
+
+        local pos = referenceCF and referenceCF.Position or nil
+        local bottomY = pos and pos.Y or nil
+
+        _pcall(function()
+            local boxCF, boxSize = chosen.map:GetBoundingBox()
+            if boxCF and boxSize then
+                pos = pos or boxCF.Position
+                bottomY = boxCF.Position.Y - (boxSize.Y * 0.5)
+            end
+        end)
+
+        if pos and bottomY then
+            State._afkActiveMapName = chosen.map.Name
+            State._afkActiveMapCF = chosen.locationCF or getMapLocationCF(chosen.map)
+            State._afkActiveSpawnName = chosen.spawn and chosen.spawn.Name or nil
+            return Vector3.new(pos.X, bottomY - 1000, pos.Z), chosen.map.Name
+        end
+    end
+
+    local root = getRoot()
+    if root then
+        local pos = root.Position
+        return Vector3.new(pos.X, pos.Y - 1000, pos.Z), "CurrentMap"
+    end
+
+    local lobbyCF = getRegularLobbySpawnBaseCF()
+    local pos = lobbyCF and lobbyCF.Position or Vector3.new(0, 0, 0)
+    return Vector3.new(pos.X, pos.Y - 1000, pos.Z), "Fallback"
+end
 
 local function getValidLocalAfkRole()
     local role = State.localRole or State.roles[LocalPlayer.Name]
@@ -1256,7 +1295,7 @@ local function startAfkFarmHold(reason)
     end
 
     if State._afkActive and State._afkPlatform and State._afkPlatform.Parent and State._afkHoldCF then
-        State.afkStatus = "Ultra high platform active"
+        State.afkStatus = "Under map platform active"
         return true
     end
 
@@ -1284,7 +1323,7 @@ local function startAfkFarmHold(reason)
         end
     end
     local hum = getHumanoid()
-    local platformPos = getAfkHighPlatformPos()
+    local platformPos, platformMapName = getAfkUnderRoundMapPlatformPos()
 
     local platform = Instance.new("Part")
     platform.Name = "_REF_AFK_FARM_PLATFORM"
@@ -1301,7 +1340,7 @@ local function startAfkFarmHold(reason)
     State._afkPlatform = platform
     State._afkHoldCF = CFrame.new(platformPos + Vector3.new(0, 4.2, 0))
     State._afkActive = true
-    State.afkStatus = "Ultra high platform active"
+    State.afkStatus = "Under map platform active"
 
     _pcall(function()
         State._afkSavedRootAnchored = root.Anchored
