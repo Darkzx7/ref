@@ -1,5 +1,5 @@
 -- ref_universal | Murder Mystery tester
--- v57: stable passive stab hitbox + safe show hitbox
+-- v58: passive stab hitbox + safe show hitbox adornment
 -- v2026-06-04-v52-stable-childadded-throwingknife-hitbox
 
 -- PREBOOT GUARD: runs before any Roblox :GetService/namecall.
@@ -31,6 +31,7 @@ local TweenService     = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService       = game:GetService("RunService")
+local Workspace       = workspace
 
 local LocalPlayer = Players.LocalPlayer
 
@@ -160,8 +161,7 @@ local State = {
     stabHitboxStatus   = "Idle",
     showHitbox         = false,
     showHitboxStatus   = "Hidden",
-    _showHitboxPart    = nil,
-    _showHitboxLoop    = false,
+    _showHitboxAdornment = nil,
     _stabHitboxConn    = nil,
     _stabHitboxLoop    = false,
     _stabHitboxLastHit = {},
@@ -293,108 +293,6 @@ local function safeDestroy(obj)
         _pcall(function() obj:Destroy() end)
     end
 end
-
-
-local function clearHitboxVisual()
-    local part = State and State._showHitboxPart
-    if part then
-        _pcall(function()
-            if part.Parent then
-                part:Destroy()
-            else
-                part:Destroy()
-            end
-        end)
-    end
-    if State then
-        State._showHitboxPart = nil
-        State.showHitboxStatus = "Hidden"
-    end
-end
-
-local function ensureHitboxVisual()
-    if State._showHitboxPart and State._showHitboxPart.Parent then
-        return State._showHitboxPart
-    end
-
-    local ok, part = _pcall(function()
-        local p = Instance.new("Part")
-        p.Name = "_REF_StabHitboxVisual"
-        p.Anchored = true
-        p.CanCollide = false
-        p.CanTouch = false
-        _pcall(function() p.CanQuery = false end)
-        _pcall(function() p.CastShadow = false end)
-        p.Material = Enum.Material.Neon
-        p.Color = Color3.fromRGB(165, 80, 255)
-        p.Transparency = 0.84
-        p.Shape = Enum.PartType.Ball
-        p.Size = Vector3.new(2, 2, 2)
-        p.Parent = workspace
-        return p
-    end)
-
-    if ok and part then
-        State._showHitboxPart = part
-        return part
-    end
-
-    State.showHitboxStatus = "Visual create failed"
-    return nil
-end
-
-local function stopShowHitbox()
-    if State then
-        State.showHitbox = false
-        State._showHitboxLoop = false
-    end
-    clearHitboxVisual()
-end
-
-local function startShowHitbox()
-    if State._showHitboxLoop then return end
-    State._showHitboxLoop = true
-    State.showHitboxStatus = "Visible"
-
-    _spawn(function()
-        while Alive and State.showHitbox do
-            local okLoop = _pcall(function()
-                local root = getRoot()
-                if not root then
-                    clearHitboxVisual()
-                    State.showHitboxStatus = "No character"
-                    return
-                end
-
-                local radius = tonumber(State.stabHitboxRadius) or 10
-                if radius < 1 then radius = 1 end
-
-                local part = ensureHitboxVisual()
-                if not part then
-                    return
-                end
-
-                part.Size = Vector3.new(radius * 2, radius * 2, radius * 2)
-                part.CFrame = CFrame.new(root.Position)
-                part.Transparency = State.stabHitboxOn and 0.84 or 0.91
-
-                State.showHitboxStatus = State.stabHitboxOn
-                    and ("Stab radius: "..tostring(radius))
-                    or ("Preview radius: "..tostring(radius))
-            end)
-
-            if not okLoop then
-                State.showHitboxStatus = "Visual guarded"
-            end
-
-            _wait(0.07)
-        end
-
-        clearHitboxVisual()
-        State._showHitboxLoop = false
-    end)
-end
-
 
 local function clearRuntimeForRoot(root)
     if not root then return end
@@ -1595,7 +1493,12 @@ local function cleanup()
     State.gunDropEspOn = false
     State.espOn = false
     State.showHitbox = false
-    clearHitboxVisual()
+    _pcall(function()
+        if State._showHitboxAdornment then
+            State._showHitboxAdornment:Destroy()
+            State._showHitboxAdornment = nil
+        end
+    end)
 
     for _, conn in ipairs(Connections) do
         safeDisconnect(conn)
@@ -4861,10 +4764,14 @@ end)
 
 W:Toggle("Show Hitbox", false, function(v)
     State.showHitbox = v == true
-    if State.showHitbox then
-        startShowHitbox()
-    else
-        stopShowHitbox()
+    State.showHitboxStatus = State.showHitbox and "Visible" or "Hidden"
+    if not State.showHitbox then
+        _pcall(function()
+            if State._showHitboxAdornment then
+                State._showHitboxAdornment:Destroy()
+                State._showHitboxAdornment = nil
+            end
+        end)
     end
 end)
 
@@ -5036,6 +4943,51 @@ _spawn(function()
             gunDropLbl.Text = "GunDrop: "..tostring(State.lastGunDropStatus or "Missing").." | "..tostring(State.lastGunDropDistance or "N/A").." | GiveWeapon: "..tostring(State._lastGiveWeaponName or "None")
             afkLbl.Text = "Farm AFK: "..tostring(State.afkStatus or "Idle")
             stabLbl.Text = "Stab Hitbox: "..tostring(State.stabHitboxStatus or "Idle").." | Range: "..tostring(State.stabHitboxRadius or 10)
+
+            if State.showHitbox then
+                local root = getRoot()
+                if root then
+                    if not State._showHitboxAdornment or not State._showHitboxAdornment.Parent then
+                        local okAdorn, adorn = _pcall(function()
+                            local a = Instance.new("SphereHandleAdornment")
+                            a.Name = "_REF_StabHitboxAdornment"
+                            a.AlwaysOnTop = true
+                            a.ZIndex = 10
+                            a.Transparency = 0.72
+                            a.Color3 = Color3.fromRGB(165, 80, 255)
+                            a.Parent = LocalPlayer:FindFirstChildOfClass("PlayerGui") or root
+                            return a
+                        end)
+                        if okAdorn and adorn then
+                            State._showHitboxAdornment = adorn
+                        end
+                    end
+
+                    local adorn = State._showHitboxAdornment
+                    if adorn then
+                        _pcall(function()
+                            local radius = tonumber(State.stabHitboxRadius) or 10
+                            adorn.Adornee = root
+                            adorn.Radius = radius
+                            adorn.Transparency = State.stabHitboxOn and 0.72 or 0.86
+                            State.showHitboxStatus = State.stabHitboxOn and ("Stab radius: "..tostring(radius)) or ("Preview radius: "..tostring(radius))
+                        end)
+                    else
+                        State.showHitboxStatus = "Adornment unavailable"
+                    end
+                else
+                    State.showHitboxStatus = "No character"
+                end
+            else
+                _pcall(function()
+                    if State._showHitboxAdornment then
+                        State._showHitboxAdornment:Destroy()
+                        State._showHitboxAdornment = nil
+                    end
+                end)
+                State.showHitboxStatus = "Hidden"
+            end
+
             showHitboxLbl.Text = "Show Hitbox: "..tostring(State.showHitboxStatus or "Hidden")
             throwLbl.Text = "Throw Hitbox: "..tostring(State.throwRangeStatus or "Idle").." | Radius: "..tostring(State.throwRangeRadius or 18)
         end)
