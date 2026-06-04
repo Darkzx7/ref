@@ -1,6 +1,30 @@
 -- ref_universal | Murder Mystery tester
 -- v2026-06-04-v49-stable-throwingknife-watcher
 
+local __REF_FATAL_PREFIX = "[ref_universal fatal] "
+local function __ref_traceback(err)
+    local text = tostring(err)
+    if type(debug) == "table" and type(debug.traceback) == "function" then
+        if type(pcall) == "function" then
+            local ok, trace = pcall(debug.traceback, text, 2)
+            if ok and trace then
+                return trace
+            end
+        else
+            return debug.traceback(text, 2)
+        end
+    end
+    return text
+end
+
+local function __ref_warn_fatal(err)
+    if type(warn) == "function" then
+        warn(__REF_FATAL_PREFIX .. tostring(err))
+    end
+end
+
+local function __ref_main()
+
 local Players          = game:GetService("Players")
 local TweenService     = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
@@ -4791,3 +4815,18 @@ _spawn(function()
         end)
     end
 end)
+
+end
+
+local __ref_ok, __ref_err
+if type(xpcall) == "function" then
+    __ref_ok, __ref_err = xpcall(__ref_main, __ref_traceback)
+elseif type(pcall) == "function" then
+    __ref_ok, __ref_err = pcall(__ref_main)
+else
+    __ref_ok, __ref_err = true, __ref_main()
+end
+
+if not __ref_ok then
+    __ref_warn_fatal(__ref_err)
+end
