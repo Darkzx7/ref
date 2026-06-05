@@ -4572,6 +4572,18 @@ W:Slider("Stab Hitbox Range", 4, 28, 10, function(v)
     end
 end)
 
+W:Toggle("Show Stab Hitbox", false, function(v)
+    local env = getStabPatchEnv()
+    if env then env.__REF_STAB_UI_SHOW = v == true end
+    local patch = getStabPatch()
+    if type(patch) == "table" then
+        patch.ShowHitbox = v == true
+        if type(patch.SetShowHitbox) == "function" then
+            patch:SetShowHitbox(v == true)
+        end
+    end
+end)
+
 W:Toggle("Throw Hitbox", false, function(v)
     State.throwRangeOn = v
     if v then startThrowHitboxSafe() else stopThrowHitboxSafe() end
@@ -4706,6 +4718,7 @@ local dataLbl = W:Label("Role: ? | Coins: 0/40")
 local gunDropLbl = W:Label("GunDrop: Missing | N/A")
 local afkLbl = W:Label("Farm AFK: Idle")
 local stabLbl = W:Label("Stab Hitbox: Loading")
+local showStabLbl = W:Label("Show Stab Hitbox: Hidden")
 local throwLbl = W:Label("Throw Hitbox: Idle")
 
 _spawn(function()
@@ -4725,6 +4738,7 @@ _spawn(function()
         if State.gunDropEspOn then parts[#parts+1] = "gundrop esp" end
         local _stabPatchForActive = getStabPatch()
         if type(_stabPatchForActive) == "table" and _stabPatchForActive.Enabled then parts[#parts+1] = "stab hitbox" end
+        if type(_stabPatchForActive) == "table" and _stabPatchForActive.ShowHitbox then parts[#parts+1] = "show stab hitbox" end
         if State.throwRangeOn then parts[#parts+1] = "throw hitbox" end
         local activeText = #parts > 0 and ("Active: "..table.concat(parts, ", ")) or "Inactive"
         local localRole = State.currentPhase == "Lobby" and "?" or (State.localRole or State.roles[LocalPlayer.Name] or "?")
@@ -4741,8 +4755,10 @@ _spawn(function()
             local _stabPatchForLabel = getStabPatch()
             if type(_stabPatchForLabel) == "table" then
                 stabLbl.Text = "Stab Hitbox: "..tostring(_stabPatchForLabel.Status or "Idle").." | Range: "..tostring(_stabPatchForLabel.Radius or 10)
+                showStabLbl.Text = "Show Stab Hitbox: "..tostring(_stabPatchForLabel.ShowStatus or "Hidden")
             else
                 stabLbl.Text = "Stab Hitbox: Loading"
+                showStabLbl.Text = "Show Stab Hitbox: Loading"
             end
             throwLbl.Text = "Throw Hitbox: "..tostring(State.throwRangeStatus or "Idle").." | Radius: "..tostring(State.throwRangeRadius or 18)
         end)
@@ -4801,6 +4817,10 @@ local function __ref_start_isolated_stab_hitbox_patch()
         LocalDead = false,
         LastPulse = 0,
         LastTargetHit = {},
+        ShowHitbox = false,
+        ShowStatus = "Hidden",
+        ShowAdornment = nil,
+        ShowLoop = false,
     }
     if ENV.__REF_STAB_UI_RADIUS ~= nil then
         local r = tonumber(ENV.__REF_STAB_UI_RADIUS)
@@ -4809,6 +4829,10 @@ local function __ref_start_isolated_stab_hitbox_patch()
     if ENV.__REF_STAB_UI_ENABLED ~= nil then
         Patch.Enabled = ENV.__REF_STAB_UI_ENABLED == true
         Patch.Status = Patch.Enabled and "Waiting manual stab" or "Off"
+    end
+    if ENV.__REF_STAB_UI_SHOW ~= nil then
+        Patch.ShowHitbox = ENV.__REF_STAB_UI_SHOW == true
+        Patch.ShowStatus = Patch.ShowHitbox and "Waiting visual" or "Hidden"
     end
 
     ENV.__REF_STAB_HITBOX_PATCH = Patch
@@ -4834,7 +4858,14 @@ local function __ref_start_isolated_stab_hitbox_patch()
 
     function Patch:Stop(reason)
         self.Enabled = false
+        self.ShowHitbox = false
         self.Status = "Stopped: " .. tostring(reason or "manual")
+        pcall(function()
+            if self.ShowAdornment then
+                self.ShowAdornment:Destroy()
+                self.ShowAdornment = nil
+            end
+        end)
         for _, conn in ipairs(self.Connections) do
             pcall(function()
                 conn:Disconnect()
@@ -4890,6 +4921,95 @@ local function __ref_start_isolated_stab_hitbox_patch()
         return char:FindFirstChild("HumanoidRootPart")
             or char:FindFirstChild("UpperTorso")
             or char:FindFirstChild("Torso")
+    end
+
+    local function clearStabVisual()
+        pcall(function()
+            if Patch.ShowAdornment then
+                Patch.ShowAdornment:Destroy()
+                Patch.ShowAdornment = nil
+            end
+        end)
+        Patch.ShowStatus = "Hidden"
+    end
+
+    local function ensureStabVisual(root)
+        if Patch.ShowAdornment and Patch.ShowAdornment.Parent then
+            return Patch.ShowAdornment
+        end
+
+        local ok, adorn = pcall(function()
+            local a = Instance.new("SphereHandleAdornment")
+            a.Name = "_REF_StabHitboxAdornment"
+            a.Adornee = root
+            a.AlwaysOnTop = true
+            a.ZIndex = 10
+            a.Color3 = Color3.fromRGB(165, 80, 255)
+            a.Transparency = 0.76
+            a.Radius = tonumber(Patch.Radius) or 10
+            local parent = LocalPlayer:FindFirstChildOfClass("PlayerGui") or root
+            a.Parent = parent
+            return a
+        end)
+
+        if ok and adorn then
+            Patch.ShowAdornment = adorn
+            return adorn
+        end
+
+        Patch.ShowStatus = "Visual unavailable"
+        return nil
+    end
+
+    function Patch:SetShowHitbox(enabled)
+        self.ShowHitbox = enabled == true
+
+        if not self.ShowHitbox then
+            clearStabVisual()
+            return
+        end
+
+        if self.ShowLoop then
+            return
+        end
+
+        self.ShowLoop = true
+        self.ShowStatus = "Visible"
+
+        spawnTask(function()
+            while Patch.ShowHitbox do
+                local okLoop = pcall(function()
+                    local root = getRoot(getChar(LocalPlayer))
+                    if not root then
+                        clearStabVisual()
+                        Patch.ShowStatus = "No character"
+                        return
+                    end
+
+                    local radius = tonumber(Patch.Radius) or 10
+                    if radius < 1 then radius = 1 end
+
+                    local adorn = ensureStabVisual(root)
+                    if adorn then
+                        adorn.Adornee = root
+                        adorn.Radius = radius
+                        adorn.Transparency = Patch.Enabled and 0.76 or 0.88
+                        Patch.ShowStatus = Patch.Enabled
+                            and ("Stab radius: " .. tostring(radius))
+                            or ("Preview radius: " .. tostring(radius))
+                    end
+                end)
+
+                if not okLoop then
+                    Patch.ShowStatus = "Visual guarded"
+                end
+
+                waitSmall(0.08)
+            end
+
+            clearStabVisual()
+            Patch.ShowLoop = false
+        end)
     end
 
     local function findKnifeEquipped()
@@ -5190,6 +5310,12 @@ local function __ref_start_isolated_stab_hitbox_patch()
 
     listenRoles()
     buildGui()
+
+    if Patch.ShowHitbox then
+        pcall(function()
+            Patch:SetShowHitbox(true)
+        end)
+    end
 
     if Patch.Status == "Off" or Patch.Status == nil then Patch.Status = "Loaded in main UI" end
 end
