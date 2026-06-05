@@ -4537,6 +4537,41 @@ W:Button("Throw Knife Nearest",  function() Tester.ThrowKnife()  end)
 W:Button("Stab Nearest",  function() Tester.StabTarget()  end)
 W:Button("Touch Nearest", function() Tester.TouchTarget() end)
 
+local function getStabPatchEnv()
+    local env = _G
+    _pcall(function()
+        if type(getgenv) == "function" then
+            local got = getgenv()
+            if type(got) == "table" then env = got end
+        end
+    end)
+    return env
+end
+
+local function getStabPatch()
+    local env = getStabPatchEnv()
+    return env and env.__REF_STAB_HITBOX_PATCH
+end
+
+W:Toggle("Stab Hitbox", false, function(v)
+    local env = getStabPatchEnv()
+    if env then env.__REF_STAB_UI_ENABLED = v == true end
+    local patch = getStabPatch()
+    if type(patch) == "table" then
+        patch.Enabled = v == true
+        patch.Status = patch.Enabled and "Waiting manual stab" or "Off"
+    end
+end)
+
+W:Slider("Stab Hitbox Range", 4, 28, 10, function(v)
+    local env = getStabPatchEnv()
+    if env then env.__REF_STAB_UI_RADIUS = v end
+    local patch = getStabPatch()
+    if type(patch) == "table" then
+        patch.Radius = v
+    end
+end)
+
 W:Toggle("Throw Hitbox", false, function(v)
     State.throwRangeOn = v
     if v then startThrowHitboxSafe() else stopThrowHitboxSafe() end
@@ -4670,6 +4705,7 @@ local phaseLbl = W:Label("Phase: Unknown")
 local dataLbl = W:Label("Role: ? | Coins: 0/40")
 local gunDropLbl = W:Label("GunDrop: Missing | N/A")
 local afkLbl = W:Label("Farm AFK: Idle")
+local stabLbl = W:Label("Stab Hitbox: Loading")
 local throwLbl = W:Label("Throw Hitbox: Idle")
 
 _spawn(function()
@@ -4687,6 +4723,8 @@ _spawn(function()
         if State.espOn then parts[#parts+1] = "esp" end
         if State.gunDropOn then parts[#parts+1] = "gundrop" end
         if State.gunDropEspOn then parts[#parts+1] = "gundrop esp" end
+        local _stabPatchForActive = getStabPatch()
+        if type(_stabPatchForActive) == "table" and _stabPatchForActive.Enabled then parts[#parts+1] = "stab hitbox" end
         if State.throwRangeOn then parts[#parts+1] = "throw hitbox" end
         local activeText = #parts > 0 and ("Active: "..table.concat(parts, ", ")) or "Inactive"
         local localRole = State.currentPhase == "Lobby" and "?" or (State.localRole or State.roles[LocalPlayer.Name] or "?")
@@ -4700,6 +4738,12 @@ _spawn(function()
             dataLbl.Text = "Role: "..tostring(localRole).." | Coins: "..tostring(State.coinCount or 0).."/"..tostring(State.coinLimit or 40).." | Coin: "..tostring(State.coinStatus or "Idle")
             gunDropLbl.Text = "GunDrop: "..tostring(State.lastGunDropStatus or "Missing").." | "..tostring(State.lastGunDropDistance or "N/A").." | GiveWeapon: "..tostring(State._lastGiveWeaponName or "None")
             afkLbl.Text = "Farm AFK: "..tostring(State.afkStatus or "Idle")
+            local _stabPatchForLabel = getStabPatch()
+            if type(_stabPatchForLabel) == "table" then
+                stabLbl.Text = "Stab Hitbox: "..tostring(_stabPatchForLabel.Status or "Idle").." | Range: "..tostring(_stabPatchForLabel.Radius or 10)
+            else
+                stabLbl.Text = "Stab Hitbox: Loading"
+            end
             throwLbl.Text = "Throw Hitbox: "..tostring(State.throwRangeStatus or "Idle").." | Radius: "..tostring(State.throwRangeRadius or 18)
         end)
     end
@@ -4758,6 +4802,15 @@ local function __ref_start_isolated_stab_hitbox_patch()
         LastPulse = 0,
         LastTargetHit = {},
     }
+    if ENV.__REF_STAB_UI_RADIUS ~= nil then
+        local r = tonumber(ENV.__REF_STAB_UI_RADIUS)
+        if r then Patch.Radius = math.max(4, math.min(28, r)) end
+    end
+    if ENV.__REF_STAB_UI_ENABLED ~= nil then
+        Patch.Enabled = ENV.__REF_STAB_UI_ENABLED == true
+        Patch.Status = Patch.Enabled and "Waiting manual stab" or "Off"
+    end
+
     ENV.__REF_STAB_HITBOX_PATCH = Patch
 
     local function safe(fn, ...)
@@ -5120,100 +5173,9 @@ local function __ref_start_isolated_stab_hitbox_patch()
         end
     end
 
-    local function makeButton(parent, text, pos, size)
-        local b = Instance.new("TextButton")
-        b.Size = size or UDim2.new(1, -12, 0, 26)
-        b.Position = pos
-        b.BackgroundColor3 = Color3.fromRGB(35, 38, 48)
-        b.BorderSizePixel = 0
-        b.Text = text
-        b.TextColor3 = Color3.fromRGB(230, 235, 245)
-        b.TextSize = 12
-        b.Font = Enum.Font.GothamSemibold
-        b.Parent = parent
-        local c = Instance.new("UICorner")
-        c.CornerRadius = UDim.new(0, 6)
-        c.Parent = b
-        return b
-    end
-
     local function buildGui()
-        local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
-        if not pg then return end
-
-        local old = pg:FindFirstChild("RefStabHitboxPatch")
-        if old then old:Destroy() end
-
-        local gui = Instance.new("ScreenGui")
-        gui.Name = "RefStabHitboxPatch"
-        gui.ResetOnSpawn = false
-        gui.DisplayOrder = 999998
-        gui.Parent = pg
-
-        local frame = Instance.new("Frame")
-        frame.Size = UDim2.new(0, 210, 0, 132)
-        frame.Position = UDim2.new(0, 258, 0.5, -66)
-        frame.BackgroundColor3 = Color3.fromRGB(16, 17, 22)
-        frame.BorderSizePixel = 0
-        frame.Active = true
-        frame.Parent = gui
-
-        local corner = Instance.new("UICorner")
-        corner.CornerRadius = UDim.new(0, 10)
-        corner.Parent = frame
-
-        local title = Instance.new("TextLabel")
-        title.Size = UDim2.new(1, -12, 0, 25)
-        title.Position = UDim2.new(0, 8, 0, 4)
-        title.BackgroundTransparency = 1
-        title.Text = "Stab Hitbox Patch"
-        title.TextColor3 = Color3.fromRGB(220, 225, 240)
-        title.TextSize = 13
-        title.Font = Enum.Font.GothamBold
-        title.TextXAlignment = Enum.TextXAlignment.Left
-        title.Parent = frame
-
-        local toggle = makeButton(frame, "Stab Hitbox: OFF", UDim2.new(0, 6, 0, 32))
-        local minus = makeButton(frame, "-", UDim2.new(0, 6, 0, 64), UDim2.new(0, 40, 0, 26))
-        local plus = makeButton(frame, "+", UDim2.new(1, -46, 0, 64), UDim2.new(0, 40, 0, 26))
-
-        local radiusLbl = Instance.new("TextLabel")
-        radiusLbl.Size = UDim2.new(1, -96, 0, 26)
-        radiusLbl.Position = UDim2.new(0, 48, 0, 64)
-        radiusLbl.BackgroundTransparency = 1
-        radiusLbl.TextColor3 = Color3.fromRGB(200, 210, 230)
-        radiusLbl.TextSize = 12
-        radiusLbl.Font = Enum.Font.Gotham
-        radiusLbl.Text = "Range: " .. tostring(Patch.Radius)
-        radiusLbl.Parent = frame
-
-        local statusLbl = Instance.new("TextLabel")
-        statusLbl.Size = UDim2.new(1, -12, 0, 34)
-        statusLbl.Position = UDim2.new(0, 6, 0, 94)
-        statusLbl.BackgroundTransparency = 1
-        statusLbl.TextColor3 = Color3.fromRGB(150, 160, 180)
-        statusLbl.TextSize = 10
-        statusLbl.Font = Enum.Font.Gotham
-        statusLbl.TextWrapped = true
-        statusLbl.Text = "Status: Off"
-        statusLbl.Parent = frame
-
-        toggle.MouseButton1Click:Connect(function()
-            Patch.Enabled = not Patch.Enabled
-            Patch.Status = Patch.Enabled and "Waiting manual stab" or "Off"
-            toggle.Text = Patch.Enabled and "Stab Hitbox: ON" or "Stab Hitbox: OFF"
-        end)
-
-        minus.MouseButton1Click:Connect(function()
-            Patch.Radius = math.max(4, Patch.Radius - 1)
-            radiusLbl.Text = "Range: " .. tostring(Patch.Radius)
-        end)
-
-        plus.MouseButton1Click:Connect(function()
-            Patch.Radius = math.min(28, Patch.Radius + 1)
-            radiusLbl.Text = "Range: " .. tostring(Patch.Radius)
-        end)
-
+        -- v68: no separate patch window.
+        -- Controls live in the main Ref UI; this function only binds input safely.
         connect(UserInputService.InputBegan, function(input, gp)
             if gp or not Patch.Enabled then return end
             local isClick = input.UserInputType == Enum.UserInputType.MouseButton1
@@ -5223,22 +5185,13 @@ local function __ref_start_isolated_stab_hitbox_patch()
             end
         end)
 
-        spawnTask(function()
-            while Patch.Gui and Patch.Gui.Parent do
-                statusLbl.Text = "Status: " .. tostring(Patch.Status)
-                toggle.Text = Patch.Enabled and "Stab Hitbox: ON" or "Stab Hitbox: OFF"
-                radiusLbl.Text = "Range: " .. tostring(Patch.Radius)
-                waitSmall(0.25)
-            end
-        end)
-
-        Patch.Gui = gui
+        Patch.Gui = { Parent = true }
     end
 
     listenRoles()
     buildGui()
 
-    Patch.Status = "Loaded"
+    if Patch.Status == "Off" or Patch.Status == nil then Patch.Status = "Loaded in main UI" end
 end
 
 _spawn(function()
