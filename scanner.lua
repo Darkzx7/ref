@@ -156,8 +156,12 @@ local State = {
     lastAction         = 0,
     manualSilent       = false,
     throwRangeOn       = false,
-    throwRangeRadius   = 18,
+    throwRangeRadius   = 10,
     throwRangeStatus   = "Idle",
+    throwRangeEnabledAt = 0,
+    _throwRangeSession = 0,
+    _throwRangeIgnore = {},
+    _throwHitboxSawNewThrow = false,
     _throwHitboxLastHit = {},
     _throwHitboxLastModel = nil,
     _throwHitboxStartPos = nil,
@@ -1697,7 +1701,7 @@ local function isThrowHitboxTarget(player)
     return r == "Innocent" or r == "Sheriff" or r == "Hero"
 end
 
-local THROW_HITBOX_VERTICAL_OFFSET = Vector3.new(0, -1.35, 0)
+local THROW_HITBOX_VERTICAL_OFFSET = Vector3.new(0, -1.65, 0)
 
 local function closestPointOnSegment(a, b, p)
     local ab = b - a
@@ -1870,7 +1874,7 @@ function Tester.ThrowHitboxFromAim()
     if roleOfPlayer(LocalPlayer) ~= "Murderer" then State.throwRangeStatus = "Need Murderer"; return false end
     local segA, segB, why = getAimSegment()
     if not segA or not segB then State.throwRangeStatus = why or "No aim"; return false end
-    local target, part, gap = getThrowHitboxTargetOnSegment(segA, segB, State.throwRangeRadius or 18)
+    local target, part, gap = getThrowHitboxTargetOnSegment(segA, segB, State.throwRangeRadius or 10)
     if not target then State.throwRangeStatus = "No target on throw line"; return false end
     local ok = pulseThrowHitboxTouch(target, part)
     State.throwRangeStatus = ok and ("Aim hitbox: "..target.Name.." | gap "..tostring(math.floor((gap or 0)+0.5))) or "Aim hitbox failed"
@@ -1929,6 +1933,11 @@ end
 local function stopThrowHitboxSafe()
     State.throwRangeOn = false
     State.throwRangeStatus = "Idle"
+    State._throwRangeSession = (State._throwRangeSession or 0) + 1
+    State._throwRangeIgnore = {}
+    State._throwHitboxSawNewThrow = false
+    State._throwHitboxStartPos = nil
+    State._lastThrowingKnifePos = nil
     safeDisconnect(State._throwHitboxConn)
     safeDisconnect(State._throwHitboxConn2)
     State._throwHitboxConn = nil
@@ -1989,7 +1998,7 @@ local function tryThrowHitboxSegment(a, b, label)
         if State.localDead then State.throwRangeStatus = "Dead"; return false end
         if roleOfPlayer(LocalPlayer) ~= "Murderer" then State.throwRangeStatus = "Need Murderer"; return false end
         if not a or not b then return false end
-        local target, part, gap = getThrowHitboxTargetOnSegment(a, b, State.throwRangeRadius or 18)
+        local target, part, gap = getThrowHitboxTargetOnSegment(a, b, State.throwRangeRadius or 10)
         if not target or not part then
             State.throwRangeStatus = tostring(label or "ThrowingKnife")..": no target"
             return false
@@ -2026,7 +2035,7 @@ local function watchThrowingKnifeModel(model)
             local dir = safeThrowVectorValue(model, "ThrowDirection")
             if start and dir and dir.Magnitude > 0.01 then
                 local segA = start
-                local segB = start + dir.Unit * 430
+                local segB = start + dir.Unit * 285
                 if tryThrowHitboxSegment(segA, segB, "Throw line") then
                     return
                 end
@@ -2082,13 +2091,28 @@ local function processStuckKnifePart(part)
     end)
 end
 
+local function isFreshThrowHitboxObject(inst, kind)
+    if not Alive or not State.throwRangeOn or not inst then return false end
+    if State._throwRangeIgnore and State._throwRangeIgnore[inst] then return false end
+    if kind == "StuckKnife" and not State._throwHitboxSawNewThrow then
+        State.throwRangeStatus = "Ignored old StuckKnife"
+        return false
+    end
+    return true
+end
+
 local function inspectThrowingKnifeChild(inst)
     local okRun = _pcall(function()
         if not Alive or not State.throwRangeOn or not inst then return end
         local name = tostring(inst.Name or "")
         if name == "ThrowingKnife" then
+            if not isFreshThrowHitboxObject(inst, "ThrowingKnife") then return end
+            State._throwHitboxSawNewThrow = true
+            State._throwHitboxStartPos = nil
+            State._lastThrowingKnifePos = nil
             watchThrowingKnifeModel(inst)
         elseif name == "StuckKnife" then
+            if not isFreshThrowHitboxObject(inst, "StuckKnife") then return end
             processStuckKnifePart(inst)
         end
     end)
@@ -2124,37 +2148,45 @@ end
 local function startThrowHitboxSafe()
     if State._throwHitboxLoop then return end
     State._throwHitboxLoop = true
-    State.throwRangeStatus = "Watching ThrowingKnife"
+    State.throwRangeStatus = "Waiting new throw"
+    State.throwRangeEnabledAt = testerTime()
+    State._throwRangeSession = (State._throwRangeSession or 0) + 1
+    State._throwHitboxSawNewThrow = false
+    State._throwHitboxStartPos = nil
+    State._lastThrowingKnifePos = nil
+    State._throwRangeIgnore = {}
 
-    -- Direct child watcher only. ThrowingKnife and StuckKnife appear directly in Workspace from the scan.
+    _pcall(function()
+        local oldTk = Workspace:FindFirstChild("ThrowingKnife")
+        local oldSk = Workspace:FindFirstChild("StuckKnife")
+        if oldTk then State._throwRangeIgnore[oldTk] = true end
+        if oldSk then State._throwRangeIgnore[oldSk] = true end
+    end)
+
+    local watchSession = State._throwRangeSession or 0
+
+    -- Only process objects created after enabling.
+    -- No existing ThrowingKnife/StuckKnife scan here.
     safeDisconnect(State._throwHitboxConn2)
     State._throwHitboxConn2 = nil
     _pcall(function()
         State._throwHitboxConn2 = trackConn(Workspace.ChildAdded:Connect(function(inst)
+            if watchSession ~= (State._throwRangeSession or 0) then return end
             inspectThrowingKnifeChild(inst)
         end))
-    end)
-
-    _pcall(function()
-        local tk = Workspace:FindFirstChild("ThrowingKnife")
-        local sk = Workspace:FindFirstChild("StuckKnife")
-        if tk then inspectThrowingKnifeChild(tk) end
-        if sk then inspectThrowingKnifeChild(sk) end
     end)
 
     hookCurrentKnifeForThrowHitbox()
 
     _spawn(function()
         local lastTool = nil
-        while Alive and State.throwRangeOn do
+        while Alive and State.throwRangeOn and watchSession == (State._throwRangeSession or 0) do
             local okLoop = _pcall(function()
                 local tool = findTool("Knife")
                 if tool ~= lastTool then
                     lastTool = tool
                     hookCurrentKnifeForThrowHitbox()
                 end
-                local tk = Workspace:FindFirstChild("ThrowingKnife")
-                if tk then inspectThrowingKnifeChild(tk) end
             end)
             if not okLoop then State.throwRangeStatus = "Throw loop guarded" end
             _wait(0.35)
@@ -4585,11 +4617,11 @@ W:Toggle("Show Stab Hitbox", false, function(v)
 end)
 
 W:Toggle("Throw Hitbox", false, function(v)
-    State.throwRangeOn = v
-    if v then startThrowHitboxSafe() else stopThrowHitboxSafe() end
+    State.throwRangeOn = v == true
+    if State.throwRangeOn then startThrowHitboxSafe() else stopThrowHitboxSafe() end
 end)
 
-W:Slider("Throw Hitbox Radius", 4, 45, 18, function(v)
+W:Slider("Throw Hitbox Radius", 1, 28, 10, function(v)
     State.throwRangeRadius = v
 end)
 
@@ -4760,7 +4792,7 @@ _spawn(function()
                 stabLbl.Text = "Stab Hitbox: Loading"
                 showStabLbl.Text = "Show Stab Hitbox: Loading"
             end
-            throwLbl.Text = "Throw Hitbox: "..tostring(State.throwRangeStatus or "Idle").." | Radius: "..tostring(State.throwRangeRadius or 18)
+            throwLbl.Text = "Throw Hitbox: "..tostring(State.throwRangeStatus or "Idle").." | Radius: "..tostring(State.throwRangeRadius or 10)
         end)
     end
 end)
@@ -4820,6 +4852,7 @@ local function __ref_start_isolated_stab_hitbox_patch()
         ShowHitbox = false,
         ShowStatus = "Hidden",
         ShowAdornment = nil,
+        ShowAdornments = {},
         ShowLoop = false,
     }
     if ENV.__REF_STAB_UI_RADIUS ~= nil then
@@ -4864,6 +4897,12 @@ local function __ref_start_isolated_stab_hitbox_patch()
             if self.ShowAdornment then
                 self.ShowAdornment:Destroy()
                 self.ShowAdornment = nil
+            end
+            if self.ShowAdornments then
+                for _, adorn in pairs(self.ShowAdornments) do
+                    pcall(function() adorn:Destroy() end)
+                end
+                self.ShowAdornments = {}
             end
         end)
         for _, conn in ipairs(self.Connections) do
@@ -4929,35 +4968,54 @@ local function __ref_start_isolated_stab_hitbox_patch()
                 Patch.ShowAdornment:Destroy()
                 Patch.ShowAdornment = nil
             end
+            if Patch.ShowAdornments then
+                for _, adorn in pairs(Patch.ShowAdornments) do
+                    pcall(function() adorn:Destroy() end)
+                end
+                Patch.ShowAdornments = {}
+            end
         end)
         Patch.ShowStatus = "Hidden"
     end
 
-    local function ensureStabVisual(root)
-        if Patch.ShowAdornment and Patch.ShowAdornment.Parent then
-            return Patch.ShowAdornment
+    local function getVisualTargetPart(player)
+        local char = getChar(player)
+        if not char then return nil end
+        return char:FindFirstChild("HumanoidRootPart")
+            or char:FindFirstChild("UpperTorso")
+            or char:FindFirstChild("Torso")
+            or char:FindFirstChild("Head")
+    end
+
+    local function ensureTargetAdornment(player, part)
+        if not player or not part then return nil end
+        Patch.ShowAdornments = Patch.ShowAdornments or {}
+
+        local key = player.Name
+        local old = Patch.ShowAdornments[key]
+        if old and old.Parent then
+            return old
         end
 
         local ok, adorn = pcall(function()
             local a = Instance.new("SphereHandleAdornment")
-            a.Name = "_REF_StabHitboxAdornment"
-            a.Adornee = root
+            a.Name = "_REF_StabTargetHitbox_" .. key
+            a.Adornee = part
             a.AlwaysOnTop = true
             a.ZIndex = 10
             a.Color3 = Color3.fromRGB(165, 80, 255)
-            a.Transparency = 0.76
+            a.Transparency = 0.78
             a.Radius = tonumber(Patch.Radius) or 10
-            local parent = LocalPlayer:FindFirstChildOfClass("PlayerGui") or root
+            local parent = LocalPlayer:FindFirstChildOfClass("PlayerGui") or part
             a.Parent = parent
             return a
         end)
 
         if ok and adorn then
-            Patch.ShowAdornment = adorn
+            Patch.ShowAdornments[key] = adorn
             return adorn
         end
 
-        Patch.ShowStatus = "Visual unavailable"
         return nil
     end
 
@@ -4979,32 +5037,45 @@ local function __ref_start_isolated_stab_hitbox_patch()
         spawnTask(function()
             while Patch.ShowHitbox do
                 local okLoop = pcall(function()
-                    local root = getRoot(getChar(LocalPlayer))
-                    if not root then
-                        clearStabVisual()
-                        Patch.ShowStatus = "No character"
-                        return
-                    end
-
+                    Patch.ShowAdornments = Patch.ShowAdornments or {}
+                    local aliveKeys = {}
                     local radius = tonumber(Patch.Radius) or 10
                     if radius < 1 then radius = 1 end
 
-                    local adorn = ensureStabVisual(root)
-                    if adorn then
-                        adorn.Adornee = root
-                        adorn.Radius = radius
-                        adorn.Transparency = Patch.Enabled and 0.76 or 0.88
-                        Patch.ShowStatus = Patch.Enabled
-                            and ("Stab radius: " .. tostring(radius))
-                            or ("Preview radius: " .. tostring(radius))
+                    local shown = 0
+                    for _, player in ipairs(Players:GetPlayers()) do
+                        if player ~= LocalPlayer and isValidTarget(player) then
+                            local part = getVisualTargetPart(player)
+                            if part then
+                                local adorn = ensureTargetAdornment(player, part)
+                                if adorn then
+                                    adorn.Adornee = part
+                                    adorn.Radius = radius
+                                    adorn.Transparency = Patch.Enabled and 0.78 or 0.9
+                                    aliveKeys[player.Name] = true
+                                    shown = shown + 1
+                                end
+                            end
+                        end
                     end
+
+                    for key, adorn in pairs(Patch.ShowAdornments) do
+                        if not aliveKeys[key] then
+                            pcall(function() adorn:Destroy() end)
+                            Patch.ShowAdornments[key] = nil
+                        end
+                    end
+
+                    Patch.ShowStatus = shown > 0
+                        and ((Patch.Enabled and "Target hitboxes: " or "Preview targets: ") .. tostring(shown))
+                        or "No valid targets"
                 end)
 
                 if not okLoop then
                     Patch.ShowStatus = "Visual guarded"
                 end
 
-                waitSmall(0.08)
+                waitSmall(0.12)
             end
 
             clearStabVisual()
