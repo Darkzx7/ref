@@ -1,10 +1,4 @@
--- ref_universal | Murder Mystery tester
--- v67: scope split main + isolated integrated stab patch
--- v2026-06-04-v52-stable-childadded-throwingknife-hitbox
 
--- PREBOOT GUARD: runs before any Roblox :GetService/namecall.
--- Older V42-V44 Throw Hitbox builds installed a namecall hook that reads getgenv handler keys.
--- If those keys are nil/broken, even game:GetService can fail at line 1 in some executors.
 do
     local function __ref_noop_throw_handler()
         return false
@@ -149,9 +143,18 @@ end
 local State = {
     selectedPart       = "UpperTorso",
     partIndex          = 1,
-    predictionIndex    = 3,
-    jumpPred           = true,
-    pingPred           = true,
+    predictionIndex    = 1,
+    jumpPred           = false,
+    pingPred           = false,
+    predictLag         = false,
+    prioritizePing     = false,
+    verticalMultiplier = 0,
+    horizontalMultiplier = 0,
+    offsetX            = 0,
+    offsetY            = 0,
+    offsetZ            = 0,
+    simulationTimerMs  = 0,
+    predictionIntervalMs = 0,
     cooldownIndex      = 2,
     lastAction         = 0,
     manualSilent       = false,
@@ -1564,9 +1567,32 @@ local function canAct(name)
 end
 
 local function predSec()
-    local base = PRED_OPTIONS[State.predictionIndex] or 0
-    if State.pingPred then base = base + getPing() * 0.5 end
-    return math.min(base, 0.65)
+    local interval = tonumber(State.predictionIntervalMs) or 110
+    local simTimer = tonumber(State.simulationTimerMs) or 65
+
+    interval = math.clamp(interval, 0, 350) / 1000
+    simTimer = math.clamp(simTimer, 0, 250) / 1000
+
+    local base = interval
+    local preset = PRED_OPTIONS[State.predictionIndex] or 0
+    if preset > 0 then
+        base = math.max(base, preset * 0.55)
+    end
+
+    if State.predictLag then
+        base = base + simTimer * 0.72
+    end
+
+    if State.pingPred then
+        local ping = getPing()
+        if State.prioritizePing then
+            base = math.max(base, ping * 1.08)
+        else
+            base = base + ping * 0.38
+        end
+    end
+
+    return math.clamp(base, 0, 0.85)
 end
 
 local function isAlive(char)
@@ -1615,18 +1641,43 @@ end
 local function predictedPos(part)
     local pos = partPos(part)
     if not pos then return nil end
+
     local lead = predSec()
-    if lead <= 0 then return pos end
+    local ox = tonumber(State.offsetX) or 0
+    local oy = tonumber(State.offsetY) or 0
+    local oz = tonumber(State.offsetZ) or 0
+    local offset = Vector3.new(ox, oy, oz)
+
+    if lead <= 0 then
+        return pos + offset
+    end
+
     local vel = partVel(part)
-    if not vel then return pos end
+    if not vel then
+        return pos + offset
+    end
+
     local ok, pred = _pcall(function()
-        local v = pos + vel * lead
+        local rawH = tonumber(State.horizontalMultiplier) or 0
+        local rawV = tonumber(State.verticalMultiplier) or 0
+        local hMul = rawH <= 0 and 1 or math.clamp(rawH / 100, 0.05, 3)
+        local vMul = rawV <= 0 and 1 or math.clamp(rawV / 100, 0.05, 3)
+
+        local horizontal = Vector3.new(vel.X * hMul, 0, vel.Z * hMul)
+        local verticalScale = State.jumpPred and vMul or 1
+        local vertical = Vector3.new(0, vel.Y * verticalScale, 0)
+
+        local v = pos + (horizontal + vertical) * lead
+
         if State.jumpPred and math.abs(vel.Y) > 3 then
-            v = v + Vector3.new(0, vel.Y * lead * 0.85, 0)
+            local jumpExtra = math.clamp((vMul - 1) * 0.45, -0.35, 0.65)
+            v = v + Vector3.new(0, vel.Y * lead * jumpExtra, 0)
         end
-        return v
+
+        return v + offset
     end)
-    return (ok and pred) or pos
+
+    return (ok and pred) or (pos + offset)
 end
 
 local function getPlayerList()
@@ -4555,8 +4606,39 @@ local cdBtn     = W:CycleButton("Cooldown", COOLDOWN_OPTIONS, 2, function(i)
     State.cooldownIndex = i
 end)
 
-W:Toggle("Jump Prediction", true, function(v) State.jumpPred = v end)
-W:Toggle("Ping Prediction", true, function(v) State.pingPred = v end)
+W:Toggle("Jump Prediction", false, function(v) State.jumpPred = v end)
+W:Toggle("Ping Prediction", false, function(v) State.pingPred = v end)
+W:Toggle("Predict Lag", false, function(v) State.predictLag = v end)
+W:Toggle("Prioritize Ping", false, function(v) State.prioritizePing = v end)
+
+W:Slider("Vertical Multiplier", 0, 250, 0, function(v)
+    State.verticalMultiplier = v
+end)
+
+W:Slider("Horizontal Multiplier", 0, 250, 0, function(v)
+    State.horizontalMultiplier = v
+end)
+
+W:Slider("Offset X", -20, 20, 0, function(v)
+    State.offsetX = v
+end)
+
+W:Slider("Offset Y", -20, 20, 0, function(v)
+    State.offsetY = v
+end)
+
+W:Slider("Offset Z", -20, 20, 0, function(v)
+    State.offsetZ = v
+end)
+
+W:Slider("Simulation Timer", 0, 250, 0, function(v)
+    State.simulationTimerMs = v
+end)
+
+W:Slider("Prediction Interval", 0, 350, 0, function(v)
+    State.predictionIntervalMs = v
+end)
+
 W:Toggle("Manual Shoot Murderer", false, function(v) State.manualSilent = v end)
 
 W:Button("Shoot Murderer", function()
@@ -4745,6 +4827,7 @@ end)
 
 W:Section("  STATUS")
 local statusLbl = W:Label("Ready.")
+local predictionLbl = W:Label("Prediction: lead 0ms")
 local phaseLbl = W:Label("Phase: Unknown")
 local dataLbl = W:Label("Role: ? | Coins: 0/40")
 local gunDropLbl = W:Label("GunDrop: Missing | N/A")
@@ -4780,6 +4863,8 @@ _spawn(function()
         end
         _pcall(function()
             statusLbl.Text = activeText
+            local _leadMs = math.floor((predSec() or 0) * 1000 + 0.5)
+            predictionLbl.Text = "Prediction: "..tostring(_leadMs).."ms | V "..tostring(State.verticalMultiplier or 100).."% | H "..tostring(State.horizontalMultiplier or 100).."% | Off "..tostring(State.offsetX or 0)..","..tostring(State.offsetY or 0)..","..tostring(State.offsetZ or 0)
             phaseLbl.Text = "Phase: "..tostring(State.currentPhase or "Unknown").." | Signal: "..tostring(State.lastRoundSignal or "None")..endText
             dataLbl.Text = "Role: "..tostring(localRole).." | Coins: "..tostring(State.coinCount or 0).."/"..tostring(State.coinLimit or 40).." | Coin: "..tostring(State.coinStatus or "Idle")
             gunDropLbl.Text = "GunDrop: "..tostring(State.lastGunDropStatus or "Missing").." | "..tostring(State.lastGunDropDistance or "N/A").." | GiveWeapon: "..tostring(State._lastGiveWeaponName or "None")
