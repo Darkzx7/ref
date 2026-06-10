@@ -162,10 +162,17 @@ local State = {
     simulationTimerMs  = 0,
     predictionIntervalMs = 0,
     autoTunePrediction = false,
+    motionResolver     = false,
+    predictionAggression = 50,
+    strafeDamp         = 0,
+    jumpDamp           = 0,
     predictionPresetName = "Manual",
+    _predictionHistory = nil,
     _lastPredictionLeadMs = 0,
     _lastPredictionSpeed = 0,
     _lastPredictionMode = "Manual",
+    _lastPredictionStrafe = 0,
+    _lastPredictionJump = 0,
     cooldownIndex      = 2,
     lastAction         = 0,
     manualSilent       = false,
@@ -1697,11 +1704,117 @@ local function getPart(char, preferred)
     return nil
 end
 
+local function getPredictionHistoryStore()
+    if type(State._predictionHistory) ~= "table" then
+        local ok, store = _pcall(function()
+            return setmetatable({}, { __mode = "k" })
+        end)
+        State._predictionHistory = (ok and store) or {}
+    end
+    return State._predictionHistory
+end
+
+local function clampVectorMagnitude(v, maxMag)
+    if not v then return Vector3.new() end
+    local mag = 0
+    _pcall(function() mag = v.Magnitude end)
+    if mag <= maxMag then return v end
+    if mag <= 0 then return Vector3.new() end
+    return v.Unit * maxMag
+end
+
+local function resolveMotion(part, pos, fallbackVel)
+    local now = testerTime()
+    local store = getPredictionHistoryStore()
+    local old = store[part]
+
+    local fallback = fallbackVel or Vector3.new()
+    local measured = fallback
+    local accel = Vector3.new()
+    local strafe = 0
+    local jumpChange = 0
+
+    if old and old.pos and old.t then
+        local dt = now - old.t
+        if dt > 0.018 and dt < 0.35 then
+            local raw = (pos - old.pos) / dt
+            local rawMag = 0
+            _pcall(function() rawMag = raw.Magnitude end)
+
+            -- Reject impossible spikes from replication/teleport.
+            if rawMag < 260 then
+                measured = (fallback * 0.35) + (raw * 0.65)
+            end
+
+            if old.vel then
+                accel = (measured - old.vel) / math.max(dt, 0.016)
+
+                local flatOld = Vector3.new(old.vel.X, 0, old.vel.Z)
+                local flatNew = Vector3.new(measured.X, 0, measured.Z)
+                local om, nm = 0, 0
+                _pcall(function()
+                    om = flatOld.Magnitude
+                    nm = flatNew.Magnitude
+                end)
+
+                if om > 2 and nm > 2 then
+                    local dot = math.clamp(flatOld.Unit:Dot(flatNew.Unit), -1, 1)
+                    strafe = 1 - ((dot + 1) * 0.5)
+                end
+
+                jumpChange = math.abs((measured.Y or 0) - (old.vel.Y or 0))
+            end
+        end
+    end
+
+    store[part] = {
+        pos = pos,
+        t = now,
+        vel = measured,
+        accel = accel,
+        strafe = strafe,
+        jump = jumpChange,
+    }
+
+    return measured, accel, strafe, jumpChange
+end
+
+local function startPredictionSampler()
+    if State._predictionSamplerStarted then return end
+    State._predictionSamplerStarted = true
+
+    _spawn(function()
+        while Alive do
+            local okLoop = _pcall(function()
+                if State.motionResolver or State.autoTunePrediction or State.jumpPred or State.pingPred then
+                    local players = Players:GetPlayers()
+                    for _, p in ipairs(players) do
+                        if p ~= LocalPlayer and p.Character and isAlive(p.Character) then
+                            local part = getPart(p.Character, State.selectedPart or "HumanoidRootPart")
+                            local pos = part and partPos(part)
+                            if part and pos then
+                                resolveMotion(part, pos, partVel(part) or Vector3.new())
+                            end
+                        end
+                    end
+                end
+            end)
+            _wait(0.045)
+        end
+    end)
+end
+
 local function predictedPos(part)
     local pos = partPos(part)
     if not pos then return nil end
 
-    local vel = partVel(part) or Vector3.new()
+    local baseVel = partVel(part) or Vector3.new()
+    local vel, accel, strafe, jumpChange = baseVel, Vector3.new(), 0, 0
+
+    if State.motionResolver or State.autoTunePrediction then
+        vel, accel, strafe, jumpChange = resolveMotion(part, pos, baseVel)
+    end
+
     local lead = predSec(part, pos, vel)
 
     local ox = tonumber(State.offsetX) or 0
@@ -1716,14 +1829,26 @@ local function predictedPos(part)
     local ok, pred = _pcall(function()
         local rawH = tonumber(State.horizontalMultiplier) or 0
         local rawV = tonumber(State.verticalMultiplier) or 0
+        local aggression = math.clamp((tonumber(State.predictionAggression) or 50) / 100, 0, 1.5)
+        local strafeDamp = math.clamp((tonumber(State.strafeDamp) or 0) / 100, 0, 1)
+        local jumpDamp = math.clamp((tonumber(State.jumpDamp) or 0) / 100, 0, 1)
 
         local horizontalSpeed = math.sqrt((vel.X * vel.X) + (vel.Z * vel.Z))
         local verticalSpeed = math.abs(vel.Y)
 
+        -- When target is spam-strafing, the old version overled too much.
+        -- This dampens lead on sudden direction change instead of chasing too far ahead.
+        local strafeCut = 1 - math.clamp(strafe * (0.35 + strafeDamp * 0.55), 0, 0.72)
+        local tunedLead = lead * strafeCut
+
+        if State.motionResolver then
+            tunedLead = tunedLead * (0.72 + aggression * 0.48)
+        end
+
         local hMul
         if rawH <= 0 then
-            if State.autoTunePrediction then
-                hMul = 1 + math.clamp(horizontalSpeed / 95, 0, 0.48) + math.clamp(getPing() * 0.16, 0, 0.12)
+            if State.autoTunePrediction or State.motionResolver then
+                hMul = 1 + math.clamp(horizontalSpeed / 140, 0, 0.34) * (0.55 + aggression * 0.45)
             else
                 hMul = 1
             end
@@ -1733,8 +1858,8 @@ local function predictedPos(part)
 
         local vMul
         if rawV <= 0 then
-            if State.autoTunePrediction and State.jumpPred and verticalSpeed > 3 then
-                vMul = 1 + math.clamp(verticalSpeed / 70, 0, 0.72)
+            if (State.autoTunePrediction or State.motionResolver) and State.jumpPred and verticalSpeed > 3 then
+                vMul = 1 + math.clamp(verticalSpeed / 95, 0, 0.48) * (1 - jumpDamp * 0.35)
             else
                 vMul = 1
             end
@@ -1746,18 +1871,42 @@ local function predictedPos(part)
         local verticalScale = State.jumpPred and vMul or 1
         local vertical = Vector3.new(0, vel.Y * verticalScale, 0)
 
-        local v = pos + (horizontal + vertical) * lead
+        local accelTerm = Vector3.new()
+        if State.motionResolver then
+            local flatAccel = Vector3.new(accel.X, 0, accel.Z)
+            local vertAccel = Vector3.new(0, accel.Y, 0)
+
+            flatAccel = clampVectorMagnitude(flatAccel, 140)
+            vertAccel = clampVectorMagnitude(vertAccel, 120)
+
+            -- Acceleration helps when the target changes direction, but is heavily clamped.
+            accelTerm = (flatAccel * (tunedLead * tunedLead) * 0.28 * aggression)
+                + (vertAccel * (tunedLead * tunedLead) * 0.16 * (1 - jumpDamp * 0.45))
+        end
+
+        local v = pos + (horizontal + vertical) * tunedLead + accelTerm
 
         if State.jumpPred and verticalSpeed > 3 then
-            local jumpExtra = math.clamp((vMul - 1) * 0.38, -0.28, 0.55)
-            v = v + Vector3.new(0, vel.Y * lead * jumpExtra, 0)
+            local jumpExtra = math.clamp((vMul - 1) * 0.26, -0.18, 0.42)
+            jumpExtra = jumpExtra * (1 - jumpDamp * 0.55)
+            v = v + Vector3.new(0, vel.Y * tunedLead * jumpExtra, 0)
+
+            -- If vertical movement is unstable, aim slightly closer to center instead of above the model.
+            if State.motionResolver and jumpChange > 18 then
+                v = v - Vector3.new(0, math.clamp(jumpChange / 45, 0, 2.8) * jumpDamp, 0)
+            end
         end
+
+        State._lastPredictionSpeed = math.floor(horizontalSpeed + 0.5)
+        State._lastPredictionStrafe = math.floor((strafe or 0) * 100 + 0.5)
+        State._lastPredictionJump = math.floor((jumpChange or 0) + 0.5)
 
         return v + offset
     end)
 
     return (ok and pred) or (pos + offset)
 end
+
 
 local function getPlayerList()
     local list = {}
@@ -4516,12 +4665,17 @@ function RefLib.Window(title)
         end))
 
         local T = {}
-        function T:Set(v)
+        function T:Set(v, fire)
             state = v == true
             _pcall(function()
-                TweenService:Create(track, TweenInfo.new(0.15), {BackgroundColor3 = state and onCol or offCol}):Play()
-                TweenService:Create(knob,  TweenInfo.new(0.15), {Position = state and onPos or offPos}):Play()
+                track.BackgroundColor3 = state and onCol or offCol
+                knob.Position = state and onPos or offPos
+                TweenService:Create(track, TweenInfo.new(0.12), {BackgroundColor3 = state and onCol or offCol}):Play()
+                TweenService:Create(knob,  TweenInfo.new(0.12), {Position = state and onPos or offPos}):Play()
             end)
+            if fire ~= false and type(callback) == "function" then
+                _pcall(callback, state)
+            end
         end
         function T:Get() return state end
         return T
@@ -4714,7 +4868,7 @@ end
 
 local function setToggleControl(ctrl, value)
     if ctrl and type(ctrl.Set) == "function" then
-        ctrl:Set(value == true)
+        ctrl:Set(value == true, false)
     end
 end
 
@@ -4735,6 +4889,7 @@ local function applyPredictionPreset(name, cfg)
     end
 
     if cfg.auto ~= nil then State.autoTunePrediction = cfg.auto == true end
+    if cfg.resolver ~= nil then State.motionResolver = cfg.resolver == true end
     if cfg.jump ~= nil then State.jumpPred = cfg.jump == true end
     if cfg.ping ~= nil then State.pingPred = cfg.ping == true end
     if cfg.lag ~= nil then State.predictLag = cfg.lag == true end
@@ -4747,8 +4902,12 @@ local function applyPredictionPreset(name, cfg)
     State.offsetZ = tonumber(cfg.z) or 0
     State.simulationTimerMs = tonumber(cfg.sim) or 0
     State.predictionIntervalMs = tonumber(cfg.interval) or 0
+    State.predictionAggression = tonumber(cfg.aggro) or State.predictionAggression
+    State.strafeDamp = tonumber(cfg.strafe) or State.strafeDamp
+    State.jumpDamp = tonumber(cfg.jumpDamp) or State.jumpDamp
 
     setToggleControl(predToggles.auto, State.autoTunePrediction)
+    setToggleControl(predToggles.resolver, State.motionResolver)
     setToggleControl(predToggles.jump, State.jumpPred)
     setToggleControl(predToggles.ping, State.pingPred)
     setToggleControl(predToggles.lag, State.predictLag)
@@ -4761,6 +4920,11 @@ local function applyPredictionPreset(name, cfg)
     setSliderControl(predSliders.z, State.offsetZ)
     setSliderControl(predSliders.sim, State.simulationTimerMs)
     setSliderControl(predSliders.interval, State.predictionIntervalMs)
+    setSliderControl(predSliders.aggro, State.predictionAggression)
+    setSliderControl(predSliders.strafe, State.strafeDamp)
+    setSliderControl(predSliders.jumpDamp, State.jumpDamp)
+
+    startPredictionSampler()
 
     if predictionPresetLbl then
         predictionPresetLbl.Text = "Prediction Preset: "..tostring(State.predictionPresetName)
@@ -4770,12 +4934,19 @@ end
 predToggles.auto = W:Toggle("Auto Tune Prediction", false, function(v)
     State.autoTunePrediction = v
     State.predictionPresetName = v and "Auto Tune" or "Manual"
+    if v then startPredictionSampler() end
     if predictionPresetLbl then
         predictionPresetLbl.Text = "Prediction Preset: "..tostring(State.predictionPresetName)
     end
 end)
 
-predToggles.jump = W:Toggle("Jump Prediction", false, function(v) State.jumpPred = v; markPredictionManual() end)
+predToggles.resolver = W:Toggle("Motion Resolver", false, function(v)
+    State.motionResolver = v
+    if v then startPredictionSampler() end
+    markPredictionManual()
+end)
+
+predToggles.jump = W:Toggle("Jump Prediction", false, function(v) State.jumpPred = v; if v then startPredictionSampler() end; markPredictionManual() end)
 predToggles.ping = W:Toggle("Ping Prediction", false, function(v) State.pingPred = v; markPredictionManual() end)
 predToggles.lag = W:Toggle("Predict Lag", false, function(v) State.predictLag = v; markPredictionManual() end)
 predToggles.prioritize = W:Toggle("Prioritize Ping", false, function(v) State.prioritizePing = v; markPredictionManual() end)
@@ -4815,45 +4986,67 @@ predSliders.interval = W:Slider("Prediction Interval", 0, 350, 0, function(v)
     markPredictionManual()
 end)
 
+predSliders.aggro = W:Slider("Prediction Aggression", 0, 150, 50, function(v)
+    State.predictionAggression = v
+    markPredictionManual()
+end)
+
+predSliders.strafe = W:Slider("Strafe Damp", 0, 100, 0, function(v)
+    State.strafeDamp = v
+    markPredictionManual()
+end)
+
+predSliders.jumpDamp = W:Slider("Jump Damp", 0, 100, 0, function(v)
+    State.jumpDamp = v
+    markPredictionManual()
+end)
+
 W:Button("Preset: Legit", function()
     applyPredictionPreset("Legit", {
-        auto = false, jump = true, ping = true, lag = false, prioritize = false,
-        predictionIndex = 2, v = 115, h = 115, x = 0, y = -1, z = 0, sim = 25, interval = 65
+        auto = false, resolver = true, jump = true, ping = true, lag = false, prioritize = false,
+        predictionIndex = 2, v = 95, h = 105, x = 0, y = -1, z = 0, sim = 20, interval = 45, aggro = 35, strafe = 60, jumpDamp = 45
     })
 end)
 
 W:Button("Preset: Balanced", function()
     applyPredictionPreset("Balanced", {
-        auto = false, jump = true, ping = true, lag = true, prioritize = false,
-        predictionIndex = 3, v = 135, h = 135, x = 0, y = -2, z = 0, sim = 45, interval = 85
+        auto = false, resolver = true, jump = true, ping = true, lag = true, prioritize = false,
+        predictionIndex = 3, v = 115, h = 125, x = 0, y = -2, z = 0, sim = 35, interval = 70, aggro = 50, strafe = 55, jumpDamp = 45
     })
 end)
 
 W:Button("Preset: Sharp", function()
     applyPredictionPreset("Sharp", {
-        auto = false, jump = true, ping = true, lag = true, prioritize = true,
-        predictionIndex = 3, v = 155, h = 155, x = 0, y = -3, z = 0, sim = 65, interval = 105
+        auto = false, resolver = true, jump = true, ping = true, lag = true, prioritize = true,
+        predictionIndex = 3, v = 130, h = 145, x = 0, y = -2, z = 0, sim = 55, interval = 85, aggro = 70, strafe = 45, jumpDamp = 35
     })
 end)
 
 W:Button("Preset: Jump Focus", function()
     applyPredictionPreset("Jump Focus", {
-        auto = false, jump = true, ping = true, lag = true, prioritize = false,
-        predictionIndex = 3, v = 190, h = 135, x = 0, y = -4, z = 0, sim = 65, interval = 95
+        auto = false, resolver = true, jump = true, ping = true, lag = true, prioritize = false,
+        predictionIndex = 3, v = 120, h = 110, x = 0, y = -3, z = 0, sim = 45, interval = 65, aggro = 45, strafe = 70, jumpDamp = 75
+    })
+end)
+
+W:Button("Preset: Anti Strafe", function()
+    applyPredictionPreset("Anti Strafe", {
+        auto = false, resolver = true, jump = true, ping = true, lag = true, prioritize = false,
+        predictionIndex = 2, v = 90, h = 95, x = 0, y = -2, z = 0, sim = 25, interval = 50, aggro = 30, strafe = 90, jumpDamp = 65
     })
 end)
 
 W:Button("Preset: Auto Master", function()
     applyPredictionPreset("Auto Master", {
-        auto = true, jump = true, ping = true, lag = true, prioritize = false,
-        predictionIndex = 1, v = 0, h = 0, x = 0, y = 0, z = 0, sim = 40, interval = 0
+        auto = true, resolver = true, jump = true, ping = true, lag = true, prioritize = false,
+        predictionIndex = 1, v = 0, h = 0, x = 0, y = 0, z = 0, sim = 35, interval = 0, aggro = 55, strafe = 65, jumpDamp = 55
     })
 end)
 
 W:Button("Reset Prediction", function()
     applyPredictionPreset("Manual", {
-        auto = false, jump = false, ping = false, lag = false, prioritize = false,
-        predictionIndex = 1, v = 0, h = 0, x = 0, y = 0, z = 0, sim = 0, interval = 0
+        auto = false, resolver = false, jump = false, ping = false, lag = false, prioritize = false,
+        predictionIndex = 1, v = 0, h = 0, x = 0, y = 0, z = 0, sim = 0, interval = 0, aggro = 50, strafe = 0, jumpDamp = 0
     })
 end)
 
@@ -5082,7 +5275,7 @@ _spawn(function()
         _pcall(function()
             statusLbl.Text = activeText
             local _leadMs = math.floor((predSec() or 0) * 1000 + 0.5)
-            predictionLbl.Text = "Prediction: "..tostring(_leadMs).."ms | "..tostring(State._lastPredictionMode or "Manual").." | "..tostring(State.predictionPresetName or "Manual").." | V "..tostring(State.verticalMultiplier or 0).."% | H "..tostring(State.horizontalMultiplier or 0).."% | Speed "..tostring(State._lastPredictionSpeed or 0)
+            predictionLbl.Text = "Prediction: "..tostring(State._lastPredictionLeadMs or _leadMs).."ms | "..tostring(State._lastPredictionMode or "Manual").." | "..tostring(State.predictionPresetName or "Manual").." | Speed "..tostring(State._lastPredictionSpeed or 0).." | Strafe "..tostring(State._lastPredictionStrafe or 0).."% | Jump "..tostring(State._lastPredictionJump or 0)
             phaseLbl.Text = "Phase: "..tostring(State.currentPhase or "Unknown").." | Signal: "..tostring(State.lastRoundSignal or "None")..endText
             dataLbl.Text = "Role: "..tostring(localRole).." | Coins: "..tostring(State.coinCount or 0).."/"..tostring(State.coinLimit or 40).." | Coin: "..tostring(State.coinStatus or "Idle")
             gunDropLbl.Text = "GunDrop: "..tostring(State.lastGunDropStatus or "Missing").." | "..tostring(State.lastGunDropDistance or "N/A").." | GiveWeapon: "..tostring(State._lastGiveWeaponName or "None")
