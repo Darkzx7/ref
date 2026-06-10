@@ -176,6 +176,13 @@ local State = {
     cooldownIndex      = 2,
     lastAction         = 0,
     manualSilent       = false,
+    smartShotResolver  = true,
+    shotBurstCount     = 5,
+    shotBodySweep      = true,
+    shotFallbackNearest = true,
+    shotStatus         = "Idle",
+    shotLastTarget     = "None",
+    shotLastMode       = "Single",
     throwRangeOn       = false,
     throwRangeRadius   = 10,
     throwRangeStatus   = "Idle",
@@ -2096,6 +2103,132 @@ local function pulseThrowHitboxTouch(targetPlayer, targetPart)
     return true
 end
 
+local function getGunTargetParts(char)
+    local parts = {}
+    local names = {
+        State.selectedPart or "UpperTorso",
+        "HumanoidRootPart",
+        "UpperTorso",
+        "Torso",
+        "Head",
+        "LowerTorso",
+    }
+    local seen = {}
+    for _, name in ipairs(names) do
+        local p = getPart(char, name)
+        if p and not seen[p] then
+            seen[p] = true
+            parts[#parts + 1] = p
+        end
+    end
+    return parts
+end
+
+local function nearestGunTarget()
+    local target, part, why = nearestMurdererTarget()
+    if target and part then
+        return target, part, "Murderer"
+    end
+
+    if State.shotFallbackNearest then
+        local fallback, fallbackPart = nearestByFilter(function(p)
+            return isValidCombatTarget(p)
+        end, "nearest")
+        if fallback and fallbackPart then
+            return fallback, fallbackPart, "Nearest"
+        end
+    end
+
+    return nil, nil, why or "No target"
+end
+
+local function cframePair(originPos, targetPos)
+    if not originPos or not targetPos then return nil, nil end
+    local oc, tc = nil, nil
+    local ok = _pcall(function()
+        oc = CFrame.new(originPos, targetPos)
+        tc = CFrame.new(targetPos)
+    end)
+    if not ok then return nil, nil end
+    return oc, tc
+end
+
+local function makeShotCandidatePositions(targetPlayer, primaryPart)
+    local list = {}
+    local seen = {}
+
+    local function addVec(v, label)
+        if not v then return end
+        local key = tostring(math.floor(v.X * 10)).."|"..tostring(math.floor(v.Y * 10)).."|"..tostring(math.floor(v.Z * 10))
+        if not seen[key] then
+            seen[key] = true
+            list[#list + 1] = { pos = v, label = label or "point" }
+        end
+    end
+
+    local char = targetPlayer and targetPlayer.Character
+    local bodyParts = char and getGunTargetParts(char) or {}
+
+    -- First: current body points. For spam jump/strafe, current replicated hitbox
+    -- is more reliable than overleading one tiny point.
+    if State.shotBodySweep then
+        for _, part in ipairs(bodyParts) do
+            addVec(partPos(part), tostring(part.Name))
+            if #list >= 4 then break end
+        end
+    end
+
+    -- Then: predicted position from the chosen primary part.
+    if primaryPart then
+        addVec(predictedPos(primaryPart), "Predicted")
+    end
+
+    -- Then: compact vertical sweep around torso/root, useful when target is jumping.
+    local center = primaryPart and partPos(primaryPart)
+    if center then
+        addVec(center + Vector3.new(0, -1.35, 0), "LowCenter")
+        addVec(center + Vector3.new(0, 0.85, 0), "HighCenter")
+    end
+
+    -- Motion resolver can overlead on direction flips; add a damped midpoint
+    -- between current and predicted so we do not skip across the character.
+    if primaryPart then
+        local current = partPos(primaryPart)
+        local pred = predictedPos(primaryPart)
+        if current and pred then
+            addVec(current:Lerp(pred, 0.35), "Blend35")
+            addVec(current:Lerp(pred, 0.62), "Blend62")
+        end
+    end
+
+    return list
+end
+
+local function fireGunAtPositions(remote, originPart, positions, maxShots)
+    local op = partPos(originPart) or (getRoot() and getRoot().Position)
+    if not op or not remote or type(positions) ~= "table" then return false, "missing shot data" end
+
+    local sent = 0
+    local limit = math.clamp(tonumber(maxShots) or 1, 1, 8)
+
+    for _, item in ipairs(positions) do
+        if sent >= limit then break end
+        local tp = item and item.pos
+        local oc, tc = cframePair(op, tp)
+        if oc and tc then
+            local okFire = _pcall(function()
+                remote:FireServer(oc, tc)
+            end)
+            if okFire then
+                sent = sent + 1
+                _wait(0.012)
+            end
+        end
+    end
+
+    return sent > 0, "sent "..tostring(sent)
+end
+
 local function makeCFrames(originPart, targetPart, originOverride)
     local op = originOverride or partPos(originPart)
     local tp = predictedPos(targetPart)
@@ -2114,17 +2247,50 @@ end
 local Tester = {}
 
 function Tester.ShootMurderer()
-    if not canAct("Shoot") then return false end
+    if not canAct("Shoot") then
+        State.shotStatus = "Cooldown"
+        return false
+    end
+
     local tool = equipTool("Gun")
     local remote = tool and findChild(tool, "Shoot")
-    if not remote then return false end
-    local _, targetPart = nearestMurdererTarget()
-    if not targetPart then return false end
+    if not remote then
+        State.shotStatus = "No Gun Shoot remote"
+        return false
+    end
+
+    local targetPlayer, targetPart, targetMode = nearestGunTarget()
+    if not targetPlayer or not targetPart then
+        State.shotStatus = targetMode or "No target"
+        State.shotLastTarget = "None"
+        return false
+    end
+
     local handle = findChild(tool, "Handle") or getPart(getChar(), "HumanoidRootPart")
+    if not handle then
+        State.shotStatus = "No gun handle/root"
+        return false
+    end
+
+    State.shotLastTarget = targetPlayer.Name
+    State.shotLastMode = targetMode or "Target"
+
+    if State.smartShotResolver then
+        local candidates = makeShotCandidatePositions(targetPlayer, targetPart)
+        local ok, why = fireGunAtPositions(remote, handle, candidates, State.shotBurstCount or 5)
+        State.shotStatus = (ok and "Resolver " or "Resolver failed: ") .. tostring(why)
+        return ok == true
+    end
+
     local oc, tc = makeCFrames(handle, targetPart)
-    if not oc then return false end
-    _pcall(function() remote:FireServer(oc, tc) end)
-    return true
+    if not oc then
+        State.shotStatus = "CFrame failed"
+        return false
+    end
+
+    local ok = _pcall(function() remote:FireServer(oc, tc) end)
+    State.shotStatus = ok and "Single shot sent" or "Single shot failed"
+    return ok == true
 end
 
 function Tester.ShootTarget()
@@ -2490,11 +2656,9 @@ local function installManualSilent()
         if input.UserInputType ~= Enum.UserInputType.MouseButton1
         and input.UserInputType ~= Enum.UserInputType.Touch then return end
         if not findChild(getChar(), "Gun") then return end
-        _spawn(function()
-            if Alive and State.manualSilent then
-                Tester.ShootTarget()
-            end
-        end)
+        if Alive and State.manualSilent then
+            Tester.ShootTarget()
+        end
     end))
 end
 
@@ -4847,7 +5011,7 @@ local partBtn   = W:CycleButton("Part", PART_OPTIONS, 1, function(i, v)
     State.partIndex   = i
     State.selectedPart = v
 end)
-local predBtn   = W:CycleButton("Prediction", PRED_OPTIONS, 3, function(i)
+local predBtn   = W:CycleButton("Prediction", PRED_OPTIONS, 1, function(i)
     State.predictionIndex = i
 end)
 local cdBtn     = W:CycleButton("Cooldown", COOLDOWN_OPTIONS, 2, function(i)
@@ -5050,6 +5214,33 @@ W:Button("Reset Prediction", function()
     })
 end)
 
+W:Toggle("Smart Shot Resolver", true, function(v)
+    State.smartShotResolver = v == true
+end)
+
+W:Toggle("Shot Body Sweep", true, function(v)
+    State.shotBodySweep = v == true
+end)
+
+W:Toggle("Shot Fallback Nearest", true, function(v)
+    State.shotFallbackNearest = v == true
+end)
+
+W:Slider("Shot Burst Count", 1, 8, 5, function(v)
+    State.shotBurstCount = v
+end)
+
+W:Button("Preset: Close Anti Jump", function()
+    applyPredictionPreset("Close Anti Jump", {
+        auto = false, resolver = true, jump = true, ping = true, lag = false, prioritize = false,
+        predictionIndex = 1, v = 80, h = 70, x = 0, y = -1, z = 0, sim = 10, interval = 20, aggro = 15, strafe = 100, jumpDamp = 90
+    })
+    State.smartShotResolver = true
+    State.shotBodySweep = true
+    State.shotFallbackNearest = true
+    State.shotBurstCount = 6
+end)
+
 W:Toggle("Manual Shoot Murderer", false, function(v) State.manualSilent = v end)
 
 W:Button("Shoot Murderer", function()
@@ -5239,6 +5430,7 @@ end)
 W:Section("  STATUS")
 local statusLbl = W:Label("Ready.")
 local predictionLbl = W:Label("Prediction: lead 0ms")
+local shotLbl = W:Label("Shot: Idle")
 local phaseLbl = W:Label("Phase: Unknown")
 local dataLbl = W:Label("Role: ? | Coins: 0/40")
 local gunDropLbl = W:Label("GunDrop: Missing | N/A")
@@ -5276,6 +5468,7 @@ _spawn(function()
             statusLbl.Text = activeText
             local _leadMs = math.floor((predSec() or 0) * 1000 + 0.5)
             predictionLbl.Text = "Prediction: "..tostring(State._lastPredictionLeadMs or _leadMs).."ms | "..tostring(State._lastPredictionMode or "Manual").." | "..tostring(State.predictionPresetName or "Manual").." | Speed "..tostring(State._lastPredictionSpeed or 0).." | Strafe "..tostring(State._lastPredictionStrafe or 0).."% | Jump "..tostring(State._lastPredictionJump or 0)
+            shotLbl.Text = "Shot: "..tostring(State.shotStatus or "Idle").." | Target: "..tostring(State.shotLastTarget or "None").." | Mode: "..tostring(State.shotLastMode or "Single")
             phaseLbl.Text = "Phase: "..tostring(State.currentPhase or "Unknown").." | Signal: "..tostring(State.lastRoundSignal or "None")..endText
             dataLbl.Text = "Role: "..tostring(localRole).." | Coins: "..tostring(State.coinCount or 0).."/"..tostring(State.coinLimit or 40).." | Coin: "..tostring(State.coinStatus or "Idle")
             gunDropLbl.Text = "GunDrop: "..tostring(State.lastGunDropStatus or "Missing").." | "..tostring(State.lastGunDropDistance or "N/A").." | GiveWeapon: "..tostring(State._lastGiveWeaponName or "None")
