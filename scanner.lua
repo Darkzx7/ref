@@ -1,4 +1,10 @@
+-- ref_universal | Murder Mystery tester
+-- v67: scope split main + isolated integrated stab patch
+-- v2026-06-04-v52-stable-childadded-throwingknife-hitbox
 
+-- PREBOOT GUARD: runs before any Roblox :GetService/namecall.
+-- Older V42-V44 Throw Hitbox builds installed a namecall hook that reads getgenv handler keys.
+-- If those keys are nil/broken, even game:GetService can fail at line 1 in some executors.
 do
     local function __ref_noop_throw_handler()
         return false
@@ -155,6 +161,11 @@ local State = {
     offsetZ            = 0,
     simulationTimerMs  = 0,
     predictionIntervalMs = 0,
+    autoTunePrediction = false,
+    predictionPresetName = "Manual",
+    _lastPredictionLeadMs = 0,
+    _lastPredictionSpeed = 0,
+    _lastPredictionMode = "Manual",
     cooldownIndex      = 2,
     lastAction         = 0,
     manualSilent       = false,
@@ -1566,9 +1577,9 @@ local function canAct(name)
     return true
 end
 
-local function predSec()
-    local interval = tonumber(State.predictionIntervalMs) or 110
-    local simTimer = tonumber(State.simulationTimerMs) or 65
+local function predSec(part, pos, vel)
+    local interval = tonumber(State.predictionIntervalMs) or 0
+    local simTimer = tonumber(State.simulationTimerMs) or 0
 
     interval = math.clamp(interval, 0, 350) / 1000
     simTimer = math.clamp(simTimer, 0, 250) / 1000
@@ -1592,7 +1603,55 @@ local function predSec()
         end
     end
 
-    return math.clamp(base, 0, 0.85)
+    local autoLead = 0
+    if State.autoTunePrediction and part and pos then
+        local ping = getPing()
+        local root = getRoot()
+        local dist = 0
+        _pcall(function()
+            if root then dist = (pos - root.Position).Magnitude end
+        end)
+
+        local v = vel or partVel(part) or Vector3.new()
+        local horizontalSpeed = math.sqrt((v.X * v.X) + (v.Z * v.Z))
+        local verticalSpeed = math.abs(v.Y)
+
+        -- Conservative auto lead:
+        -- ping contributes, distance contributes lightly, movement speed contributes more.
+        autoLead = 0.018
+            + math.clamp(ping * 0.72, 0, 0.22)
+            + math.clamp(dist / 1850, 0, 0.13)
+            + math.clamp(horizontalSpeed / 950, 0, 0.12)
+
+        if State.jumpPred and verticalSpeed > 4 then
+            autoLead = autoLead + math.clamp(verticalSpeed / 900, 0, 0.07)
+        end
+
+        if State.predictLag then
+            autoLead = autoLead + math.clamp(simTimer * 0.45, 0, 0.08)
+        end
+
+        if State.prioritizePing then
+            autoLead = math.max(autoLead, math.clamp(ping * 1.18, 0, 0.34))
+        end
+
+        -- If manual fields are zero, auto controls lead fully.
+        -- If user added manual lead, blend it instead of replacing it.
+        if base <= 0.005 then
+            base = autoLead
+        else
+            base = (base * 0.58) + (autoLead * 0.42)
+        end
+
+        State._lastPredictionSpeed = math.floor(horizontalSpeed + 0.5)
+        State._lastPredictionMode = "Auto"
+    else
+        State._lastPredictionMode = "Manual"
+    end
+
+    local final = math.clamp(base, 0, 0.85)
+    State._lastPredictionLeadMs = math.floor(final * 1000 + 0.5)
+    return final
 end
 
 local function isAlive(char)
@@ -1642,7 +1701,9 @@ local function predictedPos(part)
     local pos = partPos(part)
     if not pos then return nil end
 
-    local lead = predSec()
+    local vel = partVel(part) or Vector3.new()
+    local lead = predSec(part, pos, vel)
+
     local ox = tonumber(State.offsetX) or 0
     local oy = tonumber(State.offsetY) or 0
     local oz = tonumber(State.offsetZ) or 0
@@ -1652,16 +1713,34 @@ local function predictedPos(part)
         return pos + offset
     end
 
-    local vel = partVel(part)
-    if not vel then
-        return pos + offset
-    end
-
     local ok, pred = _pcall(function()
         local rawH = tonumber(State.horizontalMultiplier) or 0
         local rawV = tonumber(State.verticalMultiplier) or 0
-        local hMul = rawH <= 0 and 1 or math.clamp(rawH / 100, 0.05, 3)
-        local vMul = rawV <= 0 and 1 or math.clamp(rawV / 100, 0.05, 3)
+
+        local horizontalSpeed = math.sqrt((vel.X * vel.X) + (vel.Z * vel.Z))
+        local verticalSpeed = math.abs(vel.Y)
+
+        local hMul
+        if rawH <= 0 then
+            if State.autoTunePrediction then
+                hMul = 1 + math.clamp(horizontalSpeed / 95, 0, 0.48) + math.clamp(getPing() * 0.16, 0, 0.12)
+            else
+                hMul = 1
+            end
+        else
+            hMul = math.clamp(rawH / 100, 0.05, 3)
+        end
+
+        local vMul
+        if rawV <= 0 then
+            if State.autoTunePrediction and State.jumpPred and verticalSpeed > 3 then
+                vMul = 1 + math.clamp(verticalSpeed / 70, 0, 0.72)
+            else
+                vMul = 1
+            end
+        else
+            vMul = math.clamp(rawV / 100, 0.05, 3)
+        end
 
         local horizontal = Vector3.new(vel.X * hMul, 0, vel.Z * hMul)
         local verticalScale = State.jumpPred and vMul or 1
@@ -1669,8 +1748,8 @@ local function predictedPos(part)
 
         local v = pos + (horizontal + vertical) * lead
 
-        if State.jumpPred and math.abs(vel.Y) > 3 then
-            local jumpExtra = math.clamp((vMul - 1) * 0.45, -0.35, 0.65)
+        if State.jumpPred and verticalSpeed > 3 then
+            local jumpExtra = math.clamp((vMul - 1) * 0.38, -0.28, 0.55)
             v = v + Vector3.new(0, vel.Y * lead * jumpExtra, 0)
         end
 
@@ -4525,7 +4604,22 @@ function RefLib.Window(title)
             or i.UserInputType == Enum.UserInputType.Touch then dragging = false end
         end))
 
-        local S = {}; function S:Get() return val end; return S
+        local S = {}
+        function S:Get() return val end
+        function S:Set(v, fire)
+            local n = tonumber(v)
+            if not n then return end
+            n = math.clamp(math.floor(n + 0.5), min, max)
+            val = n
+            local f = (val-min)/(max-min)
+            fill.Size      = UDim2.new(f,0,1,0)
+            thumb.Position = UDim2.new(f,-7,0.5,-7)
+            lbl.Text       = label..": "..tostring(val)
+            if fire ~= false and type(callback) == "function" then
+                _pcall(callback, val)
+            end
+        end
+        return S
     end
 
     function W:Button(label, callback)
@@ -4606,37 +4700,161 @@ local cdBtn     = W:CycleButton("Cooldown", COOLDOWN_OPTIONS, 2, function(i)
     State.cooldownIndex = i
 end)
 
-W:Toggle("Jump Prediction", false, function(v) State.jumpPred = v end)
-W:Toggle("Ping Prediction", false, function(v) State.pingPred = v end)
-W:Toggle("Predict Lag", false, function(v) State.predictLag = v end)
-W:Toggle("Prioritize Ping", false, function(v) State.prioritizePing = v end)
+local predictionPresetLbl = W:Label("Prediction Preset: Manual")
 
-W:Slider("Vertical Multiplier", 0, 250, 0, function(v)
+local predToggles = {}
+local predSliders = {}
+
+local function markPredictionManual()
+    State.predictionPresetName = "Manual"
+    if predictionPresetLbl then
+        predictionPresetLbl.Text = "Prediction Preset: Manual"
+    end
+end
+
+local function setToggleControl(ctrl, value)
+    if ctrl and type(ctrl.Set) == "function" then
+        ctrl:Set(value == true)
+    end
+end
+
+local function setSliderControl(ctrl, value)
+    if ctrl and type(ctrl.Set) == "function" then
+        ctrl:Set(value, false)
+    end
+end
+
+local function applyPredictionPreset(name, cfg)
+    State.predictionPresetName = name or "Custom"
+
+    if cfg.predictionIndex then
+        State.predictionIndex = cfg.predictionIndex
+        if predBtn and type(predBtn.SetIndex) == "function" then
+            predBtn:SetIndex(cfg.predictionIndex)
+        end
+    end
+
+    if cfg.auto ~= nil then State.autoTunePrediction = cfg.auto == true end
+    if cfg.jump ~= nil then State.jumpPred = cfg.jump == true end
+    if cfg.ping ~= nil then State.pingPred = cfg.ping == true end
+    if cfg.lag ~= nil then State.predictLag = cfg.lag == true end
+    if cfg.prioritize ~= nil then State.prioritizePing = cfg.prioritize == true end
+
+    State.verticalMultiplier = tonumber(cfg.v) or State.verticalMultiplier
+    State.horizontalMultiplier = tonumber(cfg.h) or State.horizontalMultiplier
+    State.offsetX = tonumber(cfg.x) or 0
+    State.offsetY = tonumber(cfg.y) or 0
+    State.offsetZ = tonumber(cfg.z) or 0
+    State.simulationTimerMs = tonumber(cfg.sim) or 0
+    State.predictionIntervalMs = tonumber(cfg.interval) or 0
+
+    setToggleControl(predToggles.auto, State.autoTunePrediction)
+    setToggleControl(predToggles.jump, State.jumpPred)
+    setToggleControl(predToggles.ping, State.pingPred)
+    setToggleControl(predToggles.lag, State.predictLag)
+    setToggleControl(predToggles.prioritize, State.prioritizePing)
+
+    setSliderControl(predSliders.v, State.verticalMultiplier)
+    setSliderControl(predSliders.h, State.horizontalMultiplier)
+    setSliderControl(predSliders.x, State.offsetX)
+    setSliderControl(predSliders.y, State.offsetY)
+    setSliderControl(predSliders.z, State.offsetZ)
+    setSliderControl(predSliders.sim, State.simulationTimerMs)
+    setSliderControl(predSliders.interval, State.predictionIntervalMs)
+
+    if predictionPresetLbl then
+        predictionPresetLbl.Text = "Prediction Preset: "..tostring(State.predictionPresetName)
+    end
+end
+
+predToggles.auto = W:Toggle("Auto Tune Prediction", false, function(v)
+    State.autoTunePrediction = v
+    State.predictionPresetName = v and "Auto Tune" or "Manual"
+    if predictionPresetLbl then
+        predictionPresetLbl.Text = "Prediction Preset: "..tostring(State.predictionPresetName)
+    end
+end)
+
+predToggles.jump = W:Toggle("Jump Prediction", false, function(v) State.jumpPred = v; markPredictionManual() end)
+predToggles.ping = W:Toggle("Ping Prediction", false, function(v) State.pingPred = v; markPredictionManual() end)
+predToggles.lag = W:Toggle("Predict Lag", false, function(v) State.predictLag = v; markPredictionManual() end)
+predToggles.prioritize = W:Toggle("Prioritize Ping", false, function(v) State.prioritizePing = v; markPredictionManual() end)
+
+predSliders.v = W:Slider("Vertical Multiplier", 0, 250, 0, function(v)
     State.verticalMultiplier = v
+    markPredictionManual()
 end)
 
-W:Slider("Horizontal Multiplier", 0, 250, 0, function(v)
+predSliders.h = W:Slider("Horizontal Multiplier", 0, 250, 0, function(v)
     State.horizontalMultiplier = v
+    markPredictionManual()
 end)
 
-W:Slider("Offset X", -20, 20, 0, function(v)
+predSliders.x = W:Slider("Offset X", -20, 20, 0, function(v)
     State.offsetX = v
+    markPredictionManual()
 end)
 
-W:Slider("Offset Y", -20, 20, 0, function(v)
+predSliders.y = W:Slider("Offset Y", -20, 20, 0, function(v)
     State.offsetY = v
+    markPredictionManual()
 end)
 
-W:Slider("Offset Z", -20, 20, 0, function(v)
+predSliders.z = W:Slider("Offset Z", -20, 20, 0, function(v)
     State.offsetZ = v
+    markPredictionManual()
 end)
 
-W:Slider("Simulation Timer", 0, 250, 0, function(v)
+predSliders.sim = W:Slider("Simulation Timer", 0, 250, 0, function(v)
     State.simulationTimerMs = v
+    markPredictionManual()
 end)
 
-W:Slider("Prediction Interval", 0, 350, 0, function(v)
+predSliders.interval = W:Slider("Prediction Interval", 0, 350, 0, function(v)
     State.predictionIntervalMs = v
+    markPredictionManual()
+end)
+
+W:Button("Preset: Legit", function()
+    applyPredictionPreset("Legit", {
+        auto = false, jump = true, ping = true, lag = false, prioritize = false,
+        predictionIndex = 2, v = 115, h = 115, x = 0, y = -1, z = 0, sim = 25, interval = 65
+    })
+end)
+
+W:Button("Preset: Balanced", function()
+    applyPredictionPreset("Balanced", {
+        auto = false, jump = true, ping = true, lag = true, prioritize = false,
+        predictionIndex = 3, v = 135, h = 135, x = 0, y = -2, z = 0, sim = 45, interval = 85
+    })
+end)
+
+W:Button("Preset: Sharp", function()
+    applyPredictionPreset("Sharp", {
+        auto = false, jump = true, ping = true, lag = true, prioritize = true,
+        predictionIndex = 3, v = 155, h = 155, x = 0, y = -3, z = 0, sim = 65, interval = 105
+    })
+end)
+
+W:Button("Preset: Jump Focus", function()
+    applyPredictionPreset("Jump Focus", {
+        auto = false, jump = true, ping = true, lag = true, prioritize = false,
+        predictionIndex = 3, v = 190, h = 135, x = 0, y = -4, z = 0, sim = 65, interval = 95
+    })
+end)
+
+W:Button("Preset: Auto Master", function()
+    applyPredictionPreset("Auto Master", {
+        auto = true, jump = true, ping = true, lag = true, prioritize = false,
+        predictionIndex = 1, v = 0, h = 0, x = 0, y = 0, z = 0, sim = 40, interval = 0
+    })
+end)
+
+W:Button("Reset Prediction", function()
+    applyPredictionPreset("Manual", {
+        auto = false, jump = false, ping = false, lag = false, prioritize = false,
+        predictionIndex = 1, v = 0, h = 0, x = 0, y = 0, z = 0, sim = 0, interval = 0
+    })
 end)
 
 W:Toggle("Manual Shoot Murderer", false, function(v) State.manualSilent = v end)
@@ -4864,7 +5082,7 @@ _spawn(function()
         _pcall(function()
             statusLbl.Text = activeText
             local _leadMs = math.floor((predSec() or 0) * 1000 + 0.5)
-            predictionLbl.Text = "Prediction: "..tostring(_leadMs).."ms | V "..tostring(State.verticalMultiplier or 100).."% | H "..tostring(State.horizontalMultiplier or 100).."% | Off "..tostring(State.offsetX or 0)..","..tostring(State.offsetY or 0)..","..tostring(State.offsetZ or 0)
+            predictionLbl.Text = "Prediction: "..tostring(_leadMs).."ms | "..tostring(State._lastPredictionMode or "Manual").." | "..tostring(State.predictionPresetName or "Manual").." | V "..tostring(State.verticalMultiplier or 0).."% | H "..tostring(State.horizontalMultiplier or 0).."% | Speed "..tostring(State._lastPredictionSpeed or 0)
             phaseLbl.Text = "Phase: "..tostring(State.currentPhase or "Unknown").." | Signal: "..tostring(State.lastRoundSignal or "None")..endText
             dataLbl.Text = "Role: "..tostring(localRole).." | Coins: "..tostring(State.coinCount or 0).."/"..tostring(State.coinLimit or 40).." | Coin: "..tostring(State.coinStatus or "Idle")
             gunDropLbl.Text = "GunDrop: "..tostring(State.lastGunDropStatus or "Missing").." | "..tostring(State.lastGunDropDistance or "N/A").." | GiveWeapon: "..tostring(State._lastGiveWeaponName or "None")
