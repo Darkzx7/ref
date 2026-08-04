@@ -9,6 +9,19 @@ do
     local function __ref_noop_throw_handler()
         return false
     end
+    local handlerKeys = {
+        "__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER",
+        "__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER_V41",
+        "__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER_V42",
+        "__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER_V43_SAFE",
+        "__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER_V45_SAFE",
+        "__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER_V47_SAFE",
+        "__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER_V48_SAFE",
+    }
+    local hookedKeys = {
+        "__REF_UNIVERSAL_MM_THROW_HITBOX_HOOKED",
+        "__REF_UNIVERSAL_MM_THROW_HITBOX_HOOKED_V43_SAFE",
+    }
     local ok, env = pcall(function()
         if type(getgenv) == "function" then
             return getgenv()
@@ -16,13 +29,12 @@ do
         return _G
     end)
     if ok and type(env) == "table" then
-        env["__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER"] = __ref_noop_throw_handler
-        env["__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER_V41"] = __ref_noop_throw_handler
-        env["__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER_V42"] = __ref_noop_throw_handler
-        env["__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER_V43_SAFE"] = __ref_noop_throw_handler
-        env["__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER_V45_SAFE"] = __ref_noop_throw_handler
-        env["__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER_V47_SAFE"] = __ref_noop_throw_handler
-        env["__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER_V48_SAFE"] = __ref_noop_throw_handler
+        for _, key in ipairs(handlerKeys) do
+            env[key] = __ref_noop_throw_handler
+        end
+        for _, key in ipairs(hookedKeys) do
+            env[key] = false
+        end
     end
 end
 
@@ -64,11 +76,25 @@ end
 _pcall(function()
     if type(getgenv) == "function" then
         local env = getgenv()
-        env["__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER"] = _throwHitboxNoop
-        env["__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER_V41"] = _throwHitboxNoop
-        env["__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER_V42"] = _throwHitboxNoop
-        env["__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER_V43_SAFE"] = _throwHitboxNoop
-        env["__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER_V45_SAFE"] = _throwHitboxNoop
+        local handlerKeys = {
+            "__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER",
+            "__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER_V41",
+            "__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER_V42",
+            "__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER_V43_SAFE",
+            "__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER_V45_SAFE",
+            "__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER_V47_SAFE",
+            "__REF_UNIVERSAL_MM_THROW_HITBOX_HANDLER_V48_SAFE",
+        }
+        local hookedKeys = {
+            "__REF_UNIVERSAL_MM_THROW_HITBOX_HOOKED",
+            "__REF_UNIVERSAL_MM_THROW_HITBOX_HOOKED_V43_SAFE",
+        }
+        for _, key in ipairs(handlerKeys) do
+            env[key] = _throwHitboxNoop
+        end
+        for _, key in ipairs(hookedKeys) do
+            env[key] = false
+        end
     end
 end)
 
