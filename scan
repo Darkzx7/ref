@@ -1,517 +1,664 @@
--- ref_stab_hitbox_patch_v1.lua
--- Standalone passive Stab Hitbox patch.
--- Run this AFTER the main ref script is loaded.
--- It does not hook __namecall, does not alter KnifeThrown, and does not touch Throw Hitbox.
+-- ============================================================
+--  UNIVERSAL PAYLOAD FIRER v2.0
+--  Dispara TODOS os payloads, sem exceção, adaptando automaticamente
+--  Prioridade R15 | UI Arrastável em tempo real
+-- ============================================================
 
-local Players = game:GetService("Players")
-local UserInputService = game:GetService("UserInputService")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players            = game:GetService("Players")
+local RunService         = game:GetService("RunService")
+local UserInputService   = game:GetService("UserInputService")
+local ReplicatedStorage  = game:GetService("ReplicatedStorage")
+local ServerStorage      = game:GetService("ServerStorage")
+local Workspace          = game:GetService("Workspace")
+local Lighting           = game:GetService("Lighting")
+local SoundService       = game:GetService("SoundService")
+local StarterGui         = game:GetService("StarterGui")
 
 local LocalPlayer = Players.LocalPlayer
 
-local ENV = _G
-pcall(function()
-    if type(getgenv) == "function" then
-        ENV = getgenv()
-    end
-end)
-
-local OLD = ENV.__REF_STAB_HITBOX_PATCH
-if type(OLD) == "table" and type(OLD.Stop) == "function" then
-    pcall(function()
-        OLD:Stop("replaced")
-    end)
-end
-
-local Patch = {
-    Enabled = false,
-    Radius = 10,
-    Status = "Off",
-    Connections = {},
-    Roles = {},
-    LocalRole = nil,
-    LocalDead = false,
-    LastPulse = 0,
-    LastTargetHit = {},
+-- ============================================================
+--  CONFIGURAÇÕES
+-- ============================================================
+local CONFIG = {
+    PRIORIDADE_R15         = true,     -- R15 primeiro
+    DELAY_ENTRE_PAYLOADS   = 0.08,     -- delay entre disparos
+    MOSTRAR_APENAS_R15     = false,    -- se true, ignora R6
+    AUTO_SCAN              = true,     -- reescaneia automaticamente
+    SCAN_INTERVALO         = 6,        -- segundos
+    MAX_ITENS_UI           = 200,      -- limite visual
+    TENTAR_VARIAS_ASSINATURAS = true,  -- tenta FireServer() com vários args
 }
-ENV.__REF_STAB_HITBOX_PATCH = Patch
 
-local function safe(fn, ...)
-    if type(fn) ~= "function" then
-        return false, "not_function"
+-- ============================================================
+--  UTILITÁRIOS
+-- ============================================================
+local function isR15(character)
+    if not character then return false end
+    local hum = character:FindFirstChildOfClass("Humanoid")
+    if hum and hum.RigType == Enum.HumanoidRigType.R15 then return true end
+    -- fallback: procura partes R15
+    for _, nome in ipairs({"UpperTorso","LowerTorso","LeftUpperArm","RightUpperArm","LeftHand","RightHand","LeftFoot","RightFoot"}) do
+        if character:FindFirstChild(nome) then return true end
     end
-    return pcall(fn, ...)
-end
-
-local function connect(sig, fn)
-    if not sig or type(fn) ~= "function" then return nil end
-    local ok, conn = pcall(function()
-        return sig:Connect(fn)
-    end)
-    if ok and conn then
-        table.insert(Patch.Connections, conn)
-        return conn
-    end
-    return nil
-end
-
-function Patch:Stop(reason)
-    self.Enabled = false
-    self.Status = "Stopped: " .. tostring(reason or "manual")
-    for _, conn in ipairs(self.Connections) do
-        pcall(function()
-            conn:Disconnect()
-        end)
-    end
-    self.Connections = {}
-    pcall(function()
-        if self.Gui then
-            self.Gui:Destroy()
-        end
-    end)
-end
-
-local function waitSmall(t)
-    if type(task) == "table" and type(task.wait) == "function" then
-        return task.wait(t or 0)
-    end
-    return wait(t or 0)
-end
-
-local function spawnTask(fn)
-    if type(task) == "table" and type(task.spawn) == "function" then
-        return task.spawn(fn)
-    end
-    return spawn(fn)
-end
-
-local function now()
-    if type(os) == "table" and type(os.clock) == "function" then
-        local ok, v = pcall(os.clock)
-        if ok then return v end
-    end
-    return tick()
-end
-
-local function getChar(player)
-    player = player or LocalPlayer
-    return player and player.Character
-end
-
-local function getHumanoid(char)
-    return char and char:FindFirstChildOfClass("Humanoid")
-end
-
-local function isAliveChar(char)
-    local hum = getHumanoid(char)
-    if not hum then return false end
-    return hum.Health > 0
-end
-
-local function getRoot(char)
-    if not char then return nil end
-    return char:FindFirstChild("HumanoidRootPart")
-        or char:FindFirstChild("UpperTorso")
-        or char:FindFirstChild("Torso")
-end
-
-local function findKnifeEquipped()
-    local char = getChar(LocalPlayer)
-    return char and char:FindFirstChild("Knife")
-end
-
-local function findKnifeAny()
-    local char = getChar(LocalPlayer)
-    local bp = LocalPlayer and LocalPlayer:FindFirstChildOfClass("Backpack")
-    return (char and char:FindFirstChild("Knife")) or (bp and bp:FindFirstChild("Knife"))
-end
-
-local function getKnifeRemotes()
-    local tool = findKnifeAny()
-    local events = tool and tool:FindFirstChild("Events")
-    local stab = events and events:FindFirstChild("KnifeStabbed")
-    local touch = events and events:FindFirstChild("HandleTouched")
-    return stab, touch
-end
-
-local function roleOf(player)
-    if not player then return nil end
-    if player == LocalPlayer then
-        if Patch.LocalRole and Patch.LocalRole ~= "?" and Patch.LocalRole ~= "" then
-            return Patch.LocalRole
-        end
-    end
-    local r = Patch.Roles[player.Name]
-    if r and r ~= "?" and r ~= "" then return r end
-
-    local attrRole = nil
-    pcall(function()
-        attrRole = player:GetAttribute("Role") or player:GetAttribute("CurrentRole") or player:GetAttribute("RoundRole")
-    end)
-    if type(attrRole) == "string" and attrRole ~= "" and attrRole ~= "?" then
-        return attrRole
-    end
-
-    local v = player:FindFirstChild("Role") or player:FindFirstChild("CurrentRole") or player:FindFirstChild("RoundRole")
-    if v and v:IsA("StringValue") and v.Value ~= "" and v.Value ~= "?" then
-        return v.Value
-    end
-
-    return nil
-end
-
-local function isLocalMurdererOrKnife()
-    local r = roleOf(LocalPlayer)
-    if r == "Murderer" then return true end
-    -- fallback when roles have not replicated but the knife is equipped
-    return findKnifeEquipped() ~= nil
-end
-
-local function isValidTarget(player)
-    if not player or player == LocalPlayer then return false end
-    local char = getChar(player)
-    if not isAliveChar(char) then return false end
-
-    local r = roleOf(player)
-    if r == "Murderer" then return false end
-    if r == "Innocent" or r == "Sheriff" or r == "Hero" then return true end
-
-    -- If roles are not known yet, allow fallback only when local has knife equipped.
-    -- This avoids blocking the patch in rounds where PlayerDataChanged arrived late.
-    if isLocalMurdererOrKnife() then
-        return true
-    end
-
     return false
 end
 
-local TARGET_PARTS = {
-    "HumanoidRootPart",
-    "UpperTorso",
-    "LowerTorso",
-    "Torso",
-    "Head",
-    "LeftUpperArm",
-    "RightUpperArm",
-    "LeftUpperLeg",
-    "RightUpperLeg",
+local function detectarRigPorNome(nome)
+    local n = string.lower(nome)
+    if n:find("r15") then return "R15" end
+    if n:find("r6")  then return "R6"  end
+    return "ANY"
+end
+
+local function detectarRigPorEstrutura(inst)
+    if not inst then return "ANY" end
+    -- procura descendentes com nomes R15/R6
+    local ok, desc = pcall(function() return inst:GetDescendants() end)
+    if ok and desc then
+        for _, d in ipairs(desc) do
+            if d.Name == "UpperTorso" or d.Name == "LowerTorso" then return "R15" end
+            if d.Name == "Torso" and d:IsA("BasePart") then
+                -- checa se NÃO tem UpperTorso junto (aí é R6)
+                local parent = d.Parent
+                if parent and not parent:FindFirstChild("UpperTorso") then
+                    return "R6"
+                end
+            end
+        end
+    end
+    return "ANY"
+end
+
+-- ============================================================
+--  UI ARRASTÁVEL
+-- ============================================================
+local function criarUI()
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "UniversalPayloadFirer"
+    gui.ResetOnSpawn = false
+    gui.IgnoreGuiInset = true
+    gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    gui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(0, 360, 0, 440)
+    frame.Position = UDim2.new(0.5, -180, 0.5, -220)
+    frame.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
+    frame.BorderSizePixel = 0
+    frame.Active = true
+    frame.Draggable = true
+    frame.Parent = gui
+
+    Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 10)
+
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = Color3.fromRGB(80, 80, 160)
+    stroke.Thickness = 1
+    stroke.Parent = frame
+
+    -- Barra de título
+    local titleBar = Instance.new("Frame")
+    titleBar.Size = UDim2.new(1, 0, 0, 38)
+    titleBar.BackgroundColor3 = Color3.fromRGB(40, 40, 70)
+    titleBar.BorderSizePixel = 0
+    titleBar.Parent = frame
+    Instance.new("UICorner", titleBar).CornerRadius = UDim.new(0, 10)
+
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(1, -50, 1, 0)
+    title.Position = UDim2.new(0, 12, 0, 0)
+    title.BackgroundTransparency = 1
+    title.Text = "⚡ UNIVERSAL PAYLOAD FIRER"
+    title.TextColor3 = Color3.fromRGB(255, 255, 255)
+    title.TextSize = 14
+    title.Font = Enum.Font.GothamBold
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Parent = titleBar
+
+    local closeBtn = Instance.new("TextButton")
+    closeBtn.Size = UDim2.new(0, 30, 0, 28)
+    closeBtn.Position = UDim2.new(1, -35, 0, 5)
+    closeBtn.BackgroundColor3 = Color3.fromRGB(220, 60, 60)
+    closeBtn.BorderSizePixel = 0
+    closeBtn.Text = "✕"
+    closeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    closeBtn.Font = Enum.Font.GothamBold
+    closeBtn.TextSize = 14
+    closeBtn.Parent = titleBar
+    Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 6)
+
+    closeBtn.MouseButton1Click:Connect(function() gui:Destroy() end)
+
+    -- Status
+    local statusFrame = Instance.new("Frame")
+    statusFrame.Size = UDim2.new(1, -20, 0, 56)
+    statusFrame.Position = UDim2.new(0, 10, 0, 46)
+    statusFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 50)
+    statusFrame.BorderSizePixel = 0
+    statusFrame.Parent = frame
+    Instance.new("UICorner", statusFrame).CornerRadius = UDim.new(0, 6)
+
+    local statusLabel = Instance.new("TextLabel")
+    statusLabel.Size = UDim2.new(1, -12, 1, 0)
+    statusLabel.Position = UDim2.new(0, 6, 0, 0)
+    statusLabel.BackgroundTransparency = 1
+    statusLabel.Text = "⏳ Inicializando..."
+    statusLabel.TextColor3 = Color3.fromRGB(200, 220, 255)
+    statusLabel.TextSize = 12
+    statusLabel.Font = Enum.Font.Gotham
+    statusLabel.TextWrapped = true
+    statusLabel.Parent = statusFrame
+
+    -- Contadores
+    local countersFrame = Instance.new("Frame")
+    countersFrame.Size = UDim2.new(1, -20, 0, 28)
+    countersFrame.Position = UDim2.new(0, 10, 0, 108)
+    countersFrame.BackgroundTransparency = 1
+    countersFrame.Parent = frame
+
+    local counterLabel = Instance.new("TextLabel")
+    counterLabel.Size = UDim2.new(1, 0, 1, 0)
+    counterLabel.BackgroundTransparency = 1
+    counterLabel.Text = "📦 0 payloads | ✅ 0 | ❌ 0"
+    counterLabel.TextColor3 = Color3.fromRGB(255, 220, 120)
+    counterLabel.TextSize = 12
+    counterLabel.Font = Enum.Font.GothamBold
+    counterLabel.Parent = countersFrame
+
+    -- Scroll
+    local scroll = Instance.new("ScrollingFrame")
+    scroll.Size = UDim2.new(1, -20, 1, -250)
+    scroll.Position = UDim2.new(0, 10, 0, 142)
+    scroll.BackgroundColor3 = Color3.fromRGB(25, 25, 40)
+    scroll.BorderSizePixel = 0
+    scroll.ScrollBarThickness = 4
+    scroll.ScrollBarImageColor3 = Color3.fromRGB(120, 120, 220)
+    scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    scroll.Parent = frame
+    Instance.new("UICorner", scroll).CornerRadius = UDim.new(0, 6)
+
+    local uiList = Instance.new("UIListLayout")
+    uiList.SortOrder = Enum.SortOrder.LayoutOrder
+    uiList.Padding = UDim.new(0, 3)
+    uiList.Parent = scroll
+
+    local uiPad = Instance.new("UIPadding")
+    uiPad.PaddingTop = UDim.new(0, 6)
+    uiPad.PaddingLeft = UDim.new(0, 6)
+    uiPad.PaddingRight = UDim.new(0, 6)
+    uiPad.PaddingBottom = UDim.new(0, 6)
+    uiPad.Parent = scroll
+
+    -- Botões
+    local btnFrame = Instance.new("Frame")
+    btnFrame.Size = UDim2.new(1, -20, 0, 44)
+    btnFrame.Position = UDim2.new(0, 10, 1, -54)
+    btnFrame.BackgroundTransparency = 1
+    btnFrame.Parent = frame
+
+    local btnList = Instance.new("UIListLayout")
+    btnList.FillDirection = Enum.FillDirection.Horizontal
+    btnList.HorizontalAlignment = Enum.HorizontalAlignment.Center
+    btnList.Padding = UDim.new(0, 6)
+    btnList.Parent = btnFrame
+
+    local function botao(txt, cor, size)
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(0, size, 0, 36)
+        b.BackgroundColor3 = cor
+        b.BorderSizePixel = 0
+        b.Text = txt
+        b.TextColor3 = Color3.fromRGB(255, 255, 255)
+        b.TextSize = 12
+        b.Font = Enum.Font.GothamBold
+        b.Parent = btnFrame
+        Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
+        return b
+    end
+
+    local fireBtn = botao("🔥 DISPARAR TODOS", Color3.fromRGB(220, 80, 80), 160)
+    local scanBtn = botao("🔍 ESCANEAR",       Color3.fromRGB(80, 160, 220), 100)
+    local stopBtn = botao("⏹ PARAR",          Color3.fromRGB(120, 120, 120), 70)
+
+    return {
+        gui = gui, frame = frame, statusLabel = statusLabel,
+        counterLabel = counterLabel, scroll = scroll,
+        fireBtn = fireBtn, scanBtn = scanBtn, stopBtn = stopBtn,
+    }
+end
+
+-- ============================================================
+--  UI HELPERS
+-- ============================================================
+local function setStatus(ui, txt, cor)
+    if ui and ui.statusLabel then
+        ui.statusLabel.Text = txt
+        ui.statusLabel.TextColor3 = cor or Color3.fromRGB(200, 220, 255)
+    end
+end
+
+local function addItem(ui, txt, cor)
+    if not ui or not ui.scroll then return end
+    if #ui.scroll:GetChildren() > CONFIG.MAX_ITENS_UI then
+        local primeiros = {}
+        for _, c in ipairs(ui.scroll:GetChildren()) do
+            if c:IsA("TextLabel") then table.insert(primeiros, c) end
+        end
+        if primeiros[1] then primeiros[1]:Destroy() end
+    end
+    local item = Instance.new("TextLabel")
+    item.Size = UDim2.new(1, -12, 0, 22)
+    item.BackgroundColor3 = cor or Color3.fromRGB(40, 40, 60)
+    item.BackgroundTransparency = 0.25
+    item.BorderSizePixel = 0
+    item.Text = "  " .. txt
+    item.TextColor3 = Color3.fromRGB(230, 230, 255)
+    item.TextSize = 11
+    item.Font = Enum.Font.Code
+    item.TextXAlignment = Enum.TextXAlignment.Left
+    item.TextTruncate = Enum.TextTruncate.AtEnd
+    item.Parent = ui.scroll
+    Instance.new("UICorner", item).CornerRadius = UDim.new(0, 4)
+end
+
+local function limparLista(ui)
+    if not ui or not ui.scroll then return end
+    for _, c in ipairs(ui.scroll:GetChildren()) do
+        if c:IsA("TextLabel") then c:Destroy() end
+    end
+end
+
+-- ============================================================
+--  COLETA UNIVERSAL DE PAYLOADS
+--  Estrutura: { nome, tipo, ref, rig, args }
+-- ============================================================
+local payloads = {}
+
+local function add(nome, tipo, ref, rig, args)
+    table.insert(payloads, {
+        nome = nome, tipo = tipo, ref = ref,
+        rig = rig or "ANY", args = args or {},
+    })
+end
+
+-- Assinaturas comuns testadas em FireServer
+local ASSINATURAS = {
+    {},                                -- ()
+    {LocalPlayer},                     -- (player)
+    {"R15"},                           -- ("R15")
+    {"R6"},                            -- ("R6")
+    {LocalPlayer.Character},           -- (character)
+    {true},                            -- (true)
+    {1},                               -- (1)
+    {"fire"},                          -- ("fire")
+    {"attack"},                        -- ("attack")
+    {"payload"},                       -- ("payload")
+    {"all"},                           -- ("all")
+    {LocalPlayer, "R15"},              -- (player, "R15")
+    {LocalPlayer.Character, "R15"},    -- (character, "R15")
 }
 
-local function getTargetParts(char)
-    local out = {}
-    if not char then return out end
-    for _, name in ipairs(TARGET_PARTS) do
-        local p = char:FindFirstChild(name)
-        if p and p:IsA("BasePart") then
-            table.insert(out, p)
+-- ============================================================
+--  SCANNERS (TODOS OS SERVIÇOS / LOCAIS)
+-- ============================================================
+local function scanService(service, prefixo)
+    if not service then return end
+    local ok, desc = pcall(function() return service:GetDescendants() end)
+    if not ok or not desc then return end
+    for _, obj in ipairs(desc) do
+        local cls = obj.ClassName
+        local rig = detectarRigPorNome(obj.Name)
+        if rig == "ANY" then
+            rig = detectarRigPorEstrutura(obj)
+        end
+
+        if obj:IsA("RemoteEvent") then
+            add(prefixo .. "." .. obj:GetFullName(), "RemoteEvent", obj, rig)
+        elseif obj:IsA("RemoteFunction") then
+            add(prefixo .. "." .. obj:GetFullName(), "RemoteFunction", obj, rig)
+        elseif obj:IsA("BindableEvent") then
+            add(prefixo .. "." .. obj:GetFullName(), "BindableEvent", obj, rig)
+        elseif obj:IsA("BindableFunction") then
+            add(prefixo .. "." .. obj:GetFullName(), "BindableFunction", obj, rig)
+        elseif obj:IsA("UnreliableRemoteEvent") then
+            add(prefixo .. "." .. obj:GetFullName(), "UnreliableRemoteEvent", obj, rig)
         end
     end
-    return out
 end
 
-local function nearestTarget(radius)
-    local root = getRoot(getChar(LocalPlayer))
-    if not root then return nil, nil, nil end
-    local rootPos = root.Position
-
-    radius = tonumber(radius) or 10
-    local bestPlayer = nil
-    local bestPart = nil
-    local bestDist = math.huge
-
-    for _, player in ipairs(Players:GetPlayers()) do
-        if isValidTarget(player) then
-            local char = getChar(player)
-            for _, part in ipairs(getTargetParts(char)) do
-                local dist = (rootPos - part.Position).Magnitude
-                if dist <= radius and dist < bestDist then
-                    bestPlayer = player
-                    bestPart = part
-                    bestDist = dist
+local function scanModulos()
+    for _, obj in ipairs(ReplicatedStorage:GetDescendants()) do
+        if obj:IsA("ModuleScript") then
+            local ok, mod = pcall(require, obj)
+            if ok and type(mod) == "table" then
+                for k, v in pairs(mod) do
+                    if type(v) == "function" then
+                        local rig = detectarRigPorNome(tostring(k))
+                        add(obj.Name .. "." .. tostring(k), "ModuleFunction",
+                            {mod = mod, key = k}, rig)
+                    end
                 end
             end
         end
     end
-
-    return bestPlayer, bestPart, bestDist
 end
 
-local function throwingKnifePresent()
-    local found = false
-    pcall(function()
-        found = workspace:FindFirstChild("ThrowingKnife") ~= nil
-    end)
-    return found
-end
-
-local function applyStab(target, firstPart)
-    if not target or not firstPart then return false end
-    if not isAliveChar(getChar(target)) then return false end
-
-    local t = now()
-    local last = Patch.LastTargetHit[target.Name]
-    if last and t - last < 0.22 then
-        return true
-    end
-    Patch.LastTargetHit[target.Name] = t
-
-    local stabRemote, touchRemote = getKnifeRemotes()
-    if not stabRemote or not touchRemote then
-        Patch.Status = "Missing Knife remotes"
-        return false
-    end
-
-    safe(function()
-        stabRemote:FireServer()
-    end)
-
-    local parts = { firstPart }
-    for _, p in ipairs(getTargetParts(getChar(target))) do
-        if p ~= firstPart then
-            table.insert(parts, p)
+local function scanWorkspace()
+    for _, obj in ipairs(Workspace:GetDescendants()) do
+        if obj:IsA("BasePart") then
+            local n = string.lower(obj.Name)
+            if n:find("payload") or n:find("trigger") or n:find("event")
+               or n:find("fire") or n:find("button") or n:find("touch") then
+                local rig = detectarRigPorEstrutura(obj.Parent) or "ANY"
+                if rig == "ANY" then rig = detectarRigPorNome(obj.Name) end
+                add("Workspace." .. obj:GetFullName(), "PartTrigger", obj, rig)
+            end
+        elseif obj:IsA("Sound") then
+            add("Sound." .. obj:GetFullName(), "Sound", obj, "ANY")
+        elseif obj:IsA("Animation") then
+            add("Animation." .. obj:GetFullName(), "Animation", obj, "ANY")
+        elseif obj:IsA("ProximityPrompt") then
+            add("Prompt." .. obj:GetFullName(), "ProximityPrompt", obj, "ANY")
+        elseif obj:IsA("ClickDetector") then
+            add("Click." .. obj:GetFullName(), "ClickDetector", obj, "ANY")
+        elseif obj:IsA("TouchTransmitter") then
+            add("Touch." .. obj:GetFullName(), "TouchTransmitter", obj, "ANY")
         end
-        if #parts >= 6 then break end
     end
+end
 
-    for _ = 1, 2 do
-        if not Patch.Enabled then return false end
-        for _, p in ipairs(parts) do
-            if p and p.Parent then
-                safe(function()
-                    touchRemote:FireServer(p)
-                end)
-                waitSmall(0.004)
+local function scanCharacter()
+    local char = LocalPlayer.Character
+    if not char then return end
+    for _, obj in ipairs(char:GetDescendants()) do
+        if obj:IsA("RemoteEvent") then
+            add("Char." .. obj.Name, "RemoteEvent", obj, "R15")
+        elseif obj:IsA("BasePart") then
+            -- nada por padrão; não dispara em cada parte pra não floodar
+        elseif obj:IsA("Sound") then
+            add("CharSound." .. obj.Name, "Sound", obj, "R15")
+        end
+    end
+end
+
+local function scanPlayerGui()
+    for _, obj in ipairs(LocalPlayer:GetDescendants()) do
+        if obj:IsA("RemoteEvent") then
+            add("Player." .. obj.Name, "RemoteEvent", obj, "ANY")
+        elseif obj:IsA("BindableEvent") then
+            add("Player." .. obj.Name, "BindableEvent", obj, "ANY")
+        end
+    end
+end
+
+local function scanBackpackETools()
+    local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
+    local char = LocalPlayer.Character
+    local alvos = {}
+    if bp then table.insert(alvos, bp) end
+    if char then table.insert(alvos, char) end
+    for _, cont in ipairs(alvos) do
+        for _, tool in ipairs(cont:GetChildren()) do
+            if tool:IsA("Tool") then
+                for _, d in ipairs(tool:GetDescendants()) do
+                    if d:IsA("RemoteEvent") then
+                        add("Tool." .. tool.Name .. "." .. d.Name, "RemoteEvent", d, "R15")
+                    elseif d:IsA("RemoteFunction") then
+                        add("Tool." .. tool.Name .. "." .. d.Name, "RemoteFunction", d, "R15")
+                    end
+                end
+                -- ativa a tool também
+                add("ToolActivate." .. tool.Name, "ToolActivate", tool, "R15")
             end
         end
-        waitSmall(0.008)
     end
-
-    return true
 end
 
-local function runFromInput()
-    if not Patch.Enabled then return end
+local function scanTudo()
+    payloads = {}
 
-    local char = getChar(LocalPlayer)
-    if not isAliveChar(char) then
-        Patch.Status = "Dead"
-        return
-    end
+    scanService(ReplicatedStorage, "RS")
+    scanService(ServerStorage,     "SS")
+    scanService(Workspace,         "WS")
+    scanService(Lighting,          "LT")
+    scanService(SoundService,      "SND")
+    scanService(StarterGui,        "SG")
 
-    if not findKnifeEquipped() then
-        Patch.Status = "Knife not equipped"
-        return
-    end
+    scanModulos()
+    scanWorkspace()
+    scanCharacter()
+    scanPlayerGui()
+    scanBackpackETools()
 
-    if not isLocalMurdererOrKnife() then
-        Patch.Status = "Need Murderer"
-        return
-    end
+    -- Ordena R15 → R6 → ANY
+    table.sort(payloads, function(a, b)
+        local ordem = { R15 = 1, R6 = 2, ANY = 3 }
+        local oa, ob = ordem[a.rig] or 4, ordem[b.rig] or 4
+        if oa ~= ob then return oa < ob end
+        return a.nome < b.nome
+    end)
 
-    local t = now()
-    if Patch.LastPulse and t - Patch.LastPulse < 0.16 then
-        return
-    end
-    Patch.LastPulse = t
+    return #payloads
+end
 
-    spawnTask(function()
-        waitSmall(0.075)
-
-        if not Patch.Enabled then return end
-
-        -- If a real throw object appeared, this was a throw. Let Throw Hitbox handle it.
-        if throwingKnifePresent() then
-            Patch.Status = "Throw detected - skipped"
-            return
-        end
-
-        local target, part, dist = nearestTarget(Patch.Radius)
-        if not target or not part then
-            Patch.Status = "No target in range"
-            return
-        end
-
-        local ok = applyStab(target, part)
+-- ============================================================
+--  DISPARO UNIVERSAL (tenta tudo em cada payload)
+-- ============================================================
+local function dispararRemoteEvent(remote)
+    -- Tenta várias assinaturas comuns; para na primeira que não der erro
+    local tentativas = 0
+    for _, args in ipairs(ASSINATURAS) do
+        tentativas = tentativas + 1
+        local ok = pcall(function()
+            remote:FireServer(table.unpack(args))
+        end)
         if ok then
-            Patch.Status = "Stab hitbox: " .. target.Name .. " | dist " .. tostring(math.floor((dist or 0) + 0.5))
-        else
-            Patch.Status = "Stab failed"
+            return true, "FireServer(" .. #args .. " args)"
         end
-    end)
+        if not CONFIG.TENTAR_VARIAS_ASSINATURAS then break end
+    end
+    -- se nenhuma funcionou, tenta ao menos uma vez direto
+    local ok = pcall(function() remote:FireServer() end)
+    return ok, ok and "FireServer()" or "falhou em todas assinaturas"
 end
 
-local function parsePlayerData(data)
-    if type(data) ~= "table" then return end
+local function dispararRemoteFunction(rf)
+    for _, args in ipairs(ASSINATURAS) do
+        local ok = pcall(function()
+            rf:InvokeServer(table.unpack(args))
+        end)
+        if ok then
+            return true, "InvokeServer(" .. #args .. " args)"
+        end
+        if not CONFIG.TENTAR_VARIAS_ASSINATURAS then break end
+    end
+    return false, "InvokeServer falhou"
+end
 
-    for key, value in pairs(data) do
-        if type(key) == "string" and type(value) == "table" then
-            local role = value.Role or value.role
-            if type(role) == "string" then
-                Patch.Roles[key] = role
-                if key == LocalPlayer.Name then
-                    Patch.LocalRole = role
-                    Patch.LocalDead = value.Dead == true or value.dead == true
+local function dispararPayload(p)
+    local ok, info = pcall(function()
+        local t = p.tipo
+        if t == "RemoteEvent" or t == "UnreliableRemoteEvent" then
+            return dispararRemoteEvent(p.ref)
+        elseif t == "RemoteFunction" then
+            return dispararRemoteFunction(p.ref)
+        elseif t == "BindableEvent" then
+            p.ref:Fire()
+            return true, "BindableEvent:Fire()"
+        elseif t == "BindableFunction" then
+            p.ref:Invoke()
+            return true, "BindableFunction:Invoke()"
+        elseif t == "ModuleFunction" then
+            p.ref.mod[p.ref.key]()
+            return true, "Module." .. tostring(p.ref.key)
+        elseif t == "PartTrigger" then
+            local obj = p.ref
+            local s = obj:FindFirstChildOfClass("Sound")
+            if s then s:Play() end
+            local prompt = obj:FindFirstChildOfClass("ProximityPrompt")
+            if prompt then prompt:InputHoldBegin(); task.wait(0.05); prompt:InputHoldEnd() end
+            local cd = obj:FindFirstChildOfClass("ClickDetector")
+            if cd then
+                for _, plr in ipairs(Players:GetPlayers()) do
+                    pcall(function() cd.MouseClick:Fire(plr) end)
                 end
             end
-        elseif type(value) == "table" then
-            local name = value.Name or value.PlayerName or value.Username
-            local role = value.Role or value.role
-            if type(name) == "string" and type(role) == "string" then
-                Patch.Roles[name] = role
-                if name == LocalPlayer.Name then
-                    Patch.LocalRole = role
-                    Patch.LocalDead = value.Dead == true or value.dead == true
-                end
+            return true, "PartTrigger acionado"
+        elseif t == "Sound" then
+            p.ref:Play()
+            return true, "Sound:Play()"
+        elseif t == "ProximityPrompt" then
+            p.ref:InputHoldBegin(); task.wait(0.05); p.ref:InputHoldEnd()
+            return true, "Prompt acionado"
+        elseif t == "ClickDetector" then
+            for _, plr in ipairs(Players:GetPlayers()) do
+                pcall(function() p.ref.MouseClick:Fire(plr) end)
             end
+            return true, "ClickDetector fire"
+        elseif t == "TouchTransmitter" then
+            local part = p.ref.Parent
+            if part and LocalPlayer.Character then
+                pcall(function() p.ref:Fire(LocalPlayer.Character) end)
+            end
+            return true, "Touch fire"
+        elseif t == "ToolActivate" then
+            pcall(function() p.ref:Activate() end)
+            return true, "Tool:Activate()"
+        elseif t == "Animation" then
+            local char = LocalPlayer.Character
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            if hum then
+                local anim = hum:LoadAnimation(p.ref)
+                anim:Play()
+            end
+            return true, "Animation:Play()"
+        end
+        return false, "tipo desconhecido: " .. tostring(t)
+    end)
+
+    if not ok then return false, tostring(info) end
+    -- info agora é (bool, string)
+    if type(info) == "table" then
+        return info[1], info[2]
+    end
+    return true, tostring(info)
+end
+
+-- ============================================================
+--  LOOP DE DISPARO
+-- ============================================================
+local disparando = false
+local pararSolicitado = false
+
+local function dispararTodos(ui)
+    if disparando then return end
+    disparando = true
+    pararSolicitado = false
+
+    local total = #payloads
+    if total == 0 then
+        setStatus(ui, "❌ Nenhum payload. Escaneie primeiro.", Color3.fromRGB(255, 100, 100))
+        disparando = false
+        return
+    end
+
+    limparLista(ui)
+    setStatus(ui, "🚀 Disparando " .. total .. " payloads...", Color3.fromRGB(100, 200, 255))
+
+    local disparados, falhas = 0, 0
+
+    for i, p in ipairs(payloads) do
+        if pararSolicitado then
+            setStatus(ui, "⏹ Parado pelo usuário.", Color3.fromRGB(255, 200, 80))
+            break
+        end
+
+        if CONFIG.MOSTRAR_APENAS_R15 and p.rig ~= "R15" then
+            -- pula
+        else
+            local ok, msg = dispararPayload(p)
+            if ok then
+                disparados = disparados + 1
+                addItem(ui, "✅ [" .. p.rig .. "] " .. p.nome .. " → " .. tostring(msg),
+                    Color3.fromRGB(35, 75, 50))
+            else
+                falhas = falhas + 1
+                addItem(ui, "❌ [" .. p.rig .. "] " .. p.nome .. " → " .. tostring(msg):sub(1, 50),
+                    Color3.fromRGB(80, 40, 40))
+            end
+
+            ui.counterLabel.Text = string.format("📦 %d | ✅ %d | ❌ %d | %d/%d",
+                total, disparados, falhas, i, total)
+            setStatus(ui, "⏳ " .. p.nome .. " (" .. i .. "/" .. total .. ")",
+                Color3.fromRGB(255, 220, 100))
+
+            task.wait(CONFIG.DELAY_ENTRE_PAYLOADS)
         end
     end
+
+    setStatus(ui, "✅ Fim! " .. disparados .. " ok, " .. falhas .. " falhas.",
+        Color3.fromRGB(100, 255, 150))
+    disparando = false
 end
 
-local function listenRoles()
-    local remote = ReplicatedStorage:FindFirstChild("Remotes")
-        and ReplicatedStorage.Remotes:FindFirstChild("Gameplay")
-        and ReplicatedStorage.Remotes.Gameplay:FindFirstChild("PlayerDataChanged")
+-- ============================================================
+--  MAIN
+-- ============================================================
+local function main()
+    local ui = criarUI()
 
-    if remote and remote:IsA("RemoteEvent") then
-        connect(remote.OnClientEvent, function(...)
-            local args = { ... }
-            for _, arg in ipairs(args) do
-                parsePlayerData(arg)
+    local qtd = scanTudo()
+    setStatus(ui, "🔍 " .. qtd .. " payloads encontrados.", Color3.fromRGB(100, 200, 255))
+    ui.counterLabel.Text = "📦 " .. qtd .. " | ✅ 0 | ❌ 0"
+
+    limparLista(ui)
+    for _, p in ipairs(payloads) do
+        local cor = p.rig == "R15" and Color3.fromRGB(40, 60, 110)
+                 or p.rig == "R6"  and Color3.fromRGB(70, 40, 40)
+                 or Color3.fromRGB(45, 45, 65)
+        addItem(ui, "📦 [" .. p.rig .. "] " .. p.nome, cor)
+    end
+
+    ui.fireBtn.MouseButton1Click:Connect(function()
+        task.spawn(function() dispararTodos(ui) end)
+    end)
+
+    ui.scanBtn.MouseButton1Click:Connect(function()
+        local q = scanTudo()
+        setStatus(ui, "🔍 Reescaneado: " .. q .. " payloads.", Color3.fromRGB(100, 200, 255))
+        ui.counterLabel.Text = "📦 " .. q .. " | ✅ 0 | ❌ 0"
+        limparLista(ui)
+        for _, p in ipairs(payloads) do
+            local cor = p.rig == "R15" and Color3.fromRGB(40, 60, 110)
+                     or p.rig == "R6"  and Color3.fromRGB(70, 40, 40)
+                     or Color3.fromRGB(45, 45, 65)
+            addItem(ui, "📦 [" .. p.rig .. "] " .. p.nome, cor)
+        end
+    end)
+
+    ui.stopBtn.MouseButton1Click:Connect(function()
+        pararSolicitado = true
+    end)
+
+    if CONFIG.AUTO_SCAN then
+        task.spawn(function()
+            while ui.gui and ui.gui.Parent do
+                task.wait(CONFIG.SCAN_INTERVALO)
+                if not disparando then
+                    local q = scanTudo()
+                    setStatus(ui, "🔄 Auto-scan: " .. q .. " payloads.", Color3.fromRGB(150, 150, 255))
+                end
             end
         end)
     end
 
-    local endNames = { "VictoryScreen", "RoundEndFade" }
-    for _, name in ipairs(endNames) do
-        local r = ReplicatedStorage:FindFirstChild("Remotes")
-            and ReplicatedStorage.Remotes:FindFirstChild("Gameplay")
-            and ReplicatedStorage.Remotes.Gameplay:FindFirstChild(name)
-        if r and r:IsA("RemoteEvent") then
-            connect(r.OnClientEvent, function()
-                Patch.LocalRole = nil
-                Patch.Roles = {}
-                Patch.Status = "Round ended"
-            end)
-        end
-    end
+    LocalPlayer.CharacterAdded:Connect(function(char)
+        task.wait(1)
+        local rig = isR15(char) and "R15" or "R6"
+        setStatus(ui, "🎯 Rig: " .. rig .. " | reescaneando...", Color3.fromRGB(200, 220, 255))
+        scanTudo()
+    end)
 end
 
-local function makeButton(parent, text, pos, size)
-    local b = Instance.new("TextButton")
-    b.Size = size or UDim2.new(1, -12, 0, 26)
-    b.Position = pos
-    b.BackgroundColor3 = Color3.fromRGB(35, 38, 48)
-    b.BorderSizePixel = 0
-    b.Text = text
-    b.TextColor3 = Color3.fromRGB(230, 235, 245)
-    b.TextSize = 12
-    b.Font = Enum.Font.GothamSemibold
-    b.Parent = parent
-    local c = Instance.new("UICorner")
-    c.CornerRadius = UDim.new(0, 6)
-    c.Parent = b
-    return b
-end
-
-local function buildGui()
-    local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
-    if not pg then return end
-
-    local old = pg:FindFirstChild("RefStabHitboxPatch")
-    if old then old:Destroy() end
-
-    local gui = Instance.new("ScreenGui")
-    gui.Name = "RefStabHitboxPatch"
-    gui.ResetOnSpawn = false
-    gui.DisplayOrder = 999998
-    gui.Parent = pg
-
-    local frame = Instance.new("Frame")
-    frame.Size = UDim2.new(0, 210, 0, 132)
-    frame.Position = UDim2.new(0, 258, 0.5, -66)
-    frame.BackgroundColor3 = Color3.fromRGB(16, 17, 22)
-    frame.BorderSizePixel = 0
-    frame.Active = true
-    frame.Parent = gui
-
-    local corner = Instance.new("UICorner")
-    corner.CornerRadius = UDim.new(0, 10)
-    corner.Parent = frame
-
-    local title = Instance.new("TextLabel")
-    title.Size = UDim2.new(1, -12, 0, 25)
-    title.Position = UDim2.new(0, 8, 0, 4)
-    title.BackgroundTransparency = 1
-    title.Text = "Stab Hitbox Patch"
-    title.TextColor3 = Color3.fromRGB(220, 225, 240)
-    title.TextSize = 13
-    title.Font = Enum.Font.GothamBold
-    title.TextXAlignment = Enum.TextXAlignment.Left
-    title.Parent = frame
-
-    local toggle = makeButton(frame, "Stab Hitbox: OFF", UDim2.new(0, 6, 0, 32))
-    local minus = makeButton(frame, "-", UDim2.new(0, 6, 0, 64), UDim2.new(0, 40, 0, 26))
-    local plus = makeButton(frame, "+", UDim2.new(1, -46, 0, 64), UDim2.new(0, 40, 0, 26))
-
-    local radiusLbl = Instance.new("TextLabel")
-    radiusLbl.Size = UDim2.new(1, -96, 0, 26)
-    radiusLbl.Position = UDim2.new(0, 48, 0, 64)
-    radiusLbl.BackgroundTransparency = 1
-    radiusLbl.TextColor3 = Color3.fromRGB(200, 210, 230)
-    radiusLbl.TextSize = 12
-    radiusLbl.Font = Enum.Font.Gotham
-    radiusLbl.Text = "Range: " .. tostring(Patch.Radius)
-    radiusLbl.Parent = frame
-
-    local statusLbl = Instance.new("TextLabel")
-    statusLbl.Size = UDim2.new(1, -12, 0, 34)
-    statusLbl.Position = UDim2.new(0, 6, 0, 94)
-    statusLbl.BackgroundTransparency = 1
-    statusLbl.TextColor3 = Color3.fromRGB(150, 160, 180)
-    statusLbl.TextSize = 10
-    statusLbl.Font = Enum.Font.Gotham
-    statusLbl.TextWrapped = true
-    statusLbl.Text = "Status: Off"
-    statusLbl.Parent = frame
-
-    toggle.MouseButton1Click:Connect(function()
-        Patch.Enabled = not Patch.Enabled
-        Patch.Status = Patch.Enabled and "Waiting manual stab" or "Off"
-        toggle.Text = Patch.Enabled and "Stab Hitbox: ON" or "Stab Hitbox: OFF"
-    end)
-
-    minus.MouseButton1Click:Connect(function()
-        Patch.Radius = math.max(4, Patch.Radius - 1)
-        radiusLbl.Text = "Range: " .. tostring(Patch.Radius)
-    end)
-
-    plus.MouseButton1Click:Connect(function()
-        Patch.Radius = math.min(28, Patch.Radius + 1)
-        radiusLbl.Text = "Range: " .. tostring(Patch.Radius)
-    end)
-
-    connect(UserInputService.InputBegan, function(input, gp)
-        if gp or not Patch.Enabled then return end
-        local isClick = input.UserInputType == Enum.UserInputType.MouseButton1
-            or input.UserInputType == Enum.UserInputType.Touch
-        if isClick then
-            runFromInput()
-        end
-    end)
-
-    spawnTask(function()
-        while Patch.Gui and Patch.Gui.Parent do
-            statusLbl.Text = "Status: " .. tostring(Patch.Status)
-            toggle.Text = Patch.Enabled and "Stab Hitbox: ON" or "Stab Hitbox: OFF"
-            radiusLbl.Text = "Range: " .. tostring(Patch.Radius)
-            waitSmall(0.25)
-        end
-    end)
-
-    Patch.Gui = gui
-end
-
-listenRoles()
-buildGui()
-
-Patch.Status = "Loaded"
+main()
