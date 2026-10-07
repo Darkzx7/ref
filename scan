@@ -1,664 +1,541 @@
--- ============================================================
---  UNIVERSAL PAYLOAD FIRER v2.0
---  Dispara TODOS os payloads, sem exceção, adaptando automaticamente
---  Prioridade R15 | UI Arrastável em tempo real
--- ============================================================
-
-local Players            = game:GetService("Players")
-local RunService         = game:GetService("RunService")
-local UserInputService   = game:GetService("UserInputService")
-local ReplicatedStorage  = game:GetService("ReplicatedStorage")
-local ServerStorage      = game:GetService("ServerStorage")
-local Workspace          = game:GetService("Workspace")
-local Lighting           = game:GetService("Lighting")
-local SoundService       = game:GetService("SoundService")
-local StarterGui         = game:GetService("StarterGui")
-
+-- Standalone client-side test panel. No REFlib or HTTP dependencies.
+-- Run as a LocalScript in StarterPlayerScripts, or execute on the client.
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local HttpService = game:GetService("HttpService")
+local Workspace = game:GetService("Workspace")
 local LocalPlayer = Players.LocalPlayer
+assert(LocalPlayer, "Payload Tester must run on the client")
 
--- ============================================================
---  CONFIGURAÇÕES
--- ============================================================
-local CONFIG = {
-    PRIORIDADE_R15         = true,     -- R15 primeiro
-    DELAY_ENTRE_PAYLOADS   = 0.08,     -- delay entre disparos
-    MOSTRAR_APENAS_R15     = false,    -- se true, ignora R6
-    AUTO_SCAN              = true,     -- reescaneia automaticamente
-    SCAN_INTERVALO         = 6,        -- segundos
-    MAX_ITENS_UI           = 200,      -- limite visual
-    TENTAR_VARIAS_ASSINATURAS = true,  -- tenta FireServer() com vários args
+local CONFIG = { Delay = 0.08, Timeout = 4, ScanInterval = 6, PageSize = 60, MaxLogs = 200 }
+-- Optional project-specific calls, keyed by GetFullName(). Resolved on each run.
+-- Example: ["ReplicatedStorage.Remotes.Test"] = function(object, args) object:FireServer(table.unpack(args, 1, args.n)) end
+local CUSTOM_HANDLERS = {}
+
+-- BEGIN TESTER CORE
+local Tester = {}
+Tester.__index = Tester
+local kinds = {
+    RemoteEvent = "remote", UnreliableRemoteEvent = "remote", RemoteFunction = "remote",
+    BindableEvent = "local", BindableFunction = "local", Tool = "local",
+    Sound = "local", Animation = "local", ProximityPrompt = "local",
+    ClickDetector = "inspect", TouchTransmitter = "inspect", ModuleScript = "inspect",
 }
-
--- ============================================================
---  UTILITÁRIOS
--- ============================================================
-local function isR15(character)
-    if not character then return false end
-    local hum = character:FindFirstChildOfClass("Humanoid")
-    if hum and hum.RigType == Enum.HumanoidRigType.R15 then return true end
-    -- fallback: procura partes R15
-    for _, nome in ipairs({"UpperTorso","LowerTorso","LeftUpperArm","RightUpperArm","LeftHand","RightHand","LeftFoot","RightFoot"}) do
-        if character:FindFirstChild(nome) then return true end
-    end
-    return false
+function Tester.new()
+    return setmetatable({ alive = true, busy = false, scanning = false, items = {}, tracks = {}, drafts = {} }, Tester)
 end
-
-local function detectarRigPorNome(nome)
-    local n = string.lower(nome)
-    if n:find("r15") then return "R15" end
-    if n:find("r6")  then return "R6"  end
+function Tester:ReleasePrompt()
+    local prompt = self.prompt
+    self.prompt = nil
+    if prompt then pcall(function() prompt:InputHoldEnd() end) end
+end
+function Tester:Stop()
+    self.cancelled = true
+    if self.worker then pcall(task.cancel, self.worker); self.worker = nil end
+    self:ReleasePrompt()
+end
+function Tester:Destroy()
+    self.alive = false
+    self:Stop()
+    for track in pairs(self.tracks) do
+        pcall(function() track:Stop(0); track:Destroy() end)
+    end
+    table.clear(self.tracks)
+end
+function Tester.Rig(object)
+    local current = object
+    for _ = 1, 8 do
+        if not current then break end
+        if current:IsA("Model") then
+            local humanoid = current:FindFirstChildOfClass("Humanoid")
+            if humanoid then return humanoid.RigType == Enum.HumanoidRigType.R15 and "R15" or "R6" end
+        end
+        local name = string.lower(current.Name)
+        if name:find("r15", 1, true) then return "R15" end
+        if name:find("r6", 1, true) then return "R6" end
+        current = current.Parent
+    end
     return "ANY"
 end
-
-local function detectarRigPorEstrutura(inst)
-    if not inst then return "ANY" end
-    -- procura descendentes com nomes R15/R6
-    local ok, desc = pcall(function() return inst:GetDescendants() end)
-    if ok and desc then
-        for _, d in ipairs(desc) do
-            if d.Name == "UpperTorso" or d.Name == "LowerTorso" then return "R15" end
-            if d.Name == "Torso" and d:IsA("BasePart") then
-                -- checa se NÃO tem UpperTorso junto (aí é R6)
-                local parent = d.Parent
-                if parent and not parent:FindFirstChild("UpperTorso") then
-                    return "R6"
-                end
-            end
-        end
-    end
-    return "ANY"
-end
-
--- ============================================================
---  UI ARRASTÁVEL
--- ============================================================
-local function criarUI()
-    local gui = Instance.new("ScreenGui")
-    gui.Name = "UniversalPayloadFirer"
-    gui.ResetOnSpawn = false
-    gui.IgnoreGuiInset = true
-    gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-    gui.Parent = LocalPlayer:WaitForChild("PlayerGui")
-
-    local frame = Instance.new("Frame")
-    frame.Size = UDim2.new(0, 360, 0, 440)
-    frame.Position = UDim2.new(0.5, -180, 0.5, -220)
-    frame.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
-    frame.BorderSizePixel = 0
-    frame.Active = true
-    frame.Draggable = true
-    frame.Parent = gui
-
-    Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 10)
-
-    local stroke = Instance.new("UIStroke")
-    stroke.Color = Color3.fromRGB(80, 80, 160)
-    stroke.Thickness = 1
-    stroke.Parent = frame
-
-    -- Barra de título
-    local titleBar = Instance.new("Frame")
-    titleBar.Size = UDim2.new(1, 0, 0, 38)
-    titleBar.BackgroundColor3 = Color3.fromRGB(40, 40, 70)
-    titleBar.BorderSizePixel = 0
-    titleBar.Parent = frame
-    Instance.new("UICorner", titleBar).CornerRadius = UDim.new(0, 10)
-
-    local title = Instance.new("TextLabel")
-    title.Size = UDim2.new(1, -50, 1, 0)
-    title.Position = UDim2.new(0, 12, 0, 0)
-    title.BackgroundTransparency = 1
-    title.Text = "⚡ UNIVERSAL PAYLOAD FIRER"
-    title.TextColor3 = Color3.fromRGB(255, 255, 255)
-    title.TextSize = 14
-    title.Font = Enum.Font.GothamBold
-    title.TextXAlignment = Enum.TextXAlignment.Left
-    title.Parent = titleBar
-
-    local closeBtn = Instance.new("TextButton")
-    closeBtn.Size = UDim2.new(0, 30, 0, 28)
-    closeBtn.Position = UDim2.new(1, -35, 0, 5)
-    closeBtn.BackgroundColor3 = Color3.fromRGB(220, 60, 60)
-    closeBtn.BorderSizePixel = 0
-    closeBtn.Text = "✕"
-    closeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    closeBtn.Font = Enum.Font.GothamBold
-    closeBtn.TextSize = 14
-    closeBtn.Parent = titleBar
-    Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 6)
-
-    closeBtn.MouseButton1Click:Connect(function() gui:Destroy() end)
-
-    -- Status
-    local statusFrame = Instance.new("Frame")
-    statusFrame.Size = UDim2.new(1, -20, 0, 56)
-    statusFrame.Position = UDim2.new(0, 10, 0, 46)
-    statusFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 50)
-    statusFrame.BorderSizePixel = 0
-    statusFrame.Parent = frame
-    Instance.new("UICorner", statusFrame).CornerRadius = UDim.new(0, 6)
-
-    local statusLabel = Instance.new("TextLabel")
-    statusLabel.Size = UDim2.new(1, -12, 1, 0)
-    statusLabel.Position = UDim2.new(0, 6, 0, 0)
-    statusLabel.BackgroundTransparency = 1
-    statusLabel.Text = "⏳ Inicializando..."
-    statusLabel.TextColor3 = Color3.fromRGB(200, 220, 255)
-    statusLabel.TextSize = 12
-    statusLabel.Font = Enum.Font.Gotham
-    statusLabel.TextWrapped = true
-    statusLabel.Parent = statusFrame
-
-    -- Contadores
-    local countersFrame = Instance.new("Frame")
-    countersFrame.Size = UDim2.new(1, -20, 0, 28)
-    countersFrame.Position = UDim2.new(0, 10, 0, 108)
-    countersFrame.BackgroundTransparency = 1
-    countersFrame.Parent = frame
-
-    local counterLabel = Instance.new("TextLabel")
-    counterLabel.Size = UDim2.new(1, 0, 1, 0)
-    counterLabel.BackgroundTransparency = 1
-    counterLabel.Text = "📦 0 payloads | ✅ 0 | ❌ 0"
-    counterLabel.TextColor3 = Color3.fromRGB(255, 220, 120)
-    counterLabel.TextSize = 12
-    counterLabel.Font = Enum.Font.GothamBold
-    counterLabel.Parent = countersFrame
-
-    -- Scroll
-    local scroll = Instance.new("ScrollingFrame")
-    scroll.Size = UDim2.new(1, -20, 1, -250)
-    scroll.Position = UDim2.new(0, 10, 0, 142)
-    scroll.BackgroundColor3 = Color3.fromRGB(25, 25, 40)
-    scroll.BorderSizePixel = 0
-    scroll.ScrollBarThickness = 4
-    scroll.ScrollBarImageColor3 = Color3.fromRGB(120, 120, 220)
-    scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-    scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-    scroll.Parent = frame
-    Instance.new("UICorner", scroll).CornerRadius = UDim.new(0, 6)
-
-    local uiList = Instance.new("UIListLayout")
-    uiList.SortOrder = Enum.SortOrder.LayoutOrder
-    uiList.Padding = UDim.new(0, 3)
-    uiList.Parent = scroll
-
-    local uiPad = Instance.new("UIPadding")
-    uiPad.PaddingTop = UDim.new(0, 6)
-    uiPad.PaddingLeft = UDim.new(0, 6)
-    uiPad.PaddingRight = UDim.new(0, 6)
-    uiPad.PaddingBottom = UDim.new(0, 6)
-    uiPad.Parent = scroll
-
-    -- Botões
-    local btnFrame = Instance.new("Frame")
-    btnFrame.Size = UDim2.new(1, -20, 0, 44)
-    btnFrame.Position = UDim2.new(0, 10, 1, -54)
-    btnFrame.BackgroundTransparency = 1
-    btnFrame.Parent = frame
-
-    local btnList = Instance.new("UIListLayout")
-    btnList.FillDirection = Enum.FillDirection.Horizontal
-    btnList.HorizontalAlignment = Enum.HorizontalAlignment.Center
-    btnList.Padding = UDim.new(0, 6)
-    btnList.Parent = btnFrame
-
-    local function botao(txt, cor, size)
-        local b = Instance.new("TextButton")
-        b.Size = UDim2.new(0, size, 0, 36)
-        b.BackgroundColor3 = cor
-        b.BorderSizePixel = 0
-        b.Text = txt
-        b.TextColor3 = Color3.fromRGB(255, 255, 255)
-        b.TextSize = 12
-        b.Font = Enum.Font.GothamBold
-        b.Parent = btnFrame
-        Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
-        return b
-    end
-
-    local fireBtn = botao("🔥 DISPARAR TODOS", Color3.fromRGB(220, 80, 80), 160)
-    local scanBtn = botao("🔍 ESCANEAR",       Color3.fromRGB(80, 160, 220), 100)
-    local stopBtn = botao("⏹ PARAR",          Color3.fromRGB(120, 120, 120), 70)
-
-    return {
-        gui = gui, frame = frame, statusLabel = statusLabel,
-        counterLabel = counterLabel, scroll = scroll,
-        fireBtn = fireBtn, scanBtn = scanBtn, stopBtn = stopBtn,
-    }
-end
-
--- ============================================================
---  UI HELPERS
--- ============================================================
-local function setStatus(ui, txt, cor)
-    if ui and ui.statusLabel then
-        ui.statusLabel.Text = txt
-        ui.statusLabel.TextColor3 = cor or Color3.fromRGB(200, 220, 255)
-    end
-end
-
-local function addItem(ui, txt, cor)
-    if not ui or not ui.scroll then return end
-    if #ui.scroll:GetChildren() > CONFIG.MAX_ITENS_UI then
-        local primeiros = {}
-        for _, c in ipairs(ui.scroll:GetChildren()) do
-            if c:IsA("TextLabel") then table.insert(primeiros, c) end
-        end
-        if primeiros[1] then primeiros[1]:Destroy() end
-    end
-    local item = Instance.new("TextLabel")
-    item.Size = UDim2.new(1, -12, 0, 22)
-    item.BackgroundColor3 = cor or Color3.fromRGB(40, 40, 60)
-    item.BackgroundTransparency = 0.25
-    item.BorderSizePixel = 0
-    item.Text = "  " .. txt
-    item.TextColor3 = Color3.fromRGB(230, 230, 255)
-    item.TextSize = 11
-    item.Font = Enum.Font.Code
-    item.TextXAlignment = Enum.TextXAlignment.Left
-    item.TextTruncate = Enum.TextTruncate.AtEnd
-    item.Parent = ui.scroll
-    Instance.new("UICorner", item).CornerRadius = UDim.new(0, 4)
-end
-
-local function limparLista(ui)
-    if not ui or not ui.scroll then return end
-    for _, c in ipairs(ui.scroll:GetChildren()) do
-        if c:IsA("TextLabel") then c:Destroy() end
-    end
-end
-
--- ============================================================
---  COLETA UNIVERSAL DE PAYLOADS
---  Estrutura: { nome, tipo, ref, rig, args }
--- ============================================================
-local payloads = {}
-
-local function add(nome, tipo, ref, rig, args)
-    table.insert(payloads, {
-        nome = nome, tipo = tipo, ref = ref,
-        rig = rig or "ANY", args = args or {},
-    })
-end
-
--- Assinaturas comuns testadas em FireServer
-local ASSINATURAS = {
-    {},                                -- ()
-    {LocalPlayer},                     -- (player)
-    {"R15"},                           -- ("R15")
-    {"R6"},                            -- ("R6")
-    {LocalPlayer.Character},           -- (character)
-    {true},                            -- (true)
-    {1},                               -- (1)
-    {"fire"},                          -- ("fire")
-    {"attack"},                        -- ("attack")
-    {"payload"},                       -- ("payload")
-    {"all"},                           -- ("all")
-    {LocalPlayer, "R15"},              -- (player, "R15")
-    {LocalPlayer.Character, "R15"},    -- (character, "R15")
-}
-
--- ============================================================
---  SCANNERS (TODOS OS SERVIÇOS / LOCAIS)
--- ============================================================
-local function scanService(service, prefixo)
-    if not service then return end
-    local ok, desc = pcall(function() return service:GetDescendants() end)
-    if not ok or not desc then return end
-    for _, obj in ipairs(desc) do
-        local cls = obj.ClassName
-        local rig = detectarRigPorNome(obj.Name)
-        if rig == "ANY" then
-            rig = detectarRigPorEstrutura(obj)
-        end
-
-        if obj:IsA("RemoteEvent") then
-            add(prefixo .. "." .. obj:GetFullName(), "RemoteEvent", obj, rig)
-        elseif obj:IsA("RemoteFunction") then
-            add(prefixo .. "." .. obj:GetFullName(), "RemoteFunction", obj, rig)
-        elseif obj:IsA("BindableEvent") then
-            add(prefixo .. "." .. obj:GetFullName(), "BindableEvent", obj, rig)
-        elseif obj:IsA("BindableFunction") then
-            add(prefixo .. "." .. obj:GetFullName(), "BindableFunction", obj, rig)
-        elseif obj:IsA("UnreliableRemoteEvent") then
-            add(prefixo .. "." .. obj:GetFullName(), "UnreliableRemoteEvent", obj, rig)
-        end
-    end
-end
-
-local function scanModulos()
-    for _, obj in ipairs(ReplicatedStorage:GetDescendants()) do
-        if obj:IsA("ModuleScript") then
-            local ok, mod = pcall(require, obj)
-            if ok and type(mod) == "table" then
-                for k, v in pairs(mod) do
-                    if type(v) == "function" then
-                        local rig = detectarRigPorNome(tostring(k))
-                        add(obj.Name .. "." .. tostring(k), "ModuleFunction",
-                            {mod = mod, key = k}, rig)
+function Tester:Scan(roots)
+    if not self.alive or self.busy or self.scanning then return false end
+    self.scanning = true
+    local items, seen, visited = {}, {}, 0
+    local ok, err = pcall(function()
+        for _, root in ipairs(roots) do
+            for _, object in ipairs(root:GetDescendants()) do
+                if not self.alive then return end
+                if not seen[object] then
+                    seen[object] = true
+                    local kind = kinds[object.ClassName]
+                    if kind and object.Parent then
+                        table.insert(items, { ref = object, path = object:GetFullName(), class = object.ClassName,
+                            kind = kind, rig = Tester.Rig(object) })
                     end
+                    visited += 1
+                    if visited % 300 == 0 then task.wait() end
                 end
             end
         end
-    end
-end
-
-local function scanWorkspace()
-    for _, obj in ipairs(Workspace:GetDescendants()) do
-        if obj:IsA("BasePart") then
-            local n = string.lower(obj.Name)
-            if n:find("payload") or n:find("trigger") or n:find("event")
-               or n:find("fire") or n:find("button") or n:find("touch") then
-                local rig = detectarRigPorEstrutura(obj.Parent) or "ANY"
-                if rig == "ANY" then rig = detectarRigPorNome(obj.Name) end
-                add("Workspace." .. obj:GetFullName(), "PartTrigger", obj, rig)
-            end
-        elseif obj:IsA("Sound") then
-            add("Sound." .. obj:GetFullName(), "Sound", obj, "ANY")
-        elseif obj:IsA("Animation") then
-            add("Animation." .. obj:GetFullName(), "Animation", obj, "ANY")
-        elseif obj:IsA("ProximityPrompt") then
-            add("Prompt." .. obj:GetFullName(), "ProximityPrompt", obj, "ANY")
-        elseif obj:IsA("ClickDetector") then
-            add("Click." .. obj:GetFullName(), "ClickDetector", obj, "ANY")
-        elseif obj:IsA("TouchTransmitter") then
-            add("Touch." .. obj:GetFullName(), "TouchTransmitter", obj, "ANY")
-        end
-    end
-end
-
-local function scanCharacter()
-    local char = LocalPlayer.Character
-    if not char then return end
-    for _, obj in ipairs(char:GetDescendants()) do
-        if obj:IsA("RemoteEvent") then
-            add("Char." .. obj.Name, "RemoteEvent", obj, "R15")
-        elseif obj:IsA("BasePart") then
-            -- nada por padrão; não dispara em cada parte pra não floodar
-        elseif obj:IsA("Sound") then
-            add("CharSound." .. obj.Name, "Sound", obj, "R15")
-        end
-    end
-end
-
-local function scanPlayerGui()
-    for _, obj in ipairs(LocalPlayer:GetDescendants()) do
-        if obj:IsA("RemoteEvent") then
-            add("Player." .. obj.Name, "RemoteEvent", obj, "ANY")
-        elseif obj:IsA("BindableEvent") then
-            add("Player." .. obj.Name, "BindableEvent", obj, "ANY")
-        end
-    end
-end
-
-local function scanBackpackETools()
-    local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
-    local char = LocalPlayer.Character
-    local alvos = {}
-    if bp then table.insert(alvos, bp) end
-    if char then table.insert(alvos, char) end
-    for _, cont in ipairs(alvos) do
-        for _, tool in ipairs(cont:GetChildren()) do
-            if tool:IsA("Tool") then
-                for _, d in ipairs(tool:GetDescendants()) do
-                    if d:IsA("RemoteEvent") then
-                        add("Tool." .. tool.Name .. "." .. d.Name, "RemoteEvent", d, "R15")
-                    elseif d:IsA("RemoteFunction") then
-                        add("Tool." .. tool.Name .. "." .. d.Name, "RemoteFunction", d, "R15")
-                    end
-                end
-                -- ativa a tool também
-                add("ToolActivate." .. tool.Name, "ToolActivate", tool, "R15")
-            end
-        end
-    end
-end
-
-local function scanTudo()
-    payloads = {}
-
-    scanService(ReplicatedStorage, "RS")
-    scanService(ServerStorage,     "SS")
-    scanService(Workspace,         "WS")
-    scanService(Lighting,          "LT")
-    scanService(SoundService,      "SND")
-    scanService(StarterGui,        "SG")
-
-    scanModulos()
-    scanWorkspace()
-    scanCharacter()
-    scanPlayerGui()
-    scanBackpackETools()
-
-    -- Ordena R15 → R6 → ANY
-    table.sort(payloads, function(a, b)
-        local ordem = { R15 = 1, R6 = 2, ANY = 3 }
-        local oa, ob = ordem[a.rig] or 4, ordem[b.rig] or 4
-        if oa ~= ob then return oa < ob end
-        return a.nome < b.nome
-    end)
-
-    return #payloads
-end
-
--- ============================================================
---  DISPARO UNIVERSAL (tenta tudo em cada payload)
--- ============================================================
-local function dispararRemoteEvent(remote)
-    -- Tenta várias assinaturas comuns; para na primeira que não der erro
-    local tentativas = 0
-    for _, args in ipairs(ASSINATURAS) do
-        tentativas = tentativas + 1
-        local ok = pcall(function()
-            remote:FireServer(table.unpack(args))
+        local order = { R15 = 1, R6 = 2, ANY = 3 }
+        table.sort(items, function(a, b)
+            if order[a.rig] ~= order[b.rig] then return order[a.rig] < order[b.rig] end
+            return a.path < b.path
         end)
-        if ok then
-            return true, "FireServer(" .. #args .. " args)"
-        end
-        if not CONFIG.TENTAR_VARIAS_ASSINATURAS then break end
-    end
-    -- se nenhuma funcionou, tenta ao menos uma vez direto
-    local ok = pcall(function() remote:FireServer() end)
-    return ok, ok and "FireServer()" or "falhou em todas assinaturas"
-end
-
-local function dispararRemoteFunction(rf)
-    for _, args in ipairs(ASSINATURAS) do
-        local ok = pcall(function()
-            rf:InvokeServer(table.unpack(args))
-        end)
-        if ok then
-            return true, "InvokeServer(" .. #args .. " args)"
-        end
-        if not CONFIG.TENTAR_VARIAS_ASSINATURAS then break end
-    end
-    return false, "InvokeServer falhou"
-end
-
-local function dispararPayload(p)
-    local ok, info = pcall(function()
-        local t = p.tipo
-        if t == "RemoteEvent" or t == "UnreliableRemoteEvent" then
-            return dispararRemoteEvent(p.ref)
-        elseif t == "RemoteFunction" then
-            return dispararRemoteFunction(p.ref)
-        elseif t == "BindableEvent" then
-            p.ref:Fire()
-            return true, "BindableEvent:Fire()"
-        elseif t == "BindableFunction" then
-            p.ref:Invoke()
-            return true, "BindableFunction:Invoke()"
-        elseif t == "ModuleFunction" then
-            p.ref.mod[p.ref.key]()
-            return true, "Module." .. tostring(p.ref.key)
-        elseif t == "PartTrigger" then
-            local obj = p.ref
-            local s = obj:FindFirstChildOfClass("Sound")
-            if s then s:Play() end
-            local prompt = obj:FindFirstChildOfClass("ProximityPrompt")
-            if prompt then prompt:InputHoldBegin(); task.wait(0.05); prompt:InputHoldEnd() end
-            local cd = obj:FindFirstChildOfClass("ClickDetector")
-            if cd then
-                for _, plr in ipairs(Players:GetPlayers()) do
-                    pcall(function() cd.MouseClick:Fire(plr) end)
-                end
-            end
-            return true, "PartTrigger acionado"
-        elseif t == "Sound" then
-            p.ref:Play()
-            return true, "Sound:Play()"
-        elseif t == "ProximityPrompt" then
-            p.ref:InputHoldBegin(); task.wait(0.05); p.ref:InputHoldEnd()
-            return true, "Prompt acionado"
-        elseif t == "ClickDetector" then
-            for _, plr in ipairs(Players:GetPlayers()) do
-                pcall(function() p.ref.MouseClick:Fire(plr) end)
-            end
-            return true, "ClickDetector fire"
-        elseif t == "TouchTransmitter" then
-            local part = p.ref.Parent
-            if part and LocalPlayer.Character then
-                pcall(function() p.ref:Fire(LocalPlayer.Character) end)
-            end
-            return true, "Touch fire"
-        elseif t == "ToolActivate" then
-            pcall(function() p.ref:Activate() end)
-            return true, "Tool:Activate()"
-        elseif t == "Animation" then
-            local char = LocalPlayer.Character
-            local hum = char and char:FindFirstChildOfClass("Humanoid")
-            if hum then
-                local anim = hum:LoadAnimation(p.ref)
-                anim:Play()
-            end
-            return true, "Animation:Play()"
-        end
-        return false, "tipo desconhecido: " .. tostring(t)
     end)
-
-    if not ok then return false, tostring(info) end
-    -- info agora é (bool, string)
-    if type(info) == "table" then
-        return info[1], info[2]
-    end
-    return true, tostring(info)
+    self.scanning = false
+    if not self.alive then return false, "Closed" end
+    if not ok then return false, tostring(err) end
+    self.items = items
+    for object in pairs(self.drafts) do if not seen[object] then self.drafts[object] = nil end end
+    return true, #items
 end
-
--- ============================================================
---  LOOP DE DISPARO
--- ============================================================
-local disparando = false
-local pararSolicitado = false
-
-local function dispararTodos(ui)
-    if disparando then return end
-    disparando = true
-    pararSolicitado = false
-
-    local total = #payloads
-    if total == 0 then
-        setStatus(ui, "❌ Nenhum payload. Escaneie primeiro.", Color3.fromRGB(255, 100, 100))
-        disparando = false
-        return
+function Tester.Decode(text)
+    assert(text:match("^%s*%["), "Arguments must be a JSON array, e.g. [true, 1]")
+    local args = HttpService:JSONDecode(text)
+    assert(type(args) == "table", "Arguments must be an array")
+    -- JSON null is not a reliable Lua array slot; use {"$nil":true} instead.
+    -- Check null lexically below, without rejecting a string containing "null".
+    local inString, escaped, outside = false, false, {}
+    for i = 1, #text do
+        local c = text:sub(i, i)
+        if inString then
+            if escaped then escaped = false elseif c == "\\" then escaped = true elseif c == '"' then inString = false end
+        elseif c == '"' then inString = true
+        else table.insert(outside, c) end
     end
-
-    limparLista(ui)
-    setStatus(ui, "🚀 Disparando " .. total .. " payloads...", Color3.fromRGB(100, 200, 255))
-
-    local disparados, falhas = 0, 0
-
-    for i, p in ipairs(payloads) do
-        if pararSolicitado then
-            setStatus(ui, "⏹ Parado pelo usuário.", Color3.fromRGB(255, 200, 80))
-            break
+    assert(not table.concat(outside):find("null", 1, true), 'Use {"$nil":true} instead of null')
+    return args
+end
+function Tester.Resolve(args)
+    local character = LocalPlayer.Character
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+    local function resolve(value, depth)
+        assert(depth < 20, "Arguments are nested too deeply")
+        if type(value) == "string" then
+            if value:sub(1, 2) == "$$" then return value:sub(2) end
+            if value == "$player" then return LocalPlayer end
+            if value == "$character" then assert(character, "Character unavailable"); return character end
+            if value == "$root" then assert(root, "Root part unavailable"); return root end
+            if value == "$position" then assert(root, "Root part unavailable"); return root.Position end
+        elseif type(value) == "table" then
+            if value["$nil"] == true then return nil end
+            local copy = {}
+            for k, v in pairs(value) do copy[k] = resolve(v, depth + 1) end
+            return copy
         end
+        return value
+    end
+    local resolved = { n = #args }
+    for i = 1, #args do resolved[i] = resolve(args[i], 0) end
+    return resolved
+end
+function Tester:Dispatch(item, args)
+    local object, class = item.ref, item.class
+    if not object.Parent then return "skipped", "Object was removed" end
+    local custom = CUSTOM_HANDLERS[item.path]
+    if custom then return "returned", tostring(custom(object, args)) end
+    if class == "RemoteEvent" or class == "UnreliableRemoteEvent" then
+        object:FireServer(table.unpack(args, 1, args.n))
+        return "sent", "Sent; server outcome is unconfirmed"
+    elseif class == "RemoteFunction" or class == "BindableFunction" then
+        local result
+        if class == "RemoteFunction" then result = table.pack(object:InvokeServer(table.unpack(args, 1, args.n)))
+        else result = table.pack(object:Invoke(table.unpack(args, 1, args.n))) end
+        local values = {}
+        for i = 1, math.min(result.n, 4) do values[i] = tostring(result[i]):sub(1, 100) end
+        return "returned", result.n == 0 and "No return values" or table.concat(values, " | ")
+    elseif class == "BindableEvent" then
+        object:Fire(table.unpack(args, 1, args.n))
+        return "sent", "Local event dispatched; listeners are unconfirmed"
+    elseif class == "Tool" then
+        if object.Parent ~= LocalPlayer.Character then return "skipped", "Equip this tool first" end
+        if not object.Enabled then return "skipped", "Tool is disabled" end
+        object:Activate()
+        return "sent", "Tool activation requested"
+    elseif class == "Sound" then
+        object:Play()
+        return "local", "Local playback requested"
+    elseif class == "Animation" then
+        local character = LocalPlayer.Character
+        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+        local animator = humanoid and humanoid:FindFirstChildOfClass("Animator")
+        if not animator or humanoid.Health <= 0 then return "skipped", "No living character animator" end
+        local track = animator:LoadAnimation(object)
+        self.tracks[track] = true
+        track.Ended:Once(function()
+            if self.tracks[track] then self.tracks[track] = nil; track:Destroy() end
+        end)
+        track:Play()
+        return "local", "Animation playback requested"
+    elseif class == "ProximityPrompt" then
+        if not object.Enabled then return "skipped", "Prompt is disabled" end
+        local parent = object.Parent
+        local position
+        if parent:IsA("Attachment") then position = parent.WorldPosition
+        elseif parent:IsA("BasePart") then position = parent.Position
+        elseif parent:IsA("Model") then position = parent:GetPivot().Position end
+        local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        if not position or not root then return "skipped", "Prompt or character position unavailable" end
+        if (position - root.Position).Magnitude > object.MaxActivationDistance then return "skipped", "Move closer to this prompt" end
+        if object.HoldDuration + 0.1 >= CONFIG.Timeout then return "skipped", "Hold duration exceeds the call timeout" end
+        self.prompt = object
+        object:InputHoldBegin()
+        task.wait(object.HoldDuration + 0.05)
+        self:ReleasePrompt()
+        return "sent", "Prompt input sent; activation is unconfirmed"
+    elseif class == "ModuleScript" then
+        return "skipped", "Module needs an explicit CUSTOM_HANDLERS entry"
+    elseif class == "ClickDetector" then
+        return "skipped", "MouseClick is a signal; use a real click or a project handler"
+    elseif class == "TouchTransmitter" then
+        return "skipped", "Touch requires physical contact or a project handler"
+    end
+    return "skipped", "Unsupported type"
+end
+function Tester:Run(queue, onResult, onDone)
+    if not self.alive or self.busy or self.scanning or #queue == 0 then return false end
+    self.busy, self.cancelled = true, false
+    local snapshot = table.clone(queue)
+    task.spawn(function()
+        local counts = { sent = 0, returned = 0, ["local"] = 0, error = 0, timeout = 0, skipped = 0 }
+        for index, job in ipairs(snapshot) do
+            if not self.alive or self.cancelled then break end
+            local finished, result = false, nil
+            local started = os.clock()
+            self.worker = task.spawn(function()
+                result = table.pack(pcall(function()
+                    return self:Dispatch(job.item, Tester.Resolve(Tester.Decode(job.json)))
+                end))
+                finished = true
+            end)
+            while not finished and self.alive and not self.cancelled and os.clock() - started < CONFIG.Timeout do task.wait(0.03) end
+            if not finished and self.worker then pcall(task.cancel, self.worker) end
+            self.worker = nil
+            self:ReleasePrompt()
+            if not self.alive or self.cancelled then break end
+            local status, detail
+            if not finished then status, detail = "timeout", "No result within " .. CONFIG.Timeout .. "s; an already sent request cannot be recalled"
+            elseif not result[1] then status, detail = "error", tostring(result[2])
+            else status, detail = result[2], result[3] end
+            counts[status] += 1
+            onResult(job.item, status, tostring(detail):sub(1, 400), index, #snapshot, counts)
+            if index < #snapshot then task.wait(CONFIG.Delay) end
+        end
+        self.busy = false
+        if self.alive then onDone(self.cancelled, counts) end
+    end)
+    return true
+end
+-- END TESTER CORE
 
-        if CONFIG.MOSTRAR_APENAS_R15 and p.rig ~= "R15" then
-            -- pula
+local playerGui = LocalPlayer:WaitForChild("PlayerGui")
+local previous = playerGui:FindFirstChild("StandalonePayloadTester")
+if previous then previous:Destroy() end
+local tester = Tester.new()
+local connections = {}
+local function connect(signal, callback)
+    local connection = signal:Connect(callback)
+    table.insert(connections, connection)
+    return connection
+end
+local palette = { bg = Color3.fromRGB(17, 18, 20), card = Color3.fromRGB(26, 28, 31),
+    edge = Color3.fromRGB(52, 55, 60), text = Color3.fromRGB(235, 237, 240), muted = Color3.fromRGB(155, 160, 168),
+    accent = Color3.fromRGB(214, 220, 228), danger = Color3.fromRGB(238, 133, 133) }
+local function make(class, parent, props)
+    local object = Instance.new(class)
+    for key, value in pairs(props or {}) do object[key] = value end
+    if object:IsA("TextLabel") or object:IsA("TextButton") or object:IsA("TextBox") then object.AutoLocalize = false end
+    object.Parent = parent
+    return object
+end
+local function round(object, radius) make("UICorner", object, { CornerRadius = UDim.new(0, radius or 8) }) end
+local function label(parent, text, x, y, w, h, muted)
+    return make("TextLabel", parent, { BackgroundTransparency = 1, Text = text, Position = UDim2.fromOffset(x, y),
+        Size = UDim2.fromOffset(w, h), Font = Enum.Font.Gotham, TextSize = 12, TextColor3 = muted and palette.muted or palette.text,
+        TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd })
+end
+local function button(parent, text, x, y, w, h, primary)
+    local object = make("TextButton", parent, { Text = text, Position = UDim2.fromOffset(x, y), Size = UDim2.fromOffset(w, h),
+        BackgroundColor3 = primary and palette.accent or palette.card, TextColor3 = primary and palette.bg or palette.text,
+        BorderSizePixel = 0, Font = Enum.Font.GothamMedium, TextSize = 12, AutoButtonColor = true })
+    round(object, 7)
+    return object
+end
+local function input(parent, placeholder, text, x, y, w, h)
+    local object = make("TextBox", parent, { Text = text, PlaceholderText = placeholder, ClearTextOnFocus = false,
+        Position = UDim2.fromOffset(x, y), Size = UDim2.fromOffset(w, h), BackgroundColor3 = palette.card,
+        BorderSizePixel = 0, TextColor3 = palette.text, PlaceholderColor3 = palette.muted, Font = Enum.Font.Code, TextSize = 12,
+        TextXAlignment = Enum.TextXAlignment.Left })
+    round(object, 7)
+    make("UIPadding", object, { PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10) })
+    return object
+end
+local gui = make("ScreenGui", playerGui, { Name = "StandalonePayloadTester", ResetOnSpawn = false, IgnoreGuiInset = true,
+    ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 30 })
+local window = make("Frame", gui, { Size = UDim2.fromOffset(560, 650), BackgroundColor3 = palette.bg, BorderSizePixel = 0 })
+round(window, 12)
+make("UIStroke", window, { Color = palette.edge, Thickness = 1 })
+local scale = make("UIScale", window, { Scale = 1 })
+local titlebar = make("Frame", window, { Size = UDim2.new(1, -90, 0, 55), BackgroundTransparency = 1, Active = true })
+local title = label(titlebar, "Payload tester", 18, 8, 320, 23)
+title.Font, title.TextSize = Enum.Font.GothamMedium, 17
+label(titlebar, "CLIENT SESSION", 18, 32, 250, 14, true).TextSize = 10
+local minimize = button(window, "–", 474, 12, 30, 30)
+local close = button(window, "×", 512, 12, 30, 30)
+local content = make("Frame", window, { Position = UDim2.fromOffset(0, 55), Size = UDim2.new(1, 0, 1, -55), BackgroundTransparency = 1 })
+local status = label(content, "Ready to scan", 18, 0, 524, 26)
+local counters = label(content, "0 targets", 18, 28, 524, 20, true)
+local search = input(content, "Search name or path", "", 18, 60, 298, 34)
+local filterButton = button(content, "All types", 324, 60, 106, 34)
+local rigButton = button(content, "Any rig", 438, 60, 104, 34)
+local targetsButton = button(content, "Targets", 18, 106, 88, 30)
+local logButton = button(content, "Results", 114, 106, 88, 30)
+local selectButton = button(content, "Select filtered", 210, 106, 132, 30)
+local autoButton = button(content, "Auto scan: OFF", 350, 106, 192, 30)
+local scroll = make("ScrollingFrame", content, { Position = UDim2.fromOffset(18, 146), Size = UDim2.fromOffset(524, 232),
+    BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 3, ScrollBarImageColor3 = palette.muted,
+    CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y })
+make("UIListLayout", scroll, { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder })
+local prevPage = button(content, "‹", 18, 387, 30, 26)
+local pageLabel = label(content, "1 / 1", 58, 387, 260, 26, true)
+local nextPage = button(content, "›", 328, 387, 30, 26)
+local scanButton = button(content, "Scan", 368, 387, 84, 26)
+local clearButton = button(content, "Clear", 460, 387, 82, 26)
+local detailLabel = label(content, "Select a target to edit its arguments", 18, 423, 524, 22)
+local argsBox = input(content, "JSON arguments: []", "[]", 18, 450, 524, 38)
+local hint = label(content, 'JSON array · $player, $character, $root, $position', 18, 490, 524, 20, true)
+hint.TextSize = 11
+local runButton = button(content, "Run selected (0)", 18, 526, 212, 38, true)
+local runFiltered = button(content, "Run filtered", 238, 526, 184, 38)
+local stopButton = button(content, "Stop", 430, 526, 112, 38)
+label(content, "Sent means dispatched, not confirmed by the server.", 18, 568, 524, 18, true).TextSize = 10
+
+local selected, logs, results, rowsConnections = {}, {}, {}, {}
+local focus, view, page, filterIndex, rigIndex = nil, "targets", 1, 1, 1
+local filters, rigs = { "All types", "Remotes", "Local actions", "Inspect" }, { "Any rig", "R15", "R6" }
+local autoScan, minimized, settingArgs = false, false, false
+local lastResultsRender = 0
+local position, drag, viewportConnection = nil, nil, nil
+local render
+local function setStatus(text, isError)
+    if not tester.alive then return end
+    status.Text, status.TextColor3 = text, isError and palette.danger or palette.text
+end
+local function filtered()
+    local list, query = {}, string.lower(search.Text)
+    for _, item in ipairs(tester.items) do
+        local kindMatch = filterIndex == 1 or item.kind == ({ "", "remote", "local", "inspect" })[filterIndex]
+        if kindMatch and (rigIndex == 1 or item.rig == rigs[rigIndex]) and string.lower(item.path):find(query, 1, true) then
+            table.insert(list, item)
+        end
+    end
+    return list
+end
+local function focusItem(item)
+    focus = item
+    detailLabel.Text = item.path
+    settingArgs = true
+    argsBox.Text = tester.drafts[item.ref] or "[]"
+    settingArgs = false
+end
+local function selectionCount()
+    local count = 0
+    for _, item in ipairs(tester.items) do if selected[item.ref] then count += 1 end end
+    return count
+end
+render = function()
+    if not tester.alive then return end
+    for _, connection in ipairs(rowsConnections) do connection:Disconnect() end
+    table.clear(rowsConnections)
+    for _, child in ipairs(scroll:GetChildren()) do if child:IsA("GuiObject") then child:Destroy() end end
+    local list = view == "targets" and filtered() or logs
+    local pages = math.max(1, math.ceil(#list / CONFIG.PageSize))
+    page = math.clamp(page, 1, pages)
+    pageLabel.Text = string.format("%d / %d   ·   %d %s", page, pages, #list, view)
+    runButton.Text = "Run selected (" .. selectionCount() .. ")"
+    targetsButton.TextColor3 = view == "targets" and palette.text or palette.muted
+    logButton.TextColor3 = view == "logs" and palette.text or palette.muted
+    if #list == 0 then label(scroll, view == "targets" and "No matching targets. Scan or adjust filters." or "No results yet.", 0, 0, 500, 42, true) end
+    for index = (page - 1) * CONFIG.PageSize + 1, math.min(page * CONFIG.PageSize, #list) do
+        local entry = list[index]
+        local row = make("Frame", scroll, { Size = UDim2.new(1, -8, 0, 49), BackgroundColor3 = palette.card,
+            BorderSizePixel = 0, LayoutOrder = index })
+        round(row, 6)
+        if view == "targets" then
+            local choose = button(row, selected[entry.ref] and "✓" or "", 7, 12, 25, 25)
+            local open = make("TextButton", row, { Position = UDim2.fromOffset(40, 0), Size = UDim2.new(1, -44, 1, 0),
+                Text = "", BackgroundTransparency = 1, AutoButtonColor = false })
+            local name = label(open, entry.ref.Name .. "  ·  " .. entry.class, 0, 4, 450, 19)
+            name.Size = UDim2.new(1, -8, 0, 19)
+            local meta = label(open, entry.rig .. "  ·  " .. entry.path, 0, 26, 450, 16, true)
+            meta.Size = UDim2.new(1, -8, 0, 16); meta.TextSize = 10
+            table.insert(rowsConnections, choose.Activated:Connect(function()
+                selected[entry.ref] = not selected[entry.ref] or nil
+                focusItem(entry); render()
+            end))
+            table.insert(rowsConnections, open.Activated:Connect(function()
+                focusItem(entry)
+                local result = results[entry.ref]
+                if result then setStatus(result.status:upper() .. " · " .. result.detail, result.status == "error" or result.status == "timeout") end
+            end))
         else
-            local ok, msg = dispararPayload(p)
-            if ok then
-                disparados = disparados + 1
-                addItem(ui, "✅ [" .. p.rig .. "] " .. p.nome .. " → " .. tostring(msg),
-                    Color3.fromRGB(35, 75, 50))
-            else
-                falhas = falhas + 1
-                addItem(ui, "❌ [" .. p.rig .. "] " .. p.nome .. " → " .. tostring(msg):sub(1, 50),
-                    Color3.fromRGB(80, 40, 40))
+            row.Size = UDim2.new(1, -8, 0, 0)
+            row.AutomaticSize = Enum.AutomaticSize.Y
+            make("UIListLayout", row, { Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder })
+            make("UIPadding", row, { PaddingTop = UDim.new(0, 8), PaddingBottom = UDim.new(0, 8),
+                PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10) })
+            local name = label(row, entry.status:upper() .. "  ·  " .. entry.item.path, 10, 4, 486, 19)
+            if entry.status == "error" or entry.status == "timeout" then name.TextColor3 = palette.danger end
+            local message = label(row, entry.detail, 10, 27, 486, 16, true)
+            for order, text in ipairs({ name, message }) do
+                text.LayoutOrder = order
+                text.Size = UDim2.new(1, 0, 0, 0)
+                text.AutomaticSize = Enum.AutomaticSize.Y
+                text.TextWrapped, text.TextTruncate = true, Enum.TextTruncate.None
             end
-
-            ui.counterLabel.Text = string.format("📦 %d | ✅ %d | ❌ %d | %d/%d",
-                total, disparados, falhas, i, total)
-            setStatus(ui, "⏳ " .. p.nome .. " (" .. i .. "/" .. total .. ")",
-                Color3.fromRGB(255, 220, 100))
-
-            task.wait(CONFIG.DELAY_ENTRE_PAYLOADS)
+            message.TextSize = 11
         end
     end
-
-    setStatus(ui, "✅ Fim! " .. disparados .. " ok, " .. falhas .. " falhas.",
-        Color3.fromRGB(100, 255, 150))
-    disparando = false
 end
-
--- ============================================================
---  MAIN
--- ============================================================
-local function main()
-    local ui = criarUI()
-
-    local qtd = scanTudo()
-    setStatus(ui, "🔍 " .. qtd .. " payloads encontrados.", Color3.fromRGB(100, 200, 255))
-    ui.counterLabel.Text = "📦 " .. qtd .. " | ✅ 0 | ❌ 0"
-
-    limparLista(ui)
-    for _, p in ipairs(payloads) do
-        local cor = p.rig == "R15" and Color3.fromRGB(40, 60, 110)
-                 or p.rig == "R6"  and Color3.fromRGB(70, 40, 40)
-                 or Color3.fromRGB(45, 45, 65)
-        addItem(ui, "📦 [" .. p.rig .. "] " .. p.nome, cor)
-    end
-
-    ui.fireBtn.MouseButton1Click:Connect(function()
-        task.spawn(function() dispararTodos(ui) end)
-    end)
-
-    ui.scanBtn.MouseButton1Click:Connect(function()
-        local q = scanTudo()
-        setStatus(ui, "🔍 Reescaneado: " .. q .. " payloads.", Color3.fromRGB(100, 200, 255))
-        ui.counterLabel.Text = "📦 " .. q .. " | ✅ 0 | ❌ 0"
-        limparLista(ui)
-        for _, p in ipairs(payloads) do
-            local cor = p.rig == "R15" and Color3.fromRGB(40, 60, 110)
-                     or p.rig == "R6"  and Color3.fromRGB(70, 40, 40)
-                     or Color3.fromRGB(45, 45, 65)
-            addItem(ui, "📦 [" .. p.rig .. "] " .. p.nome, cor)
+local function scan()
+    if tester.scanning or tester.busy then setStatus("Wait for the current operation to finish"); return end
+    setStatus("Scanning client-visible objects…")
+    local ok, value = tester:Scan({ game:GetService("ReplicatedStorage"), Workspace, game:GetService("Lighting"),
+        game:GetService("SoundService"), game:GetService("StarterGui"), LocalPlayer })
+    if not tester.alive then return end
+    if ok then
+        local present = {}
+        for _, item in ipairs(tester.items) do present[item.ref] = true end
+        for object in pairs(selected) do if not present[object] then selected[object] = nil end end
+        for object in pairs(results) do if not present[object] then results[object] = nil end end
+        if focus and not present[focus.ref] then
+            focus = nil; detailLabel.Text = "Select a target to edit its arguments"
+            settingArgs = true; argsBox.Text = "[]"; settingArgs = false
         end
-    end)
-
-    ui.stopBtn.MouseButton1Click:Connect(function()
-        pararSolicitado = true
-    end)
-
-    if CONFIG.AUTO_SCAN then
-        task.spawn(function()
-            while ui.gui and ui.gui.Parent do
-                task.wait(CONFIG.SCAN_INTERVALO)
-                if not disparando then
-                    local q = scanTudo()
-                    setStatus(ui, "🔄 Auto-scan: " .. q .. " payloads.", Color3.fromRGB(150, 150, 255))
-                end
-            end
-        end)
+        counters.Text = tostring(value) .. " targets · " .. selectionCount() .. " selected"
+        setStatus("Scan complete · client-visible objects only")
+        render()
+    else setStatus("Scan failed: " .. tostring(value), true) end
+end
+local function run(allFiltered)
+    if tester.busy or tester.scanning then setStatus("Wait for the current operation to finish"); return end
+    local queue = {}
+    for _, item in ipairs(allFiltered and filtered() or tester.items) do
+        if allFiltered or selected[item.ref] then table.insert(queue, { item = item, json = tester.drafts[item.ref] or "[]" }) end
     end
-
-    LocalPlayer.CharacterAdded:Connect(function(char)
-        task.wait(1)
-        local rig = isR15(char) and "R15" or "R6"
-        setStatus(ui, "🎯 Rig: " .. rig .. " | reescaneando...", Color3.fromRGB(200, 220, 255))
-        scanTudo()
+    if #queue == 0 then setStatus("Select a target first"); return end
+    local function summary(counts)
+        return string.format("%d sent · %d returned · %d local · %d errors · %d timeouts · %d skipped",
+            counts.sent, counts.returned, counts["local"], counts.error, counts.timeout, counts.skipped)
+    end
+    setStatus("Running " .. #queue .. " targets…")
+    tester:Run(queue, function(item, outcome, detail, index, total, counts)
+        if not tester.alive then return end
+        local entry = { item = item, status = outcome, detail = detail }
+        results[item.ref] = entry
+        table.insert(logs, 1, entry)
+        if #logs > CONFIG.MaxLogs then table.remove(logs) end
+        counters.Text = summary(counts)
+        setStatus(string.format("%d/%d · %s · %s", index, total, outcome:upper(), item.ref.Name), outcome == "error" or outcome == "timeout")
+        if view == "logs" and os.clock() - lastResultsRender >= 0.15 then
+            lastResultsRender = os.clock()
+            render()
+        end
+    end, function(stopped, counts)
+        counters.Text = summary(counts)
+        setStatus(stopped and "Stopped · pending local work cancelled" or "Run complete · open Results for details")
+        render()
     end)
 end
-
-main()
+local function fit()
+    local camera = Workspace.CurrentCamera
+    local size = camera and camera.ViewportSize or Vector2.new(800, 700)
+    scale.Scale = math.max(0.1, math.min(1, (size.X - 24) / 560, (size.Y - 24) / 650))
+    local width, height = 560 * scale.Scale, (minimized and 55 or 650) * scale.Scale
+    if not position then position = Vector2.new((size.X - width) / 2, (size.Y - height) / 2) end
+    position = Vector2.new(math.clamp(position.X, 12, math.max(12, size.X - width - 12)),
+        math.clamp(position.Y, 12, math.max(12, size.Y - height - 12)))
+    window.Position = UDim2.fromOffset(position.X, position.Y)
+end
+local function bindCamera()
+    if viewportConnection then viewportConnection:Disconnect() end
+    local camera = Workspace.CurrentCamera
+    viewportConnection = camera and camera:GetPropertyChangedSignal("ViewportSize"):Connect(fit) or nil
+    fit()
+end
+connect(titlebar.InputBegan, function(event)
+    if event.UserInputType == Enum.UserInputType.MouseButton1 or event.UserInputType == Enum.UserInputType.Touch then
+        if drag then return end
+        drag = { input = event, x = event.Position.X, y = event.Position.Y, origin = position }
+    end
+end)
+connect(UserInputService.InputChanged, function(event)
+    if not drag then return end
+    local touch = drag.input.UserInputType == Enum.UserInputType.Touch
+    if (touch and event ~= drag.input) or (not touch and event.UserInputType ~= Enum.UserInputType.MouseMovement) then return end
+    position = Vector2.new(drag.origin.X + event.Position.X - drag.x, drag.origin.Y + event.Position.Y - drag.y)
+    fit()
+end)
+connect(UserInputService.InputEnded, function(event)
+    if drag and (event == drag.input or (drag.input.UserInputType == Enum.UserInputType.MouseButton1 and event.UserInputType == Enum.UserInputType.MouseButton1)) then drag = nil end
+end)
+connect(UserInputService.WindowFocusReleased, function() drag = nil end)
+connect(Workspace:GetPropertyChangedSignal("CurrentCamera"), bindCamera)
+connect(close.Activated, function() gui:Destroy() end)
+connect(minimize.Activated, function()
+    minimized = not minimized
+    content.Visible = not minimized
+    window.Size = UDim2.fromOffset(560, minimized and 55 or 650)
+    minimize.Text = minimized and "+" or "–"
+    fit()
+end)
+connect(search:GetPropertyChangedSignal("Text"), function() page = 1; render() end)
+connect(argsBox:GetPropertyChangedSignal("Text"), function()
+    if focus and not settingArgs then tester.drafts[focus.ref] = argsBox.Text end
+end)
+connect(filterButton.Activated, function() filterIndex = filterIndex % #filters + 1; filterButton.Text = filters[filterIndex]; page = 1; render() end)
+connect(rigButton.Activated, function() rigIndex = rigIndex % #rigs + 1; rigButton.Text = rigs[rigIndex]; page = 1; render() end)
+connect(targetsButton.Activated, function() view = "targets"; page = 1; scroll.CanvasPosition = Vector2.new(); render() end)
+connect(logButton.Activated, function() view = "logs"; page = 1; scroll.CanvasPosition = Vector2.new(); render() end)
+connect(prevPage.Activated, function() page -= 1; scroll.CanvasPosition = Vector2.new(); render() end)
+connect(nextPage.Activated, function() page += 1; scroll.CanvasPosition = Vector2.new(); render() end)
+connect(selectButton.Activated, function()
+    local items, all = filtered(), true
+    for _, item in ipairs(items) do if not selected[item.ref] then all = false; break end end
+    for _, item in ipairs(items) do selected[item.ref] = not all or nil end
+    render()
+end)
+connect(clearButton.Activated, function()
+    if view == "logs" then table.clear(logs); table.clear(results) else table.clear(selected) end
+    render()
+end)
+connect(autoButton.Activated, function() autoScan = not autoScan; autoButton.Text = "Auto scan: " .. (autoScan and "ON" or "OFF") end)
+connect(scanButton.Activated, scan)
+connect(runButton.Activated, function() run(false) end)
+connect(runFiltered.Activated, function() run(true) end)
+connect(stopButton.Activated, function()
+    if tester.busy then tester:Stop(); setStatus("Stopping…") else setStatus("No active run") end
+end)
+connect(LocalPlayer.CharacterAdded, function()
+    task.delay(1, function() if tester.alive and not tester.busy then scan() end end)
+end)
+connect(gui.Destroying, function()
+    tester:Destroy()
+    for _, connection in ipairs(connections) do connection:Disconnect() end
+    for _, connection in ipairs(rowsConnections) do connection:Disconnect() end
+    if viewportConnection then viewportConnection:Disconnect() end
+end)
+bindCamera()
+render()
+task.spawn(scan)
+task.spawn(function()
+    local elapsed = 0
+    while tester.alive do
+        elapsed += task.wait(0.5)
+        if elapsed >= CONFIG.ScanInterval then
+            elapsed = 0
+            if autoScan and tester.alive and not tester.busy and not tester.scanning then scan() end
+        end
+    end
+end)
