@@ -8,6 +8,8 @@ local LocalPlayer = Players.LocalPlayer
 assert(LocalPlayer, "Payload Tester must run on the client")
 
 local CONFIG = { Delay = 0.08, Timeout = 4, ScanInterval = 6, PageSize = 60, MaxLogs = 200 }
+local CONFIG = { Concurrency = 4, Timeout = 1.5, MaxPromptHold = 10, Tick = 0.03, ScanBudget = 0.004,
+    ScanInterval = 6, PageSize = 60, MaxLogs = 200 }
 -- Optional project-specific calls, keyed by GetFullName(). Resolved on each run.
 -- Example: ["ReplicatedStorage.Remotes.Test"] = function(object, args) object:FireServer(table.unpack(args, 1, args.n)) end
 local CUSTOM_HANDLERS = {}
@@ -23,15 +25,28 @@ local kinds = {
 }
 function Tester.new()
     return setmetatable({ alive = true, busy = false, scanning = false, items = {}, tracks = {}, drafts = {} }, Tester)
+    return setmetatable({ alive = true, busy = false, scanning = false, items = {}, tracks = {}, drafts = {},
+        workers = {}, prompts = {} }, Tester)
 end
 function Tester:ReleasePrompt()
     local prompt = self.prompt
     self.prompt = nil
     if prompt then pcall(function() prompt:InputHoldEnd() end) end
+function Tester:ReleasePrompt(prompt)
+    if prompt then
+        if self.prompts[prompt] then
+            self.prompts[prompt] = nil
+            pcall(function() prompt:InputHoldEnd() end)
+        end
+    else
+        for active in pairs(self.prompts) do self:ReleasePrompt(active) end
+    end
 end
 function Tester:Stop()
     self.cancelled = true
     if self.worker then pcall(task.cancel, self.worker); self.worker = nil end
+    for worker in pairs(self.workers) do pcall(task.cancel, worker) end
+    table.clear(self.workers)
     self:ReleasePrompt()
 end
 function Tester:Destroy()
@@ -61,6 +76,7 @@ function Tester:Scan(roots)
     if not self.alive or self.busy or self.scanning then return false end
     self.scanning = true
     local items, seen, visited = {}, {}, 0
+    local items, seen, sliceStart = {}, {}, os.clock()
     local ok, err = pcall(function()
         for _, root in ipairs(roots) do
             for _, object in ipairs(root:GetDescendants()) do
@@ -74,6 +90,10 @@ function Tester:Scan(roots)
                     end
                     visited += 1
                     if visited % 300 == 0 then task.wait() end
+                    if os.clock() - sliceStart >= CONFIG.ScanBudget then
+                        task.wait()
+                        sliceStart = os.clock()
+                    end
                 end
             end
         end
@@ -180,9 +200,12 @@ function Tester:Dispatch(item, args)
         if (position - root.Position).Magnitude > object.MaxActivationDistance then return "skipped", "Move closer to this prompt" end
         if object.HoldDuration + 0.1 >= CONFIG.Timeout then return "skipped", "Hold duration exceeds the call timeout" end
         self.prompt = object
+        if object.HoldDuration > CONFIG.MaxPromptHold then return "skipped", "Hold duration exceeds the prompt limit" end
+        self.prompts[object] = true
         object:InputHoldBegin()
         task.wait(object.HoldDuration + 0.05)
         self:ReleasePrompt()
+        self:ReleasePrompt(object)
         return "sent", "Prompt input sent; activation is unconfirmed"
     elseif class == "ModuleScript" then
         return "skipped", "Module needs an explicit CUSTOM_HANDLERS entry"
@@ -194,9 +217,11 @@ function Tester:Dispatch(item, args)
     return "skipped", "Unsupported type"
 end
 function Tester:Run(queue, onResult, onDone)
+function Tester:Run(queue, onResult, onDone, concurrency)
     if not self.alive or self.busy or self.scanning or #queue == 0 then return false end
     self.busy, self.cancelled = true, false
     local snapshot = table.clone(queue)
+    local limit = math.clamp(concurrency or CONFIG.Concurrency, 1, 8)
     task.spawn(function()
         local counts = { sent = 0, returned = 0, ["local"] = 0, error = 0, timeout = 0, skipped = 0 }
         for index, job in ipairs(snapshot) do
@@ -221,6 +246,51 @@ function Tester:Run(queue, onResult, onDone)
             counts[status] += 1
             onResult(job.item, status, tostring(detail):sub(1, 400), index, #snapshot, counts)
             if index < #snapshot then task.wait(CONFIG.Delay) end
+        local pending, decoded = {}, {}
+        local cursor, completed = 1, 0
+        while self.alive and not self.cancelled and (cursor <= #snapshot or #pending > 0) do
+            while #pending < limit and cursor <= #snapshot do
+                if not self.alive or self.cancelled then break end
+                local job = snapshot[cursor]
+                cursor += 1
+                local timeout = CONFIG.Timeout
+                if job.item.class == "ProximityPrompt" and not CUSTOM_HANDLERS[job.item.path] then
+                    timeout = math.max(timeout, math.min(job.item.ref.HoldDuration, CONFIG.MaxPromptHold) + 0.25)
+                end
+                local call = { job = job, started = os.clock(), timeout = timeout, finished = false }
+                table.insert(pending, call)
+                call.thread = task.spawn(function()
+                    call.result = table.pack(pcall(function()
+                        local args = decoded[job.json]
+                        if not args then
+                            args = table.pack(pcall(Tester.Decode, job.json))
+                            decoded[job.json] = args
+                        end
+                        if not args[1] then error(args[2], 0) end
+                        return self:Dispatch(job.item, Tester.Resolve(args[2]))
+                    end))
+                    call.finished = true
+                end)
+                self.workers[call.thread] = true
+            end
+            local index = 1
+            while index <= #pending and self.alive and not self.cancelled do
+                local call = pending[index]
+                if call.finished or os.clock() - call.started >= call.timeout then
+                    if not call.finished then pcall(task.cancel, call.thread) end
+                    self.workers[call.thread] = nil
+                    self:ReleasePrompt(call.job.item.ref)
+                    local status, detail
+                    if not call.finished then status, detail = "timeout", "No result within " .. call.timeout .. "s; an already sent request cannot be recalled"
+                    elseif not call.result[1] then status, detail = "error", tostring(call.result[2])
+                    else status, detail = call.result[2], call.result[3] end
+                    counts[status] += 1
+                    completed += 1
+                    onResult(call.job.item, status, tostring(detail):sub(1, 400), completed, #snapshot, counts)
+                    table.remove(pending, index)
+                else index += 1 end
+            end
+            if cursor <= #snapshot or #pending > 0 then task.wait(CONFIG.Tick) end
         end
         self.busy = false
         if self.alive then onDone(self.cancelled, counts) end
@@ -293,6 +363,8 @@ local targetsButton = button(content, "Targets", 18, 106, 88, 30)
 local logButton = button(content, "Results", 114, 106, 88, 30)
 local selectButton = button(content, "Select filtered", 210, 106, 132, 30)
 local autoButton = button(content, "Auto scan: OFF", 350, 106, 192, 30)
+local autoButton = button(content, "Auto: OFF", 350, 106, 88, 30)
+local modeButton = button(content, "Mode: Fast", 446, 106, 96, 30)
 local scroll = make("ScrollingFrame", content, { Position = UDim2.fromOffset(18, 146), Size = UDim2.fromOffset(524, 232),
     BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 3, ScrollBarImageColor3 = palette.muted,
     CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y })
@@ -315,6 +387,7 @@ local selected, logs, results, rowsConnections = {}, {}, {}, {}
 local focus, view, page, filterIndex, rigIndex = nil, "targets", 1, 1, 1
 local filters, rigs = { "All types", "Remotes", "Local actions", "Inspect" }, { "Any rig", "R15", "R6" }
 local autoScan, minimized, settingArgs = false, false, false
+local fastMode = true
 local lastResultsRender = 0
 local position, drag, viewportConnection = nil, nil, nil
 local render
@@ -429,7 +502,9 @@ local function run(allFiltered)
         return string.format("%d sent · %d returned · %d local · %d errors · %d timeouts · %d skipped",
             counts.sent, counts.returned, counts["local"], counts.error, counts.timeout, counts.skipped)
     end
+    local runStarted = os.clock()
     setStatus("Running " .. #queue .. " targets…")
+    setStatus("Running " .. #queue .. " targets · " .. (fastMode and "fast" or "ordered"))
     tester:Run(queue, function(item, outcome, detail, index, total, counts)
         if not tester.alive then return end
         local entry = { item = item, status = outcome, detail = detail }
@@ -445,8 +520,10 @@ local function run(allFiltered)
     end, function(stopped, counts)
         counters.Text = summary(counts)
         setStatus(stopped and "Stopped · pending local work cancelled" or "Run complete · open Results for details")
+        setStatus(stopped and "Stopped · pending local work cancelled" or string.format("Run complete · %.2fs · open Results for details", os.clock() - runStarted))
         render()
     end)
+    end, fastMode and CONFIG.Concurrency or 1)
 end
 local function fit()
     local camera = Workspace.CurrentCamera
@@ -511,6 +588,13 @@ connect(clearButton.Activated, function()
     render()
 end)
 connect(autoButton.Activated, function() autoScan = not autoScan; autoButton.Text = "Auto scan: " .. (autoScan and "ON" or "OFF") end)
+connect(autoButton.Activated, function() autoScan = not autoScan; autoButton.Text = "Auto: " .. (autoScan and "ON" or "OFF") end)
+connect(modeButton.Activated, function()
+    if tester.busy then setStatus("Stop the current run before changing mode"); return end
+    fastMode = not fastMode
+    modeButton.Text = fastMode and "Mode: Fast" or "Mode: Ordered"
+    setStatus(fastMode and "Fast · up to 4 calls in flight; results may arrive out of order" or "Ordered · one call at a time")
+end)
 connect(scanButton.Activated, scan)
 connect(runButton.Activated, function() run(false) end)
 connect(runFiltered.Activated, function() run(true) end)
