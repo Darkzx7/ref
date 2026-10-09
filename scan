@@ -1,644 +1,539 @@
--- MANUAL INTERACTION MONITOR
--- Copy logs / Save logs / Pause / Clear / Minimize
--- Sem instalar hooks ou disparar remotes.
-
 local Players = game:GetService("Players")
-local Run = game:GetService("RunService")
+local Http = game:GetService("HttpService")
 local Input = game:GetService("UserInputService")
 local Prompts = game:GetService("ProximityPromptService")
-local Teleport = game:GetService("TeleportService")
-local World = game:GetService("Workspace")
-local HttpService = game:GetService("HttpService")
 
-local player = assert(Players.LocalPlayer, "Execute no cliente")
-local playerGui = player:WaitForChild("PlayerGui")
+local player = Players.LocalPlayer
+assert(player, "Run this on the client.")
 
-local previous = playerGui:FindFirstChild("ClientInteractionMonitor")
-if previous then previous:Destroy() end
+local pg = player:WaitForChild("PlayerGui")
+local old = pg:FindFirstChild("KitchenCollector")
+if old then old:Destroy() end
 
--- Desativa a captura da versão anterior, caso exista.
-pcall(function()
-    local env = type(getgenv) == "function" and getgenv() or shared
-    local bridge = env and env.__CLIENT_INTERACTION_MONITOR_V1
-    if type(bridge) == "table" then bridge.sink = nil end
-end)
+local alive, minimized = true, false
+local connections, records, previous = {}, {}, {}
+local watched = setmetatable({}, {__mode = "k"})
+local started, dropped = os.clock(), 0
+local MAX_RECORDS = 1600
 
-local alive, paused, dirty = true, false, true
-local logs, connections, watched, charConnections = {}, {}, {}, {}
-local started = os.clock()
-local rateTime, rateCount, dropped = started, 0, 0
-local notice, noticeUntil = "", 0
+local names = {
+    "StorageList_Refrigerator",
+    "StorageList_Freezer",
+    "OvercookedProcessorContainer",
+    "ProximityPromptDialog",
+    "Action",
+    "Prompt",
+}
 
-local function connect(signal, callback, list)
-    local connection = signal:Connect(callback)
-    local bucket = list or connections
-    bucket[#bucket + 1] = connection
-    return connection
+local function connect(signal, callback)
+    local c = signal:Connect(callback)
+    connections[#connections + 1] = c
+    return c
 end
 
-local function disconnect(list)
-    for _, connection in ipairs(list) do
-        connection:Disconnect()
+local function path(obj)
+    return obj:GetFullName()
+end
+
+local function vector(v)
+    return {
+        x = math.round(v.X * 100) / 100,
+        y = math.round(v.Y * 100) / 100,
+        z = math.round(v.Z * 100) / 100,
+    }
+end
+
+local function position()
+    local char = player.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    return root and vector(root.Position) or nil
+end
+
+local function attributes(obj)
+    local out = {}
+
+    for key, value in pairs(obj:GetAttributes()) do
+        local kind = typeof(value)
+        out[key] = (
+            kind == "string"
+            or kind == "boolean"
+            or kind == "number"
+        ) and value or tostring(value)
     end
+
+    return out
 end
 
-local function path(object)
-    local ok, result = pcall(function()
-        return object:GetFullName()
-    end)
-    return ok and result or "<removed>"
-end
+local function visible(obj)
+    local current = obj
 
-local function describe(v, depth, seen)
-    local kind = typeof(v)
-
-    if kind == "Instance" then return path(v) end
-
-    if kind == "string" then
-        return string.format("%q", v:sub(1, 160))
-            .. (#v > 160 and "..." or "")
-    end
-
-    if kind == "table" then
-        if seen[v] then return "<cycle>" end
-        if depth >= 2 then return "{...}" end
-
-        seen[v] = true
-        local parts, count = {}, 0
-
-        for k, item in next, v do
-            count += 1
-            if count > 8 then
-                parts[#parts + 1] = "..."
-                break
-            end
-            parts[#parts + 1] = describe(k, depth + 1, seen)
-                .. "=" .. describe(item, depth + 1, seen)
+    while current and current ~= pg do
+        if current:IsA("GuiObject") and not current.Visible then
+            return false
         end
 
-        seen[v] = nil
-        return "{" .. table.concat(parts, ", ") .. "}"
+        if current:IsA("ScreenGui") and not current.Enabled then
+            return false
+        end
+
+        current = current.Parent
     end
 
-    return tostring(v):sub(1, 180)
+    return current == pg
 end
 
-local function log(kind, target, ...)
-    if not alive or paused then return end
-    local now = os.clock()
+-- UI
 
-    if now - rateTime >= 1 then
-        rateTime, rateCount = now, 0
+local gui = Instance.new("ScreenGui")
+gui.Name = "KitchenCollector"
+gui.ResetOnSpawn = false
+gui.DisplayOrder = 9999
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.Parent = pg
+
+local function make(class, props, parent)
+    local obj = Instance.new(class)
+
+    for k, v in pairs(props) do
+        obj[k] = v
     end
 
-    if rateCount >= 100 then
-        dropped += 1
-        dirty = true
-        return
-    end
-
-    rateCount += 1
-    local args = {}
-
-    for i = 1, math.min(select("#", ...), 8) do
-        local ok, result = pcall(describe, select(i, ...), 0, {})
-        args[#args + 1] = ok and result or "<unavailable>"
-    end
-
-    if select("#", ...) > 8 then
-        args[#args + 1] = "..."
-    end
-
-    local name = typeof(target) == "Instance"
-        and path(target) or tostring(target)
-
-    logs[#logs + 1] = string.format(
-        "[%.2fs] %s | %s%s",
-        now - started, kind, name,
-        #args > 0 and " | " .. table.concat(args, ", ") or ""
-    ):sub(1, 1600)
-
-    if #logs > 500 then table.remove(logs, 1) end
-    dirty = true
+    obj.Parent = parent
+    return obj
 end
 
-local function exportLogs()
-    return string.format(
-        "Manual interaction monitor\n"
-        .. "Exported: %s\nPlace: %s\n"
-        .. "Retained: %d | Rate-limited: %d\n"
-        .. "Passive client observations. Outgoing remote calls are not captured.\n"
-        .. "Up to 500 recent entries; long arguments may be truncated.\n\n",
-        os.date("%Y-%m-%d %H:%M:%S"),
-        tostring(game.PlaceId),
-        #logs,
-        dropped
-    ) .. table.concat(logs, "\n")
-end
-
-local function make(class, parent, properties)
-    local object = Instance.new(class)
-    for k, v in pairs(properties) do object[k] = v end
-
-    if object:IsA("TextLabel") or object:IsA("TextButton")
-        or object:IsA("TextBox") then
-        object.AutoLocalize = false
-    end
-
-    object.Parent = parent
-    return object
-end
-
-local bg = Color3.fromRGB(19, 20, 23)
-local card = Color3.fromRGB(30, 32, 36)
-local white = Color3.fromRGB(235, 237, 241)
-
-local gui = make("ScreenGui", playerGui, {
-    Name = "ClientInteractionMonitor",
-    ResetOnSpawn = false,
-    IgnoreGuiInset = true,
-    DisplayOrder = 40,
-})
-
-local frame = make("Frame", gui, {
-    Size = UDim2.fromOffset(440, 310),
-    BackgroundColor3 = bg,
+local frame = make("Frame", {
+    Size = UDim2.fromOffset(320, 190),
+    Position = UDim2.new(0.5, -160, 0.15, 0),
+    BackgroundColor3 = Color3.fromRGB(22, 22, 24),
     BorderSizePixel = 0,
     ClipsDescendants = true,
-})
+}, gui)
 
-make("UICorner", frame, {CornerRadius = UDim.new(0, 9)})
-make("UIStroke", frame, {Color = Color3.fromRGB(60, 64, 70)})
-local scale = make("UIScale", frame, {Scale = 1})
+make("UICorner", {
+    CornerRadius = UDim.new(0, 10),
+}, frame)
 
-local title = make("TextLabel", frame, {
-    Text = "Interaction monitor",
+make("UIStroke", {
+    Color = Color3.fromRGB(70, 70, 74),
+}, frame)
+
+local title = make("TextLabel", {
+    Size = UDim2.new(1, -80, 0, 38),
     Position = UDim2.fromOffset(12, 0),
-    Size = UDim2.fromOffset(336, 40),
     BackgroundTransparency = 1,
-    TextColor3 = white,
-    Font = Enum.Font.GothamMedium,
-    TextSize = 15,
-    TextXAlignment = Enum.TextXAlignment.Left,
+    Text = "Kitchen collector",
     Active = true,
-})
-
-local status = make("TextLabel", frame, {
-    Text = "Recording manual activity",
-    Position = UDim2.fromOffset(12, 40),
-    Size = UDim2.fromOffset(416, 36),
-    BackgroundTransparency = 1,
-    TextColor3 = Color3.fromRGB(165, 170, 180),
-    Font = Enum.Font.Gotham,
-    TextSize = 11,
-    TextWrapped = true,
+    Font = Enum.Font.GothamMedium,
+    TextSize = 14,
+    TextColor3 = Color3.fromRGB(240, 240, 240),
     TextXAlignment = Enum.TextXAlignment.Left,
-})
+}, frame)
 
-local function showStatus(message)
-    notice, noticeUntil = message, os.clock() + 6
-    status.Text = message
-end
-
-local scroll = make("ScrollingFrame", frame, {
-    Position = UDim2.fromOffset(12, 80),
-    Size = UDim2.fromOffset(416, 178),
-    BackgroundColor3 = card,
-    BorderSizePixel = 0,
-    ScrollBarThickness = 3,
-    CanvasSize = UDim2.new(),
-    AutomaticCanvasSize = Enum.AutomaticSize.Y,
-})
-
-local output = make("TextLabel", scroll, {
-    Position = UDim2.fromOffset(7, 5),
-    Size = UDim2.new(1, -20, 0, 0),
-    AutomaticSize = Enum.AutomaticSize.Y,
-    BackgroundTransparency = 1,
-    Text = "",
-    TextColor3 = white,
-    Font = Enum.Font.Code,
-    TextSize = 11,
-    TextWrapped = true,
-    RichText = false,
-    TextXAlignment = Enum.TextXAlignment.Left,
-    TextYAlignment = Enum.TextYAlignment.Top,
-})
-
-local function button(text, x, width)
-    local b = make("TextButton", frame, {
+local function button(text, x, y, w)
+    local b = make("TextButton", {
         Text = text,
-        Position = UDim2.fromOffset(x, 272),
-        Size = UDim2.fromOffset(width, 28),
-        BackgroundColor3 = card,
+        Position = UDim2.fromOffset(x, y),
+        Size = UDim2.fromOffset(w, 30),
+        BackgroundColor3 = Color3.fromRGB(44, 44, 48),
         BorderSizePixel = 0,
-        TextColor3 = white,
-        Font = Enum.Font.GothamMedium,
+        TextColor3 = Color3.fromRGB(240, 240, 240),
         TextSize = 12,
-    })
-    make("UICorner", b, {CornerRadius = UDim.new(0, 6)})
+        Font = Enum.Font.Gotham,
+    }, frame)
+
+    make("UICorner", {
+        CornerRadius = UDim.new(0, 6),
+    }, b)
+
     return b
 end
 
-local copy = button("Copy logs", 12, 98)
-local save = button("Save logs", 118, 98)
-local pause = button("Pause", 224, 98)
-local clear = button("Clear", 330, 98)
+local minimize = button("-", 246, 4, 30)
+local close = button("X", 282, 4, 30)
 
-local close = button("X", 398, 30)
-close.Position = UDim2.fromOffset(398, 6)
-
-local minimize = button("-", 360, 30)
-minimize.Position = UDim2.fromOffset(360, 6)
-
-copy.BackgroundColor3, copy.TextColor3 = white, bg
-
-local minimized = false
-connect(minimize.Activated, function()
-    minimized = not minimized
-    frame.Size = UDim2.fromOffset(440, minimized and 40 or 310)
-    minimize.Text = minimized and "+" or "-"
-end)
-
-local manual = make("TextBox", frame, {
-    Visible = false,
-    Position = UDim2.fromOffset(12, 80),
-    Size = UDim2.fromOffset(416, 178),
-    BackgroundColor3 = card,
-    BorderSizePixel = 0,
-    Text = "",
-    TextColor3 = white,
-    Font = Enum.Font.Code,
-    TextSize = 11,
-    MultiLine = true,
-    ClearTextOnFocus = false,
-    TextEditable = false,
+local status = make("TextLabel", {
+    Position = UDim2.fromOffset(12, 45),
+    Size = UDim2.fromOffset(296, 64),
+    BackgroundTransparency = 1,
+    Text = "Recording kitchen menus and merchant.\nCook and sell one pizza manually.",
+    TextColor3 = Color3.fromRGB(200, 200, 205),
+    Font = Enum.Font.Gotham,
+    TextSize = 12,
+    TextWrapped = true,
     TextXAlignment = Enum.TextXAlignment.Left,
-    TextYAlignment = Enum.TextYAlignment.Top,
-})
+}, frame)
 
-local position, drag, cameraConnection
+local copy = button("Copy", 12, 112, 92)
+local save = button("Save", 114, 112, 92)
+local capture = button("Capture", 216, 112, 92)
 
-local function fit()
-    local camera = World.CurrentCamera
-    local size = camera and camera.ViewportSize or Vector2.new(800, 600)
+local count = make("TextLabel", {
+    Position = UDim2.fromOffset(12, 150),
+    Size = UDim2.fromOffset(296, 26),
+    BackgroundTransparency = 1,
+    Text = "0 records",
+    TextSize = 11,
+    Font = Enum.Font.Gotham,
+    TextColor3 = Color3.fromRGB(160, 160, 165),
+}, frame)
 
-    scale.Scale = math.max(
-        0.1, math.min(1, (size.X - 24) / 440, (size.Y - 24) / 310)
+local function log(kind, data)
+    if not alive then return end
+
+    if #records >= MAX_RECORDS then
+        table.remove(records, 1)
+        dropped += 1
+    end
+
+    records[#records + 1] = {
+        t = math.round((os.clock() - started) * 100) / 100,
+        kind = kind,
+        data = data,
+    }
+
+    count.Text = string.format(
+        "%d records | %d discarded",
+        #records,
+        dropped
     )
-
-    position = position or Vector2.new(
-        (size.X - 440 * scale.Scale) / 2,
-        (size.Y - 310 * scale.Scale) / 2
-    )
-
-    position = Vector2.new(
-        math.max(12, math.min(position.X, size.X - 440 * scale.Scale - 12)),
-        math.max(12, math.min(position.Y, size.Y - 310 * scale.Scale - 12))
-    )
-
-    frame.Position = UDim2.fromOffset(position.X, position.Y)
-end
-
-local function bindCamera()
-    if cameraConnection then cameraConnection:Disconnect() end
-    local camera = World.CurrentCamera
-    cameraConnection = camera
-        and camera:GetPropertyChangedSignal("ViewportSize"):Connect(fit)
-    fit()
 end
 
 connect(gui.Destroying, function()
     alive = false
-    disconnect(connections)
-    disconnect(charConnections)
-    for _, list in pairs(watched) do disconnect(list) end
-    if cameraConnection then cameraConnection:Disconnect() end
+
+    for _, c in ipairs(connections) do
+        c:Disconnect()
+    end
 end)
 
-connect(World:GetPropertyChangedSignal("CurrentCamera"), bindCamera)
+connect(close.Activated, function()
+    gui:Destroy()
+end)
+
+connect(minimize.Activated, function()
+    minimized = not minimized
+    frame.Size = UDim2.fromOffset(320, minimized and 38 or 190)
+    minimize.Text = minimized and "+" or "-"
+end)
+
+-- Mouse/touch dragging
+
+local drag, origin, initial
 
 connect(title.InputBegan, function(i)
-    if not drag and (
-        i.UserInputType == Enum.UserInputType.MouseButton1
-        or i.UserInputType == Enum.UserInputType.Touch
-    ) then
-        drag = {input = i, start = i.Position, origin = position}
+    if i.UserInputType == Enum.UserInputType.MouseButton1
+        or i.UserInputType == Enum.UserInputType.Touch then
+        drag = i
+        origin = i.Position
+        initial = frame.Position
     end
 end)
 
 connect(Input.InputChanged, function(i)
     if not drag then return end
-    local touch = drag.input.UserInputType == Enum.UserInputType.Touch
 
-    if (touch and i ~= drag.input)
-        or (not touch and i.UserInputType ~= Enum.UserInputType.MouseMovement) then
-        return
+    if i == drag or (
+        drag.UserInputType == Enum.UserInputType.MouseButton1
+        and i.UserInputType == Enum.UserInputType.MouseMovement
+    ) then
+        local d = i.Position - origin
+
+        frame.Position = UDim2.new(
+            initial.X.Scale,
+            initial.X.Offset + d.X,
+            initial.Y.Scale,
+            initial.Y.Offset + d.Y
+        )
     end
-
-    position = Vector2.new(
-        drag.origin.X + i.Position.X - drag.start.X,
-        drag.origin.Y + i.Position.Y - drag.start.Y
-    )
-    fit()
 end)
 
 connect(Input.InputEnded, function(i)
-    if drag and (
-        i == drag.input or (
-            drag.input.UserInputType == Enum.UserInputType.MouseButton1
-            and i.UserInputType == Enum.UserInputType.MouseButton1
+    if i == drag then
+        drag = nil
+    end
+end)
+
+-- Menu observations
+
+local function describe(obj)
+    local entry = {
+        path = path(obj),
+        class = obj.ClassName,
+        attributes = attributes(obj),
+    }
+
+    if obj:IsA("TextLabel")
+        or obj:IsA("TextButton")
+        or obj:IsA("TextBox") then
+        entry.text = obj.Text
+    end
+
+    if obj:IsA("GuiButton") then
+        entry.active = obj.Active
+    end
+
+    local parent = obj.Parent
+
+    if parent then
+        entry.parentAttributes = attributes(parent)
+    end
+
+    return entry
+end
+
+local function changed(key, data, force)
+    local encoded = Http:JSONEncode(data)
+
+    if force or previous[key] ~= encoded then
+        previous[key] = encoded
+        log(key, data)
+    end
+end
+
+local function poll(force)
+    for _, name in ipairs(names) do
+        local root = pg:FindFirstChild(name)
+        local entries = {}
+
+        if root then
+            for _, obj in ipairs(root:GetDescendants()) do
+                if obj:IsA("GuiButton") and not watched[obj] then
+                    watched[obj] = true
+
+                    connect(obj.Activated, function()
+                        if not alive then return end
+
+                        local data = describe(obj)
+                        data.playerPosition = position()
+                        data.context = {}
+
+                        if obj.Parent then
+                            for _, child in ipairs(
+                                obj.Parent:GetDescendants()
+                            ) do
+                                if visible(child) and (
+                                    child:IsA("TextLabel")
+                                    or child:IsA("TextButton")
+                                ) then
+                                    data.context[#data.context + 1] = {
+                                        path = path(child),
+                                        text = child.Text,
+                                    }
+                                end
+                            end
+                        end
+
+                        log("CLICK", data)
+                    end)
+                end
+
+                if visible(obj) and (
+                    obj:IsA("GuiButton")
+                    or obj:IsA("TextLabel")
+                    or obj:IsA("TextBox")
+                ) then
+                    entries[#entries + 1] = describe(obj)
+                end
+            end
+        end
+
+        table.sort(entries, function(a, b)
+            return a.path < b.path
+        end)
+
+        changed("UI:" .. name, entries, force)
+    end
+
+    local tools = {}
+
+    local containers = {
+        backpack = player:FindFirstChildOfClass("Backpack"),
+        character = player.Character,
+    }
+
+    for _, container in pairs(containers) do
+        for _, obj in ipairs(container:GetChildren()) do
+            if obj:IsA("Tool") then
+                tools[#tools + 1] = {
+                    name = obj.Name,
+                    equipped = container == player.Character,
+                }
+            end
+        end
+    end
+
+    table.sort(tools, function(a, b)
+        return a.name .. tostring(a.equipped)
+            < b.name .. tostring(b.equipped)
+    end)
+
+    changed("TOOLS", tools, force)
+end
+
+-- Kitchen stations and merchant
+
+local function world()
+    local npcs = workspace:FindFirstChild("NPCS")
+    local merchant = npcs and npcs:FindFirstChild("Merchant")
+
+    local map = workspace:FindFirstChild("Map")
+    local house = map and map:FindFirstChild("House")
+    house = house and house:FindFirstChild("House")
+
+    return house and house:FindFirstChild("Chicken"), merchant
+end
+
+local function promptData(p)
+    local part = p:FindFirstAncestorWhichIsA("BasePart")
+
+    return {
+        path = path(p),
+        action = p.ActionText,
+        object = p.ObjectText,
+        enabled = p.Enabled,
+        hold = p.HoldDuration,
+        distance = p.MaxActivationDistance,
+        position = part and vector(part.Position) or nil,
+        attributes = attributes(p),
+    }
+end
+
+local function captureWorld(force)
+    local kitchen, merchant = world()
+
+    local data = {
+        prompts = {},
+        playerPosition = force and position() or nil,
+    }
+
+    if merchant and merchant:IsA("Model") then
+        data.merchantPosition = vector(
+            merchant:GetPivot().Position
         )
-    ) then drag = nil end
+    end
+
+    for _, scope in pairs({
+        kitchen = kitchen,
+        merchant = merchant,
+    }) do
+        for _, obj in ipairs(scope:GetDescendants()) do
+            if obj:IsA("ProximityPrompt") then
+                data.prompts[#data.prompts + 1] = promptData(obj)
+            end
+        end
+    end
+
+    table.sort(data.prompts, function(a, b)
+        return a.path < b.path
+    end)
+
+    changed("STATIONS", data, force)
+end
+
+connect(Prompts.PromptTriggered, function(prompt, who)
+    if who and who ~= player then return end
+
+    local kitchen, merchant = world()
+
+    if (kitchen and prompt:IsDescendantOf(kitchen))
+        or (merchant and prompt:IsDescendantOf(merchant)) then
+        local data = promptData(prompt)
+        data.playerPosition = position()
+        log("PROMPT", data)
+    end
 end)
 
-connect(Input.WindowFocusReleased, function() drag = nil end)
-connect(close.Activated, function() gui:Destroy() end)
+-- Export
 
-connect(pause.Activated, function()
-    paused = not paused
-    pause.Text = paused and "Resume" or "Pause"
-    noticeUntil = 0
-    dirty = true
-end)
+local function fullCapture()
+    poll(true)
+    captureWorld(true)
+end
 
-connect(clear.Activated, function()
-    logs, dropped, rateCount = {}, 0, 0
-    dirty = true
-    manual.Visible, scroll.Visible = false, true
-    manual.Text = ""
-    showStatus("Logs cleared")
+local function export()
+    fullCapture()
+
+    return Http:JSONEncode({
+        collector = "Kitchen collector v1",
+        place = game.PlaceId,
+        exported = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+        discarded = dropped,
+        note = "Passive UI, tools and prompts. Outgoing remotes are not captured.",
+        records = records,
+    })
+end
+
+connect(capture.Activated, function()
+    fullCapture()
+    status.Text = "Current menus and stations captured."
 end)
 
 connect(copy.Activated, function()
-    local export = exportLogs()
-    local clipboard = type(setclipboard) == "function" and setclipboard
-        or (type(toclipboard) == "function" and toclipboard or nil)
+    local text = export()
 
-    if clipboard and pcall(clipboard, export) then
-        showStatus("Logs copied")
-    else
-        manual.Text = export
-        manual.Visible, scroll.Visible = true, false
-        manual:CaptureFocus()
-        manual.SelectionStart = 1
-        manual.CursorPosition = #export + 1
-        showStatus("Text selected — copy manually")
-    end
+    local fn = type(setclipboard) == "function" and setclipboard
+        or (type(toclipboard) == "function" and toclipboard)
+
+    local ok = fn and pcall(fn, text)
+
+    status.Text = ok
+        and "Copied. Paste the data in chat."
+        or "Clipboard unavailable. Use Save."
 end)
 
--- Salva um arquivo novo a cada clique.
 connect(save.Activated, function()
     if type(writefile) ~= "function" then
-        showStatus("File saving unavailable in this executor. Use Copy logs.")
+        status.Text = "File saving unavailable. Use Copy."
         return
     end
 
-    local prepared, filename, export = pcall(function()
-        local name = os.date("%Y-%m-%d_%H-%M-%S")
-            .. "_" .. HttpService:GenerateGUID(false):sub(1, 8) .. ".txt"
-        return name, exportLogs()
-    end)
+    local filename = "kitchen_"
+        .. os.date("%Y%m%d_%H%M%S")
+        .. "_"
+        .. Http:GenerateGUID(false):sub(1, 6)
+        .. ".json"
 
-    if not prepared then
-        showStatus("Could not prepare the log file.")
-        return
+    local content = export()
+
+    if type(makefolder) == "function" then
+        pcall(makefolder, "InteractionLogs")
     end
 
-    local folder = "InteractionLogs"
-    local useFolder = false
-
-    if type(isfolder) == "function" then
-        local ok, exists = pcall(isfolder, folder)
-        useFolder = ok and exists == true
-    end
-
-    if not useFolder and type(makefolder) == "function" then
-        local ok, result = pcall(makefolder, folder)
-        useFolder = ok and result ~= false
-
-        if not useFolder and type(isfolder) == "function" then
-            local checked, exists = pcall(isfolder, folder)
-            useFolder = checked and exists == true
-        end
-    end
-
-    local destination = useFolder
-        and (folder .. "/" .. filename)
-        or ("interaction_log_" .. filename)
-
-    local ok, result = pcall(writefile, destination, export)
-
-    -- Alguns executores não permitem subpastas.
-    if (not ok or result == false) and useFolder then
-        destination = "interaction_log_" .. filename
-        ok, result = pcall(writefile, destination, export)
-    end
-
-    if ok and result ~= false then
-        showStatus("Saved: " .. destination)
-    else
-        showStatus("Save failed. Use Copy logs.")
-    end
-end)
-
-connect(manual.FocusLost, function()
-    manual.Visible, scroll.Visible = false, true
-end)
-
--- Observadores passivos: não chama FireServer/InvokeServer.
-local function watch(object)
-    if not alive or watched[object]
-        or object == gui or object:IsDescendantOf(gui) then return end
-
-    local list = {}
-
-    local function observe(signal, kind, filter)
-        connect(signal, function(...)
-            if not filter or filter(...) then
-                log(kind, object, ...)
-            end
-        end, list)
-    end
-
-    local ok = pcall(function()
-        if object:IsA("RemoteEvent") or object:IsA("UnreliableRemoteEvent") then
-            observe(object.OnClientEvent, "REMOTE IN")
-
-        elseif object:IsA("BindableEvent") then
-            observe(object.Event, "LOCAL EVENT")
-
-        elseif object:IsA("GuiButton") then
-            observe(object.Activated, "UI CLICK")
-
-        elseif object:IsA("ClickDetector") then
-            observe(object.MouseClick, "WORLD CLICK", function(who)
-                return who == player
-            end)
-
-        elseif object:IsA("Tool") then
-            local function equipped()
-                return object.Parent == player.Character
-            end
-            observe(object.Equipped, "TOOL EQUIP", equipped)
-            observe(object.Activated, "TOOL USE", equipped)
-            observe(object.Deactivated, "TOOL RELEASE", equipped)
-        end
-    end)
+    local target = "InteractionLogs/" .. filename
+    local ok = pcall(writefile, target, content)
 
     if not ok then
-        disconnect(list)
-    elseif #list > 0 then
-        watched[object] = list
+        target = filename
+        ok = pcall(writefile, target, content)
     end
-end
 
-connect(game.DescendantAdded, watch)
-
-connect(game.DescendantRemoving, function(object)
-    if watched[object] then
-        disconnect(watched[object])
-        watched[object] = nil
-    end
+    status.Text = ok
+        and ("Saved: workspace/" .. target)
+        or "Could not save. Use Copy."
 end)
 
-connect(Prompts.PromptTriggered, function(prompt, who)
-    if who == player then log("PROMPT", prompt) end
-end)
-
-connect(player.OnTeleport, function(state, placeId, spawn)
-    log("TELEPORT", tostring(state), placeId, spawn)
-end)
-
-connect(Teleport.TeleportInitFailed, function(who, result, message, placeId)
-    if who == player then
-        log("TELEPORT FAIL", tostring(result), message, placeId)
-    end
-end)
-
-local root, lastPosition
-
-local function characterAdded(character)
-    disconnect(charConnections)
-    charConnections = {}
-    root, lastPosition = nil, nil
-    log("CHARACTER", "Spawn", character)
-
-    local contacts = setmetatable({}, {__mode = "k"})
-
-    local function addPart(part)
-        if not part:IsA("BasePart") then return end
-
-        if part.Name == "HumanoidRootPart" then
-            root, lastPosition = part, part.Position
-        end
-
-        connect(part.Touched, function(other)
-            if other:IsDescendantOf(character) then return end
-            local now = os.clock()
-            if now - (contacts[other] or -math.huge) < 1 then return end
-            contacts[other] = now
-            log("TOUCH", other)
-        end, charConnections)
-    end
-
-    connect(character.DescendantAdded, addPart, charConnections)
-    for _, part in ipairs(character:GetDescendants()) do addPart(part) end
-end
-
-connect(player.CharacterAdded, characterAdded)
-
-connect(player.CharacterRemoving, function()
-    disconnect(charConnections)
-    charConnections = {}
-    root, lastPosition = nil, nil
-    log("CHARACTER", "Removed")
-end)
-
-if player.Character then characterAdded(player.Character) end
-
-local sample, refresh = 0, 0
-
-connect(Run.Heartbeat, function(dt)
-    sample += dt
-    refresh += dt
-
-    if sample >= 0.1 then
-        sample = 0
-
-        if root and root.Parent then
-            local current = root.Position
-
-            if lastPosition and (current - lastPosition).Magnitude >= 25 then
-                log(
-                    "MOVE", "Sudden displacement; cause unknown",
-                    lastPosition, current, (current - lastPosition).Magnitude
-                )
-            end
-
-            lastPosition = current
-        end
-    end
-
-    if refresh < 0.25 then return end
-    refresh = 0
-
-    if dirty then
-        dirty = false
-        local visible = {}
-
-        for i = math.max(1, #logs - 59), #logs do
-            visible[#visible + 1] = logs[i]
-        end
-
-        local bottom = scroll.CanvasPosition.Y + scroll.AbsoluteSize.Y
-            >= scroll.AbsoluteCanvasSize.Y - 24
-
-        output.Text = table.concat(visible, "\n")
-
-        if bottom then
-            scroll.CanvasPosition = Vector2.new(
-                0, math.max(0, output.AbsoluteSize.Y + 12 - scroll.AbsoluteSize.Y)
-            )
-        end
-    end
-
-    if os.clock() < noticeUntil then
-        status.Text = notice
-    else
-        status.Text = string.format(
-            "%s · %d logs · %d dropped\nPassive mode · perform your actions normally",
-            paused and "Paused" or "Recording", #logs, dropped
-        )
-    end
-end)
-
-bindCamera()
-log("MONITOR", "Manual capture started")
+fullCapture()
 
 task.spawn(function()
-    local ok, objects = pcall(function()
-        return game:GetDescendants()
-    end)
+    local tick = 0
 
-    if not ok then
-        log("MONITOR", "Some observations unavailable", objects)
-        return
-    end
+    while alive do
+        task.wait(0.4)
+        if not alive then break end
 
-    local slice = os.clock()
+        local ok, err = pcall(function()
+            poll(false)
 
-    for _, object in ipairs(objects) do
-        if not alive then return end
-        watch(object)
+            tick += 1
 
-        if os.clock() - slice >= 0.003 then
-            task.wait()
-            slice = os.clock()
+            if tick % 3 == 0 then
+                captureWorld(false)
+            end
+        end)
+
+        if not ok then
+            changed("ERROR", tostring(err), false)
         end
     end
-
-    log("MONITOR", "Observers ready")
 end)
-
--- FIM DO SCRIPT
