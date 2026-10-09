@@ -1,6 +1,6 @@
 -- MANUAL INTERACTION MONITOR
--- Sem instalar hooks e sem disparar remotes.
--- Captura interações e eventos recebidos pelo cliente.
+-- Copy logs / Save logs / Pause / Clear / Minimize
+-- Sem instalar hooks ou disparar remotes.
 
 local Players = game:GetService("Players")
 local Run = game:GetService("RunService")
@@ -8,6 +8,7 @@ local Input = game:GetService("UserInputService")
 local Prompts = game:GetService("ProximityPromptService")
 local Teleport = game:GetService("TeleportService")
 local World = game:GetService("Workspace")
+local HttpService = game:GetService("HttpService")
 
 local player = assert(Players.LocalPlayer, "Execute no cliente")
 local playerGui = player:WaitForChild("PlayerGui")
@@ -15,7 +16,7 @@ local playerGui = player:WaitForChild("PlayerGui")
 local previous = playerGui:FindFirstChild("ClientInteractionMonitor")
 if previous then previous:Destroy() end
 
--- Desativa a captura da versão anterior, caso ainda exista.
+-- Desativa a captura da versão anterior, caso exista.
 pcall(function()
     local env = type(getgenv) == "function" and getgenv() or shared
     local bridge = env and env.__CLIENT_INTERACTION_MONITOR_V1
@@ -26,6 +27,7 @@ local alive, paused, dirty = true, false, true
 local logs, connections, watched, charConnections = {}, {}, {}, {}
 local started = os.clock()
 local rateTime, rateCount, dropped = started, 0, 0
+local notice, noticeUntil = "", 0
 
 local function connect(signal, callback, list)
     local connection = signal:Connect(callback)
@@ -50,9 +52,7 @@ end
 local function describe(v, depth, seen)
     local kind = typeof(v)
 
-    if kind == "Instance" then
-        return path(v)
-    end
+    if kind == "Instance" then return path(v) end
 
     if kind == "string" then
         return string.format("%q", v:sub(1, 160))
@@ -68,12 +68,10 @@ local function describe(v, depth, seen)
 
         for k, item in next, v do
             count += 1
-
             if count > 8 then
                 parts[#parts + 1] = "..."
                 break
             end
-
             parts[#parts + 1] = describe(k, depth + 1, seen)
                 .. "=" .. describe(item, depth + 1, seen)
         end
@@ -87,7 +85,6 @@ end
 
 local function log(kind, target, ...)
     if not alive or paused then return end
-
     local now = os.clock()
 
     if now - rateTime >= 1 then
@@ -101,7 +98,6 @@ local function log(kind, target, ...)
     end
 
     rateCount += 1
-
     local args = {}
 
     for i = 1, math.min(select("#", ...), 8) do
@@ -118,28 +114,33 @@ local function log(kind, target, ...)
 
     logs[#logs + 1] = string.format(
         "[%.2fs] %s | %s%s",
-        now - started,
-        kind,
-        name,
+        now - started, kind, name,
         #args > 0 and " | " .. table.concat(args, ", ") or ""
     ):sub(1, 1600)
 
-    if #logs > 500 then
-        table.remove(logs, 1)
-    end
-
+    if #logs > 500 then table.remove(logs, 1) end
     dirty = true
+end
+
+local function exportLogs()
+    return string.format(
+        "Manual interaction monitor\n"
+        .. "Exported: %s\nPlace: %s\n"
+        .. "Retained: %d | Rate-limited: %d\n"
+        .. "Passive client observations. Outgoing remote calls are not captured.\n"
+        .. "Up to 500 recent entries; long arguments may be truncated.\n\n",
+        os.date("%Y-%m-%d %H:%M:%S"),
+        tostring(game.PlaceId),
+        #logs,
+        dropped
+    ) .. table.concat(logs, "\n")
 end
 
 local function make(class, parent, properties)
     local object = Instance.new(class)
+    for k, v in pairs(properties) do object[k] = v end
 
-    for k, v in pairs(properties) do
-        object[k] = v
-    end
-
-    if object:IsA("TextLabel")
-        or object:IsA("TextButton")
+    if object:IsA("TextLabel") or object:IsA("TextButton")
         or object:IsA("TextBox") then
         object.AutoLocalize = false
     end
@@ -166,17 +167,9 @@ local frame = make("Frame", gui, {
     ClipsDescendants = true,
 })
 
-make("UICorner", frame, {
-    CornerRadius = UDim.new(0, 9),
-})
-
-make("UIStroke", frame, {
-    Color = Color3.fromRGB(60, 64, 70),
-})
-
-local scale = make("UIScale", frame, {
-    Scale = 1,
-})
+make("UICorner", frame, {CornerRadius = UDim.new(0, 9)})
+make("UIStroke", frame, {Color = Color3.fromRGB(60, 64, 70)})
+local scale = make("UIScale", frame, {Scale = 1})
 
 local title = make("TextLabel", frame, {
     Text = "Interaction monitor",
@@ -201,6 +194,11 @@ local status = make("TextLabel", frame, {
     TextWrapped = true,
     TextXAlignment = Enum.TextXAlignment.Left,
 })
+
+local function showStatus(message)
+    notice, noticeUntil = message, os.clock() + 6
+    status.Text = message
+end
 
 local scroll = make("ScrollingFrame", frame, {
     Position = UDim2.fromOffset(12, 80),
@@ -238,17 +236,14 @@ local function button(text, x, width)
         Font = Enum.Font.GothamMedium,
         TextSize = 12,
     })
-
-    make("UICorner", b, {
-        CornerRadius = UDim.new(0, 6),
-    })
-
+    make("UICorner", b, {CornerRadius = UDim.new(0, 6)})
     return b
 end
 
-local copy = button("Copy logs", 12, 172)
-local pause = button("Pause", 192, 114)
-local clear = button("Clear", 314, 114)
+local copy = button("Copy logs", 12, 98)
+local save = button("Save logs", 118, 98)
+local pause = button("Pause", 224, 98)
+local clear = button("Clear", 330, 98)
 
 local close = button("X", 398, 30)
 close.Position = UDim2.fromOffset(398, 6)
@@ -256,16 +251,14 @@ close.Position = UDim2.fromOffset(398, 6)
 local minimize = button("-", 360, 30)
 minimize.Position = UDim2.fromOffset(360, 6)
 
-local minimized = false
+copy.BackgroundColor3, copy.TextColor3 = white, bg
 
+local minimized = false
 connect(minimize.Activated, function()
     minimized = not minimized
     frame.Size = UDim2.fromOffset(440, minimized and 40 or 310)
     minimize.Text = minimized and "+" or "-"
 end)
-
-copy.BackgroundColor3 = white
-copy.TextColor3 = bg
 
 local manual = make("TextBox", frame, {
     Visible = false,
@@ -291,8 +284,7 @@ local function fit()
     local size = camera and camera.ViewportSize or Vector2.new(800, 600)
 
     scale.Scale = math.max(
-        0.1,
-        math.min(1, (size.X - 24) / 440, (size.Y - 24) / 310)
+        0.1, math.min(1, (size.X - 24) / 440, (size.Y - 24) / 310)
     )
 
     position = position or Vector2.new(
@@ -309,15 +301,10 @@ local function fit()
 end
 
 local function bindCamera()
-    if cameraConnection then
-        cameraConnection:Disconnect()
-    end
-
+    if cameraConnection then cameraConnection:Disconnect() end
     local camera = World.CurrentCamera
-
     cameraConnection = camera
         and camera:GetPropertyChangedSignal("ViewportSize"):Connect(fit)
-
     fit()
 end
 
@@ -325,14 +312,8 @@ connect(gui.Destroying, function()
     alive = false
     disconnect(connections)
     disconnect(charConnections)
-
-    for _, list in pairs(watched) do
-        disconnect(list)
-    end
-
-    if cameraConnection then
-        cameraConnection:Disconnect()
-    end
+    for _, list in pairs(watched) do disconnect(list) end
+    if cameraConnection then cameraConnection:Disconnect() end
 end)
 
 connect(World:GetPropertyChangedSignal("CurrentCamera"), bindCamera)
@@ -342,17 +323,12 @@ connect(title.InputBegan, function(i)
         i.UserInputType == Enum.UserInputType.MouseButton1
         or i.UserInputType == Enum.UserInputType.Touch
     ) then
-        drag = {
-            input = i,
-            start = i.Position,
-            origin = position,
-        }
+        drag = {input = i, start = i.Position, origin = position}
     end
 end)
 
 connect(Input.InputChanged, function(i)
     if not drag then return end
-
     local touch = drag.input.UserInputType == Enum.UserInputType.Touch
 
     if (touch and i ~= drag.input)
@@ -364,83 +340,116 @@ connect(Input.InputChanged, function(i)
         drag.origin.X + i.Position.X - drag.start.X,
         drag.origin.Y + i.Position.Y - drag.start.Y
     )
-
     fit()
 end)
 
 connect(Input.InputEnded, function(i)
     if drag and (
-        i == drag.input
-        or (
+        i == drag.input or (
             drag.input.UserInputType == Enum.UserInputType.MouseButton1
             and i.UserInputType == Enum.UserInputType.MouseButton1
         )
-    ) then
-        drag = nil
-    end
+    ) then drag = nil end
 end)
 
-connect(Input.WindowFocusReleased, function()
-    drag = nil
-end)
-
-connect(close.Activated, function()
-    gui:Destroy()
-end)
+connect(Input.WindowFocusReleased, function() drag = nil end)
+connect(close.Activated, function() gui:Destroy() end)
 
 connect(pause.Activated, function()
     paused = not paused
     pause.Text = paused and "Resume" or "Pause"
+    noticeUntil = 0
     dirty = true
 end)
 
 connect(clear.Activated, function()
     logs, dropped, rateCount = {}, 0, 0
     dirty = true
-    manual.Visible = false
-    scroll.Visible = true
+    manual.Visible, scroll.Visible = false, true
     manual.Text = ""
+    showStatus("Logs cleared")
 end)
 
 connect(copy.Activated, function()
-    local export = string.format(
-        "Manual interaction monitor | place=%s\n"
-        .. "%d retained | %d rate-limited\n"
-        .. "Passive client observations. Outgoing remote calls are not captured.\n\n",
-        tostring(game.PlaceId),
-        #logs,
-        dropped
-    ) .. table.concat(logs, "\n")
-
+    local export = exportLogs()
     local clipboard = type(setclipboard) == "function" and setclipboard
         or (type(toclipboard) == "function" and toclipboard or nil)
 
     if clipboard and pcall(clipboard, export) then
-        status.Text = "Logs copied"
+        showStatus("Logs copied")
     else
         manual.Text = export
-        manual.Visible = true
-        scroll.Visible = false
-
+        manual.Visible, scroll.Visible = true, false
         manual:CaptureFocus()
         manual.SelectionStart = 1
         manual.CursorPosition = #export + 1
+        showStatus("Text selected — copy manually")
+    end
+end)
 
-        status.Text = "Text selected — copy manually"
+-- Salva um arquivo novo a cada clique.
+connect(save.Activated, function()
+    if type(writefile) ~= "function" then
+        showStatus("File saving unavailable in this executor. Use Copy logs.")
+        return
+    end
+
+    local prepared, filename, export = pcall(function()
+        local name = os.date("%Y-%m-%d_%H-%M-%S")
+            .. "_" .. HttpService:GenerateGUID(false):sub(1, 8) .. ".txt"
+        return name, exportLogs()
+    end)
+
+    if not prepared then
+        showStatus("Could not prepare the log file.")
+        return
+    end
+
+    local folder = "InteractionLogs"
+    local useFolder = false
+
+    if type(isfolder) == "function" then
+        local ok, exists = pcall(isfolder, folder)
+        useFolder = ok and exists == true
+    end
+
+    if not useFolder and type(makefolder) == "function" then
+        local ok, result = pcall(makefolder, folder)
+        useFolder = ok and result ~= false
+
+        if not useFolder and type(isfolder) == "function" then
+            local checked, exists = pcall(isfolder, folder)
+            useFolder = checked and exists == true
+        end
+    end
+
+    local destination = useFolder
+        and (folder .. "/" .. filename)
+        or ("interaction_log_" .. filename)
+
+    local ok, result = pcall(writefile, destination, export)
+
+    -- Alguns executores não permitem subpastas.
+    if (not ok or result == false) and useFolder then
+        destination = "interaction_log_" .. filename
+        ok, result = pcall(writefile, destination, export)
+    end
+
+    if ok and result ~= false then
+        showStatus("Saved: " .. destination)
+    else
+        showStatus("Save failed. Use Copy logs.")
     end
 end)
 
 connect(manual.FocusLost, function()
-    manual.Visible = false
-    scroll.Visible = true
+    manual.Visible, scroll.Visible = false, true
 end)
 
--- Observa eventos, sem chamar FireServer/InvokeServer.
+-- Observadores passivos: não chama FireServer/InvokeServer.
 local function watch(object)
     if not alive or watched[object]
-        or object == gui or object:IsDescendantOf(gui) then
-        return
-    end
+        or object == gui or object:IsDescendantOf(gui) then return end
 
     local list = {}
 
@@ -471,7 +480,6 @@ local function watch(object)
             local function equipped()
                 return object.Parent == player.Character
             end
-
             observe(object.Equipped, "TOOL EQUIP", equipped)
             observe(object.Activated, "TOOL USE", equipped)
             observe(object.Deactivated, "TOOL RELEASE", equipped)
@@ -495,9 +503,7 @@ connect(game.DescendantRemoving, function(object)
 end)
 
 connect(Prompts.PromptTriggered, function(prompt, who)
-    if who == player then
-        log("PROMPT", prompt)
-    end
+    if who == player then log("PROMPT", prompt) end
 end)
 
 connect(player.OnTeleport, function(state, placeId, spawn)
@@ -516,10 +522,9 @@ local function characterAdded(character)
     disconnect(charConnections)
     charConnections = {}
     root, lastPosition = nil, nil
-
     log("CHARACTER", "Spawn", character)
 
-    local contacts = setmetatable({}, { __mode = "k" })
+    local contacts = setmetatable({}, {__mode = "k"})
 
     local function addPart(part)
         if not part:IsA("BasePart") then return end
@@ -530,20 +535,15 @@ local function characterAdded(character)
 
         connect(part.Touched, function(other)
             if other:IsDescendantOf(character) then return end
-
             local now = os.clock()
             if now - (contacts[other] or -math.huge) < 1 then return end
-
             contacts[other] = now
             log("TOUCH", other)
         end, charConnections)
     end
 
     connect(character.DescendantAdded, addPart, charConnections)
-
-    for _, part in ipairs(character:GetDescendants()) do
-        addPart(part)
-    end
+    for _, part in ipairs(character:GetDescendants()) do addPart(part) end
 end
 
 connect(player.CharacterAdded, characterAdded)
@@ -555,9 +555,7 @@ connect(player.CharacterRemoving, function()
     log("CHARACTER", "Removed")
 end)
 
-if player.Character then
-    characterAdded(player.Character)
-end
+if player.Character then characterAdded(player.Character) end
 
 local sample, refresh = 0, 0
 
@@ -573,11 +571,8 @@ connect(Run.Heartbeat, function(dt)
 
             if lastPosition and (current - lastPosition).Magnitude >= 25 then
                 log(
-                    "MOVE",
-                    "Sudden displacement; cause unknown",
-                    lastPosition,
-                    current,
-                    (current - lastPosition).Magnitude
+                    "MOVE", "Sudden displacement; cause unknown",
+                    lastPosition, current, (current - lastPosition).Magnitude
                 )
             end
 
@@ -585,33 +580,37 @@ connect(Run.Heartbeat, function(dt)
         end
     end
 
-    if refresh < 0.25 or not dirty then return end
-    refresh, dirty = 0, false
+    if refresh < 0.25 then return end
+    refresh = 0
 
-    local visible = {}
+    if dirty then
+        dirty = false
+        local visible = {}
 
-    for i = math.max(1, #logs - 59), #logs do
-        visible[#visible + 1] = logs[i]
+        for i = math.max(1, #logs - 59), #logs do
+            visible[#visible + 1] = logs[i]
+        end
+
+        local bottom = scroll.CanvasPosition.Y + scroll.AbsoluteSize.Y
+            >= scroll.AbsoluteCanvasSize.Y - 24
+
+        output.Text = table.concat(visible, "\n")
+
+        if bottom then
+            scroll.CanvasPosition = Vector2.new(
+                0, math.max(0, output.AbsoluteSize.Y + 12 - scroll.AbsoluteSize.Y)
+            )
+        end
     end
 
-    local bottom = scroll.CanvasPosition.Y + scroll.AbsoluteSize.Y
-        >= scroll.AbsoluteCanvasSize.Y - 24
-
-    output.Text = table.concat(visible, "\n")
-
-    if bottom then
-        scroll.CanvasPosition = Vector2.new(
-            0,
-            math.max(0, output.AbsoluteSize.Y + 12 - scroll.AbsoluteSize.Y)
+    if os.clock() < noticeUntil then
+        status.Text = notice
+    else
+        status.Text = string.format(
+            "%s · %d logs · %d dropped\nPassive mode · perform your actions normally",
+            paused and "Paused" or "Recording", #logs, dropped
         )
     end
-
-    status.Text = string.format(
-        "%s · %d logs · %d dropped\nPassive mode · perform your actions normally",
-        paused and "Paused" or "Recording",
-        #logs,
-        dropped
-    )
 end)
 
 bindCamera()
@@ -631,7 +630,6 @@ task.spawn(function()
 
     for _, object in ipairs(objects) do
         if not alive then return end
-
         watch(object)
 
         if os.clock() - slice >= 0.003 then
