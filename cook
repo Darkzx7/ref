@@ -1,0 +1,80 @@
+local Players = game:GetService("Players")
+local HttpService = game:GetService("HttpService")
+local playerGui = Players.LocalPlayer:WaitForChild("PlayerGui")
+
+local names = {
+    "Action",
+    "StorageList_Refrigerator",
+    "StorageList_Freezer",
+    "OvercookedProcessorContainer",
+}
+
+local function visible(object)
+    local current = object
+    while current and current ~= playerGui do
+        if current:IsA("GuiObject") and not current.Visible then
+            return false
+        end
+        if current:IsA("ScreenGui") and not current.Enabled then
+            return false
+        end
+        current = current.Parent
+    end
+    return true
+end
+
+local result = {
+    place = game.PlaceId,
+    panels = {},
+}
+
+for _, name in ipairs(names) do
+    local panel = playerGui:FindFirstChild(name)
+
+    if panel and visible(panel) then
+        local entries = {}
+
+        for _, object in ipairs(panel:GetDescendants()) do
+            if visible(object) and (
+                object:IsA("GuiButton")
+                or object:IsA("TextLabel")
+                or object:IsA("TextBox")
+            ) then
+                local entry = {
+                    path = object:GetFullName(),
+                    class = object.ClassName,
+                    attributes = {},
+                }
+
+                if object:IsA("TextLabel")
+                    or object:IsA("TextButton")
+                    or object:IsA("TextBox") then
+                    entry.text = object.Text
+                end
+
+                if object:IsA("GuiButton") then
+                    entry.active = object.Active
+                end
+
+                for key, value in pairs(object:GetAttributes()) do
+                    entry.attributes[key] = tostring(value)
+                end
+
+                entries[#entries + 1] = entry
+            end
+        end
+
+        result.panels[name] = entries
+    end
+end
+
+local export = HttpService:JSONEncode(result)
+local clipboard = type(setclipboard) == "function" and setclipboard
+    or (type(toclipboard) == "function" and toclipboard or nil)
+
+if clipboard then
+    local ok = pcall(clipboard, export)
+    print(ok and "Kitchen data copied." or export)
+else
+    print(export)
+end
