@@ -24,7 +24,7 @@ local frame = make("Frame", {Size=UDim2.fromOffset(320, 184), Position=UDim2.new
     BackgroundColor3=Color3.fromRGB(23,23,25), BorderSizePixel=0, ClipsDescendants=true}, gui)
 make("UICorner", {CornerRadius=UDim.new(0,10)}, frame)
 local title = make("TextLabel", {Size=UDim2.fromOffset(232,36), Position=UDim2.fromOffset(12,0),
-    BackgroundTransparency=1, Text="Auto cook | Pizza v2", TextSize=14, Font=Enum.Font.GothamMedium,
+    BackgroundTransparency=1, Text="Auto cook | Pizza v3", TextSize=14, Font=Enum.Font.GothamMedium,
     TextColor3=Color3.new(1,1,1), TextXAlignment=Enum.TextXAlignment.Left, Active=true}, frame)
 local status = make("TextLabel", {Size=UDim2.fromOffset(296,65), Position=UDim2.fromOffset(12,40),
     BackgroundTransparency=1, Text="Empty the stations, then press Start.\nAuto sell is enabled.", TextSize=12,
@@ -114,7 +114,7 @@ local function findButton(root,text)
     end
 end
 local function tap(b, mode)
-    if mode=="Mouse" or mode=="Touch" then
+    if mode=="Mouse" or mode=="Touch" or mode=="MouseRaw" or mode=="TouchRaw" then
         local p=b.AbsolutePosition+b.AbsoluteSize/2
         local camera=workspace.CurrentCamera
         if camera and (p.X<0 or p.Y<0 or p.X>camera.ViewportSize.X or p.Y>camera.ViewportSize.Y) then
@@ -131,19 +131,29 @@ local function tap(b, mode)
             ancestor=ancestor.Parent
         end
         local screen=b:FindFirstAncestorWhichIsA("ScreenGui")
-        if screen and not screen.IgnoreGuiInset then p+=GuiService:GetGuiInset() end
+        if not mode:find("Raw",1,true) then p+=GuiService:GetGuiInset() end
+        -- Do not send a screen tap unless it lands on the intended button.
+        local hitsOk,hits=pcall(function() return pg:GetGuiObjectsAtPosition(p.X,p.Y) end)
+        local targetHit=false
+        if hitsOk then
+            for _, hit in ipairs(hits) do
+                if hit==b or hit:IsDescendantOf(b) then targetHit=true; break end
+                if hit:IsA("GuiButton") and visible(hit) then break end
+            end
+        end
+        if not targetHit then return false,"Target not under tap coordinates" end
         local enabled=gui.Enabled
         gui.Enabled=false
         local ok,err=pcall(function()
-            if mode=="Mouse" then
+            if mode=="Mouse" or mode=="MouseRaw" then
                 VirtualInput:SendMouseMoveEvent(p.X,p.Y,game)
                 VirtualInput:SendMouseButtonEvent(p.X,p.Y,0,true,game,0)
                 task.wait(0.08)
                 VirtualInput:SendMouseButtonEvent(p.X,p.Y,0,false,game,0)
             else
-                VirtualInput:SendTouchEvent(1,Enum.UserInputState.Begin,p.X,p.Y)
+                VirtualInput:SendTouchEvent(1,Enum.UserInputState.Begin.Value,p.X,p.Y)
                 task.wait(0.08)
-                VirtualInput:SendTouchEvent(1,Enum.UserInputState.End,p.X,p.Y)
+                VirtualInput:SendTouchEvent(1,Enum.UserInputState.End.Value,p.X,p.Y)
             end
         end)
         if alive then gui.Enabled=enabled end
@@ -163,7 +173,10 @@ end
 local function click(getButton,done,label)
     note(label)
     if done() then return end
-    for _, mode in ipairs({"Mouse","Activated","MouseButton1Click","DownUp","Touch"}) do
+    local modes=Input.TouchEnabled
+        and {"Touch","TouchRaw","Activated","MouseButton1Click","Mouse","MouseRaw"}
+        or {"Mouse","MouseRaw","Activated","MouseButton1Click","Touch","TouchRaw"}
+    for _, mode in ipairs(modes) do
         local b=waitFor(function()
             if done() then return true end
             return getButton()
@@ -175,7 +188,9 @@ local function click(getButton,done,label)
             if not ok then
                 history[#history+1]=label.." / "..mode..": "..tostring(err)
             end
-            if waitFor(done,2.5) then return end
+            if ok then
+                if waitFor(done,2.5) then return end
+            elseif done() then return end
         end
     end
     note(label.." — tap manually to continue (30s)")
@@ -187,11 +202,31 @@ local function tool(name)
         if t and t:IsA("Tool") then return t end
     end
 end
+local function inventory(stage)
+    local items={}
+    for key,parent in pairs({held=player.Character,bag=player:FindFirstChildOfClass("Backpack")}) do
+        for _, item in ipairs(parent:GetChildren()) do
+            if item:IsA("Tool") then items[#items+1]=key..":"..item.Name end
+        end
+    end
+    note(stage.." | "..table.concat(items,", "))
+end
+local function requireItem(name,stage)
+    local item=tool(name)
+    if not item then
+        inventory(stage)
+        error("Item disappeared "..stage..": "..name,0)
+    end
+    return item
+end
 local function equip(name)
     local t=waitFor(function() return tool(name) end,6,"Missing item: "..name)
+    -- Food is already equipped when collected. Re-equipping can unequip it first.
+    if t.Parent==player.Character then return t end
     player.Character:FindFirstChildOfClass("Humanoid"):EquipTool(t)
     waitFor(function() return t.Parent==player.Character end,3,"Cannot equip: "..name)
     pause(0.2)
+    return t
 end
 local function travel(pos,target)
     check()
@@ -301,25 +336,31 @@ local function take(name,storage)
     end
     click(function() return findButton(panel(listName),name) end,
         function() return tool(name) end,"Take "..name)
+    inventory("Before closing storage")
+    requireItem(name,"before closing storage")
     closePanel(listName)
+    inventory("After closing storage")
+    requireItem(name,"after closing storage")
     equip(name)
 end
 local function put(s,name)
     note("Moving to station: "..name)
+    equip(name)
+    requireItem(name,"before station movement")
     approach(s)
+    requireItem(name,"after station movement")
     if not s.checked then
-        player.Character:FindFirstChildOfClass("Humanoid"):UnequipTools()
-        pause(0.7)
         assert(not prompt(s.scope,"ProcessIngredients").Enabled
             and not prompt(s.scope,"CollectResult").Enabled,"Station is not empty: "..s.scope.Name)
         s.checked=true
     end
-    equip(name)
-    pause(0.5)
-    local item=tool(name)
+    pause(0.35)
+    requireItem(name,"before adding ingredient")
     trigger(prompt(s.scope,"AddIngredient"),function()
-        return tool(name)~=item
+        return not tool(name) and (prompt(s.scope,"ProcessIngredients").Enabled
+            or prompt(s.scope,"CollectResult").Enabled)
     end,"Add "..name)
+    note("Ingredient accepted: "..name)
 end
 local function process(s,expected)
     local collect=prompt(s.scope,"CollectResult")
@@ -375,7 +416,6 @@ function api.preflight()
         "Rolled Pizza Dough","Pizza","Hot Pizza"}) do
         assert(not tool(name),"Remove existing "..name.." before starting.")
     end
-    player.Character:FindFirstChildOfClass("Humanoid"):UnequipTools()
     note("Moving to Refrigerator")
     approach(stations.fridge)
     closePanel("OvercookedProcessorContainer")
