@@ -1,782 +1,466 @@
--- Standalone Pizza test
--- Start near the kitchen with empty stations.
-
+-- Standalone test. Start near the kitchen with empty stations.
 local Players = game:GetService("Players")
 local Input = game:GetService("UserInputService")
-
+local VirtualInput = game:GetService("VirtualInputManager")
+local GuiService = game:GetService("GuiService")
 local player = Players.LocalPlayer
 local pg = player:WaitForChild("PlayerGui")
-
 local previous = pg:FindFirstChild("PizzaTest")
 if previous then previous:Destroy() end
-
 local alive, running, stop, loop = true, false, false, false
 local connections, history = {}, {}
-
 local function bind(signal, fn)
-    connections[#connections + 1] = signal:Connect(fn)
+    local c = signal:Connect(fn)
+    connections[#connections + 1] = c
 end
-
 local function make(class, props, parent)
     local obj = Instance.new(class)
-    for k, v in pairs(props) do
-        obj[k] = v
-    end
+    for k, v in pairs(props) do obj[k] = v end
     obj.Parent = parent
     return obj
 end
-
-local gui = make("ScreenGui", {
-    Name = "PizzaTest",
-    ResetOnSpawn = false,
-    DisplayOrder = 9999,
-}, pg)
-
-local frame = make("Frame", {
-    Size = UDim2.fromOffset(320, 184),
-    Position = UDim2.new(0, 16, 0.25, 0),
-    BackgroundColor3 = Color3.fromRGB(23, 23, 25),
-    BorderSizePixel = 0,
-    ClipsDescendants = true,
-}, gui)
-
-make("UICorner", {
-    CornerRadius = UDim.new(0, 10),
-}, frame)
-
-local title = make("TextLabel", {
-    Size = UDim2.fromOffset(232, 36),
-    Position = UDim2.fromOffset(12, 0),
-    BackgroundTransparency = 1,
-    Text = "Auto cook | Pizza",
-    TextSize = 14,
-    Font = Enum.Font.GothamMedium,
-    TextColor3 = Color3.new(1, 1, 1),
-    TextXAlignment = Enum.TextXAlignment.Left,
-    Active = true,
-}, frame)
-
-local status = make("TextLabel", {
-    Size = UDim2.fromOffset(296, 65),
-    Position = UDim2.fromOffset(12, 40),
-    BackgroundTransparency = 1,
-    Text = "Empty the stations, then press Start.\nAuto sell is enabled.",
-    TextSize = 12,
-    TextWrapped = true,
-    Font = Enum.Font.Gotham,
-    TextColor3 = Color3.fromRGB(210, 210, 214),
-}, frame)
-
-local function button(text, x, y, w)
-    local b = make("TextButton", {
-        Text = text,
-        Position = UDim2.fromOffset(x, y),
-        Size = UDim2.fromOffset(w, 30),
-        BackgroundColor3 = Color3.fromRGB(48, 48, 53),
-        BorderSizePixel = 0,
-        Font = Enum.Font.Gotham,
-        TextSize = 12,
-        TextColor3 = Color3.new(1, 1, 1),
-    }, frame)
-
-    make("UICorner", {
-        CornerRadius = UDim.new(0, 6),
-    }, b)
-
+local gui = make("ScreenGui", {Name="PizzaTest", ResetOnSpawn=false, DisplayOrder=9999}, pg)
+local frame = make("Frame", {Size=UDim2.fromOffset(320, 184), Position=UDim2.new(0,16,0.25,0),
+    BackgroundColor3=Color3.fromRGB(23,23,25), BorderSizePixel=0, ClipsDescendants=true}, gui)
+make("UICorner", {CornerRadius=UDim.new(0,10)}, frame)
+local title = make("TextLabel", {Size=UDim2.fromOffset(232,36), Position=UDim2.fromOffset(12,0),
+    BackgroundTransparency=1, Text="Auto cook | Pizza v2", TextSize=14, Font=Enum.Font.GothamMedium,
+    TextColor3=Color3.new(1,1,1), TextXAlignment=Enum.TextXAlignment.Left, Active=true}, frame)
+local status = make("TextLabel", {Size=UDim2.fromOffset(296,65), Position=UDim2.fromOffset(12,40),
+    BackgroundTransparency=1, Text="Empty the stations, then press Start.\nAuto sell is enabled.", TextSize=12,
+    TextWrapped=true, Font=Enum.Font.Gotham, TextColor3=Color3.fromRGB(210,210,214)}, frame)
+local function button(text,x,y,w)
+    local b=make("TextButton", {Text=text, Position=UDim2.fromOffset(x,y), Size=UDim2.fromOffset(w,30),
+        BackgroundColor3=Color3.fromRGB(48,48,53), BorderSizePixel=0, Font=Enum.Font.Gotham,
+        TextSize=12, TextColor3=Color3.new(1,1,1)}, frame)
+    make("UICorner", {CornerRadius=UDim.new(0,6)}, b)
     return b
 end
-
-local startButton = button("Start", 12, 109, 92)
-local stopButton = button("Stop", 114, 109, 92)
-local copyButton = button("Copy log", 216, 109, 92)
-local loopButton = button("Loop: OFF", 12, 146, 296)
-local minimize = button("-", 246, 3, 30)
-local close = button("X", 282, 3, 30)
-
-local minimized = false
-
-bind(minimize.Activated, function()
-    minimized = not minimized
-    frame.Size = UDim2.fromOffset(320, minimized and 36 or 184)
-    minimize.Text = minimized and "+" or "-"
+local startButton=button("Start",12,109,92)
+local stopButton=button("Stop",114,109,92)
+local copyButton=button("Copy log",216,109,92)
+local loopButton=button("Loop: OFF",12,146,296)
+local minimize=button("-",246,3,30)
+local close=button("X",282,3,30)
+local minimized=false
+bind(minimize.Activated,function()
+    minimized=not minimized
+    frame.Size=UDim2.fromOffset(320,minimized and 36 or 184)
+    minimize.Text=minimized and "+" or "-"
 end)
-
-bind(close.Activated, function()
-    gui:Destroy()
+bind(close.Activated,function() gui:Destroy() end)
+bind(gui.Destroying,function()
+    alive=false; stop=true
+    for _, c in ipairs(connections) do c:Disconnect() end
 end)
-
-bind(gui.Destroying, function()
-    alive = false
-    stop = true
-
-    for _, c in ipairs(connections) do
-        c:Disconnect()
-    end
-end)
-
 local drag, origin, initial
-
-bind(title.InputBegan, function(i)
-    if i.UserInputType == Enum.UserInputType.MouseButton1
-        or i.UserInputType == Enum.UserInputType.Touch then
-        drag, origin, initial = i, i.Position, frame.Position
+bind(title.InputBegan,function(i)
+    if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then
+        drag,origin,initial=i,i.Position,frame.Position
     end
 end)
-
-bind(Input.InputChanged, function(i)
-    if drag and (
-        i == drag
-        or (
-            drag.UserInputType == Enum.UserInputType.MouseButton1
-            and i.UserInputType == Enum.UserInputType.MouseMovement
-        )
-    ) then
-        local d = i.Position - origin
-
-        frame.Position = UDim2.new(
-            initial.X.Scale,
-            initial.X.Offset + d.X,
-            initial.Y.Scale,
-            initial.Y.Offset + d.Y
-        )
+bind(Input.InputChanged,function(i)
+    if drag and (i==drag or (drag.UserInputType==Enum.UserInputType.MouseButton1
+        and i.UserInputType==Enum.UserInputType.MouseMovement)) then
+        local d=i.Position-origin
+        frame.Position=UDim2.new(initial.X.Scale,initial.X.Offset+d.X,initial.Y.Scale,initial.Y.Offset+d.Y)
     end
 end)
-
-bind(Input.InputEnded, function(i)
-    if i == drag then drag = nil end
-end)
-
+bind(Input.InputEnded,function(i) if i==drag then drag=nil end end)
 local function note(text)
-    history[#history + 1] = os.date("%H:%M:%S") .. " " .. text
-
-    if #history > 250 then
-        table.remove(history, 1)
-    end
-
-    if alive then status.Text = text end
+    history[#history+1]=os.date("%H:%M:%S").." "..text
+    if #history>250 then table.remove(history,1) end
+    if alive then status.Text=text end
 end
-
 local function check()
-    if not alive or stop then
-        error("Stopped. Check the stations before restarting.", 0)
-    end
-
-    local h = player.Character
-        and player.Character:FindFirstChildOfClass("Humanoid")
-
-    if not h or h.Health <= 0 then
-        error("Character unavailable.", 0)
-    end
+    if not alive or stop then error("Stopped. Check the stations before restarting.",0) end
+    local h=player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+    if not h or h.Health<=0 then error("Character unavailable.",0) end
 end
-
 local function pause(seconds)
-    local deadline = os.clock() + seconds
-
-    repeat
-        check()
-        task.wait(0.08)
-    until os.clock() >= deadline
+    local deadline=os.clock()+seconds
+    repeat check(); task.wait(0.08) until os.clock()>=deadline
 end
-
-local function waitFor(fn, seconds, message)
-    local deadline = os.clock() + seconds
-
+local function waitFor(fn,seconds,message)
+    local deadline=os.clock()+seconds
     repeat
         check()
-
-        local result = fn()
+        local result=fn()
         if result then return result end
-
         task.wait(0.08)
-    until os.clock() >= deadline
-
-    if message then error(message, 0) end
+    until os.clock()>=deadline
+    if message then error(message,0) end
 end
-
 local function visible(obj)
     if not obj or not obj:IsDescendantOf(pg) then return false end
-
-    local p = obj
-
-    while p and p ~= pg do
+    local p=obj
+    while p and p~=pg do
         if p:IsA("GuiObject") and not p.Visible then return false end
         if p:IsA("ScreenGui") and not p.Enabled then return false end
-        p = p.Parent
+        p=p.Parent
     end
-
     return true
 end
-
-local function normalize(s)
-    return s:match("^%s*(.-)%s*$"):lower()
-end
-
-local function findButton(root, text)
+local function normalize(s) return s:match("^%s*(.-)%s*$"):lower() end
+local function findButton(root,text)
     if not root then return end
-
     for _, d in ipairs(root:GetDescendants()) do
         if (d:IsA("TextLabel") or d:IsA("TextButton"))
-            and visible(d)
-            and normalize(d.Text) == normalize(text) then
-
-            local b = d
-
-            while b and b ~= root and not b:IsA("GuiButton") do
-                b = b.Parent
-            end
-
-            if b and b ~= root and b:IsA("GuiButton") and visible(b) then
-                return b
-            end
+            and visible(d) and normalize(d.Text)==normalize(text) then
+            local b=d
+            while b and b~=root and not b:IsA("GuiButton") do b=b.Parent end
+            if b and b~=root and b:IsA("GuiButton") and visible(b) then return b end
         end
     end
 end
-
-local function click(getButton, done, label)
+local function tap(b, mode)
+    if mode=="Mouse" or mode=="Touch" then
+        local p=b.AbsolutePosition+b.AbsoluteSize/2
+        local camera=workspace.CurrentCamera
+        if camera and (p.X<0 or p.Y<0 or p.X>camera.ViewportSize.X or p.Y>camera.ViewportSize.Y) then
+            return false,"Button outside viewport"
+        end
+        local ancestor=b.Parent
+        while ancestor and ancestor~=pg do
+            if ancestor:IsA("GuiObject") and ancestor.ClipsDescendants then
+                local a,z=ancestor.AbsolutePosition,ancestor.AbsoluteSize
+                if p.X<a.X or p.Y<a.Y or p.X>a.X+z.X or p.Y>a.Y+z.Y then
+                    return false,"Button clipped by scrolling container"
+                end
+            end
+            ancestor=ancestor.Parent
+        end
+        local screen=b:FindFirstAncestorWhichIsA("ScreenGui")
+        if screen and not screen.IgnoreGuiInset then p+=GuiService:GetGuiInset() end
+        local enabled=gui.Enabled
+        gui.Enabled=false
+        local ok,err=pcall(function()
+            if mode=="Mouse" then
+                VirtualInput:SendMouseMoveEvent(p.X,p.Y,game)
+                VirtualInput:SendMouseButtonEvent(p.X,p.Y,0,true,game,0)
+                task.wait(0.08)
+                VirtualInput:SendMouseButtonEvent(p.X,p.Y,0,false,game,0)
+            else
+                VirtualInput:SendTouchEvent(1,Enum.UserInputState.Begin,p.X,p.Y)
+                task.wait(0.08)
+                VirtualInput:SendTouchEvent(1,Enum.UserInputState.End,p.X,p.Y)
+            end
+        end)
+        if alive then gui.Enabled=enabled end
+        return ok,err
+    end
+    if type(firesignal)~="function" then return false,"firesignal unavailable" end
+    return pcall(function()
+        if mode=="DownUp" then
+            local p=b.AbsolutePosition+b.AbsoluteSize/2
+            firesignal(b.MouseButton1Down,p.X,p.Y)
+            firesignal(b.MouseButton1Up,p.X,p.Y)
+        else
+            firesignal(b[mode])
+        end
+    end)
+end
+local function click(getButton,done,label)
+    note(label)
     if done() then return end
-
-    for _, signal in ipairs({"Activated", "MouseButton1Click"}) do
-        local b = waitFor(getButton, 6, "Button missing: " .. label)
-
+    for _, mode in ipairs({"Mouse","Activated","MouseButton1Click","DownUp","Touch"}) do
+        local b=waitFor(function()
+            if done() then return true end
+            return getButton()
+        end,8)
         if done() then return end
-
-        check()
-        pcall(firesignal, b[signal])
-
-        if waitFor(done, 2.5) then return end
-    end
-
-    error("No confirmation: " .. label, 0)
-end
-
-local function tool(name)
-    for _, parent in pairs({
-        character = player.Character,
-        backpack = player:FindFirstChildOfClass("Backpack"),
-    }) do
-        local t = parent:FindFirstChild(name)
-
-        if t and t:IsA("Tool") then
-            return t
+        if b and b~=true then
+            check()
+            local ok,err=tap(b,mode)
+            if not ok then
+                history[#history+1]=label.." / "..mode..": "..tostring(err)
+            end
+            if waitFor(done,2.5) then return end
         end
     end
+    note(label.." — tap manually to continue (30s)")
+    waitFor(done,30,"No confirmation: "..label)
 end
-
+local function tool(name)
+    for _, parent in pairs({character=player.Character,backpack=player:FindFirstChildOfClass("Backpack")}) do
+        local t=parent:FindFirstChild(name)
+        if t and t:IsA("Tool") then return t end
+    end
+end
 local function equip(name)
-    local t = waitFor(function()
-        return tool(name)
-    end, 6, "Missing item: " .. name)
-
+    local t=waitFor(function() return tool(name) end,6,"Missing item: "..name)
     player.Character:FindFirstChildOfClass("Humanoid"):EquipTool(t)
-
-    waitFor(function()
-        return t.Parent == player.Character
-    end, 3, "Cannot equip: " .. name)
-
+    waitFor(function() return t.Parent==player.Character end,3,"Cannot equip: "..name)
     pause(0.2)
 end
-
-local function travel(pos, target)
+local function travel(pos,target)
     check()
-
-    local root = player.Character:FindFirstChild("HumanoidRootPart")
-    assert(root, "HumanoidRootPart missing")
-
-    root.CFrame = CFrame.lookAt(
-        pos,
-        Vector3.new(target.X, pos.Y, target.Z)
-    )
-
-    root.AssemblyLinearVelocity = Vector3.zero
-
-    pause(0.6)
-
-    assert(
-        (root.Position - pos).Magnitude < 5,
-        "Teleport was not accepted"
-    )
+    local root=player.Character:FindFirstChild("HumanoidRootPart")
+    assert(root,"HumanoidRootPart missing")
+    root.CFrame=CFrame.lookAt(pos,Vector3.new(target.X,pos.Y,target.Z))
+    root.AssemblyLinearVelocity=Vector3.zero
+    pause(1.25)
+    assert((root.Position-pos).Magnitude<5,"Teleport was not accepted")
 end
-
 local function partOf(p)
     return p:FindFirstAncestorWhichIsA("BasePart")
 end
-
-local function prompt(scope, name)
-    return scope:FindFirstChild(name, true)
+local function prompt(scope,name)
+    return scope:FindFirstChild(name,true)
 end
-
-local function trigger(p, done, label, force)
+local function trigger(p,done,label,force)
+    assert(p,"Missing prompt: "..label)
+    note(label)
     if not force and done() then return end
-
-    waitFor(function()
-        return p.Parent and p.Enabled
-    end, 6, "Prompt unavailable: " .. label)
-
+    waitFor(function() return p.Parent and p.Enabled end,10,"Prompt unavailable: "..label)
     check()
-
-    local ok, err = pcall(fireproximityprompt, p, p.HoldDuration)
-    if not ok then error(tostring(err), 0) end
-
-    waitFor(done, 8, "No confirmation: " .. label)
+    local ok=pcall(function()
+        p:InputHoldBegin()
+        pause(p.HoldDuration+0.2)
+    end)
+    pcall(function() p:InputHoldEnd() end)
+    check()
+    if ok and waitFor(done,3) then return end
+    if p.Enabled and type(fireproximityprompt)=="function" then
+        local fired,err=pcall(fireproximityprompt,p,p.HoldDuration)
+        if not fired then history[#history+1]=tostring(err) end
+    end
+    waitFor(done,10,"No confirmation: "..label)
 end
-
 local stations
-
 local function approach(s)
-    local p = partOf(s.anchor)
-    assert(p, "Station position unavailable")
-
-    travel(p.Position + s.offset, p.Position)
+    local p=partOf(s.anchor)
+    assert(p,"Station position unavailable")
+    travel(p.Position+s.offset,p.Position)
 end
-
-local function panel(name)
-    return pg:FindFirstChild(name)
+local function panel(name) return pg:FindFirstChild(name) end
+local panelFrames={
+    StorageList_Refrigerator="StorageList",
+    StorageList_Freezer="StorageList",
+    OvercookedProcessorContainer="ProcessorContainer",
+}
+local function panelOpen(name)
+    local root=panel(name)
+    local content=root and root:FindFirstChild(panelFrames[name] or "Frame")
+    return content and visible(content) and content.AbsoluteSize.Y>2
 end
-
 local function closePanel(name)
-    local b = findButton(panel(name), "X")
-
-    if b then
-        click(function()
-            return findButton(panel(name), "X")
-        end, function()
-            return not findButton(panel(name), "X")
-        end, "Close " .. name)
-    end
+    if not panelOpen(name) then return end
+    click(function()
+        local root=panel(name)
+        local content=root and root:FindFirstChild(panelFrames[name])
+        local b=content and content:FindFirstChild("TextButton")
+        return b and visible(b) and b
+    end,function() return not panelOpen(name) end,"Closing "..name)
+    pause(0.35)
 end
-
 local function setup()
-    assert(
-        type(firesignal) == "function",
-        "This test requires firesignal."
-    )
-
-    assert(
-        type(fireproximityprompt) == "function",
-        "This test requires fireproximityprompt."
-    )
-
-    local map = workspace:FindFirstChild("Map")
-    local house = map and map:FindFirstChild("House")
-    house = house and house:FindFirstChild("House")
-
-    local kitchen = house and house:FindFirstChild("Chicken")
-
-    assert(
-        kitchen,
-        "Kitchen not loaded. Move near the kitchen first."
-    )
-
-    local function station(name, offset, anchorName)
-        local scope = kitchen:FindFirstChild(name, true)
-        assert(scope, "Missing station: " .. name)
-
-        local anchor = prompt(scope, anchorName or "AddIngredient")
-        assert(anchor, "Missing station prompt: " .. name)
-
-        return {
-            scope = scope,
-            anchor = anchor,
-            offset = offset,
-        }
+    local map=workspace:FindFirstChild("Map")
+    local house=map and map:FindFirstChild("House")
+    house=house and house:FindFirstChild("House")
+    local kitchen=house and house:FindFirstChild("Chicken")
+    assert(kitchen,"Kitchen not loaded. Move near the kitchen first.")
+    local function station(name,offset,anchorName)
+        local scope=kitchen:FindFirstChild(name,true)
+        assert(scope,"Missing station: "..name)
+        local anchor=prompt(scope,anchorName or "AddIngredient")
+        assert(anchor,"Missing station prompt: "..name)
+        return {scope=scope,anchor=anchor,offset=offset}
     end
-
-    stations = {
-        cutting = station(
-            "Cutting Table",
-            Vector3.new(2.8, -0.64, -1.05)
-        ),
-
-        rolling = station(
-            "RollingTable",
-            Vector3.new(-0.87, -0.64, -2.87)
-        ),
-
-        combine = station(
-            "Combine Edit Table",
-            Vector3.new(-2.74, 0.11, 0.87)
-        ),
-
-        oven = station(
-            "Cookware",
-            Vector3.new(2.2, -0.35, -0.02),
-            "OpenProcessorContainer"
-        ),
+    local fridge=kitchen:FindFirstChild("Refrigerator")
+    local fridgePrompt
+    if fridge then
+        for _, p in ipairs(fridge:GetDescendants()) do
+            if p:IsA("ProximityPrompt") and p.ActionText=="Refrigerator" then fridgePrompt=p; break end
+        end
+    end
+    assert(fridgePrompt,"Refrigerator position not found")
+    stations={
+        fridge={anchor=fridgePrompt,offset=Vector3.new(1.85,-0.14,-1.41)},
+        cutting=station("Cutting Table",Vector3.new(2.8,-0.64,-1.05)),
+        rolling=station("RollingTable",Vector3.new(-0.87,-0.64,-2.87)),
+        combine=station("Combine Edit Table",Vector3.new(-2.74,0.11,0.87)),
+        oven=station("Cookware",Vector3.new(2.2,-0.35,-0.02),"OpenProcessorContainer"),
     }
 end
-
-local function take(name, storage)
-    note("Taking " .. name)
-
-    local base = partOf(stations.cutting.anchor).Position
-
-    travel(
-        base + Vector3.new(1.61, -0.64, -6.58),
-        base + Vector3.new(-0.24, -0.5, -5.17)
-    )
-
-    local listName = "StorageList_" .. storage
-
-    local function option()
-        return findButton(panel("Action"), storage)
-    end
-
-    if not findButton(panel(listName), name) then
+local function take(name,storage)
+    note("Taking "..name)
+    approach(stations.fridge)
+    local listName="StorageList_"..storage
+    local function option() return findButton(panel("Action"),storage) end
+    if not findButton(panel(listName),name) then
         if not option() then
             click(function()
-                local a = panel("Action")
-                local f = a and a:FindFirstChild("Frame")
-                local b = f and f:FindFirstChild("ImageButton")
-
+                local a=panel("Action")
+                local f=a and a:FindFirstChild("Frame")
+                local b=f and f:FindFirstChild("ImageButton")
                 return b and visible(b) and b
-            end, option, "Interaction menu")
+            end,option,"Interaction menu")
         end
-
-        click(option, function()
-            return findButton(panel(listName), name)
-        end, storage)
+        click(option,function() return findButton(panel(listName),name) end,storage)
     end
-
-    click(function()
-        return findButton(panel(listName), name)
-    end, function()
-        return tool(name)
-    end, "Take " .. name)
-
+    click(function() return findButton(panel(listName),name) end,
+        function() return tool(name) end,"Take "..name)
     closePanel(listName)
     equip(name)
 end
-
-local function put(s, name)
-    equip(name)
+local function put(s,name)
+    note("Moving to station: "..name)
     approach(s)
-
-    local item = tool(name)
-
-    trigger(prompt(s.scope, "AddIngredient"), function()
-        return tool(name) ~= item
-    end, "Add " .. name)
+    if not s.checked then
+        player.Character:FindFirstChildOfClass("Humanoid"):UnequipTools()
+        pause(0.7)
+        assert(not prompt(s.scope,"ProcessIngredients").Enabled
+            and not prompt(s.scope,"CollectResult").Enabled,"Station is not empty: "..s.scope.Name)
+        s.checked=true
+    end
+    equip(name)
+    pause(0.5)
+    local item=tool(name)
+    trigger(prompt(s.scope,"AddIngredient"),function()
+        return tool(name)~=item
+    end,"Add "..name)
 end
-
-local function process(s, expected)
-    local collect = prompt(s.scope, "CollectResult")
-    local processPrompt = prompt(s.scope, "ProcessIngredients")
-
-    trigger(processPrompt, function()
-        return not processPrompt.Enabled
-    end, "Process", true)
-
-    waitFor(function()
-        return collect.Enabled
-    end, 25, "Result did not become ready")
-
-    trigger(collect, function()
-        return tool(expected) or tool("Rotten Dish")
-    end, "Collect " .. expected)
-
-    assert(
-        not tool("Rotten Dish"),
-        "Unexpected Rotten Dish. Stopped without discarding items."
-    )
-
-    assert(tool(expected), "Unexpected result; expected " .. expected)
+local function process(s,expected)
+    local collect=prompt(s.scope,"CollectResult")
+    local processPrompt=prompt(s.scope,"ProcessIngredients")
+    trigger(processPrompt,function() return not processPrompt.Enabled end,"Process",true)
+    waitFor(function() return collect.Enabled end,25,"Result did not become ready")
+    trigger(collect,function() return tool(expected) or tool("Rotten Dish") end,"Collect "..expected)
+    assert(not tool("Rotten Dish"),"Unexpected Rotten Dish. Stopped without discarding items.")
+    assert(tool(expected),"Unexpected result; expected "..expected)
 end
-
 local function ovenCard()
-    local root = panel("OvercookedProcessorContainer")
+    local root=panel("OvercookedProcessorContainer")
     if not root then return end
-
     for _, d in ipairs(root:GetDescendants()) do
-        if d.Name == "Name"
-            and d:IsA("TextLabel")
-            and d.Text == "Oven" then
-
-            local p = d.Parent
-
-            while p and p ~= root do
-                if p.Name:match("^ProcessorItem_") then
-                    return p
-                end
-                p = p.Parent
+        if d.Name=="Name" and d:IsA("TextLabel") and d.Text=="Oven" then
+            local p=d.Parent
+            while p and p~=root do
+                if p.Name:match("^ProcessorItem_") then return p end
+                p=p.Parent
             end
         end
     end
 end
-
 local function ovenStatus()
-    local card = ovenCard()
-    local label = card and card:FindFirstChild("Status", true)
-
+    local card=ovenCard()
+    local label=card and card:FindFirstChild("Status",true)
     return label and label.Text
 end
-
 local function openOven()
     approach(stations.oven)
-
-    trigger(stations.oven.anchor, function()
-        local c = ovenCard()
+    trigger(stations.oven.anchor,function()
+        local c=ovenCard()
         return c and visible(c)
-    end, "Open cookware")
+    end,"Open cookware")
 end
-
-local function ovenAction(label, done)
-    if not findButton(ovenCard(), label) then
+local function ovenAction(label,done)
+    local card=ovenCard()
+    if not findButton(card,label) then
         click(function()
-            local c = ovenCard()
-            local b = c and c:FindFirstChild("HoverButton", true)
-
+            local c=ovenCard()
+            local b=c and c:FindFirstChild("HoverButton",true)
             return b and visible(b) and b
-        end, function()
-            return findButton(ovenCard(), label)
-        end, "Expand Oven")
+        end,function() return findButton(ovenCard(),label) end,"Expand Oven")
     end
-
-    click(function()
-        return findButton(ovenCard(), label)
-    end, done, "Oven: " .. label)
+    click(function() return findButton(ovenCard(),label) end,done,"Oven: "..label)
 end
-
-local api = {}
-
+local api={}
 function api.preflight()
     setup()
-
-    assert(
-        not tool("Rotten Dish"),
-        "Remove Rotten Dish before starting."
-    )
-
-    for _, name in ipairs({
-        "Cabbage",
-        "Brown Mushroom",
-        "Tomato",
-        "Cheese",
-        "Pepperoni",
-        "Pizza Dough",
-        "Sliced Cabbage",
-        "Sliced Brown Mushroom",
-        "Sliced Tomato",
-        "Sliced Cheese",
-        "Sliced Pepperoni",
-        "Rolled Pizza Dough",
-        "Pizza",
-        "Hot Pizza",
-    }) do
-        assert(
-            not tool(name),
-            "Remove existing " .. name .. " before starting."
-        )
+    assert(not tool("Rotten Dish"),"Remove Rotten Dish before starting.")
+    for _, name in ipairs({"Cabbage","Brown Mushroom","Tomato","Cheese","Pepperoni","Pizza Dough",
+        "Sliced Cabbage","Sliced Brown Mushroom","Sliced Tomato","Sliced Cheese","Sliced Pepperoni",
+        "Rolled Pizza Dough","Pizza","Hot Pizza"}) do
+        assert(not tool(name),"Remove existing "..name.." before starting.")
     end
-
     player.Character:FindFirstChildOfClass("Humanoid"):UnequipTools()
-
-    for _, key in ipairs({"cutting", "rolling", "combine"}) do
-        local s = stations[key]
-        approach(s)
-
-        assert(
-            not prompt(s.scope, "ProcessIngredients").Enabled
-                and not prompt(s.scope, "CollectResult").Enabled,
-            "Empty the " .. key .. " station first."
-        )
-    end
-
-    openOven()
-
-    waitFor(function()
-        return ovenStatus()
-    end, 5, "Oven status unavailable")
-
-    assert(
-        ovenStatus() == "Waiting for ingredients",
-        "Empty the oven first."
-    )
-
+    note("Moving to Refrigerator")
+    approach(stations.fridge)
     closePanel("OvercookedProcessorContainer")
+
 end
-
-function api.prepare(raw, prepared, storage, station)
-    take(raw, storage)
-
-    note("Preparing " .. raw)
-
-    local s = stations[station]
-    put(s, raw)
-    process(s, prepared)
-
-    note("Adding " .. prepared .. " to pizza")
-    put(stations.combine, prepared)
+function api.prepare(raw,prepared,storage,station)
+    take(raw,storage)
+    note("Preparing "..raw)
+    local s=stations[station]
+    put(s,raw)
+    process(s,prepared)
+    note("Adding "..prepared.." to pizza")
+    put(stations.combine,prepared)
 end
-
 function api.combine()
     note("Combining all six ingredients")
-    process(stations.combine, "Pizza")
+    process(stations.combine,"Pizza")
 end
-
 function api.cook()
     note("Cooking Pizza")
     equip("Pizza")
     openOven()
-
-    ovenAction("Add ingredient", function()
-        return not tool("Pizza")
-            and ovenStatus() == "1/6 ingredients"
-    end)
-
-    ovenAction("Process", function()
-        return ovenStatus() == "Processing"
-    end)
-
-    waitFor(function()
-        return ovenStatus() == "Ready to turn off"
-    end, 45, "Oven did not become ready")
-
-    ovenAction("Turn off", function()
-        return ovenStatus() == "Ready to collect"
-    end)
-
-    ovenAction("Collect", function()
-        return tool("Hot Pizza")
-    end)
-
+    assert(ovenStatus()=="Waiting for ingredients","Empty the oven first.")
+    ovenAction("Add ingredient",function() return not tool("Pizza") and ovenStatus()=="1/6 ingredients" end)
+    ovenAction("Process",function() return ovenStatus()=="Processing" end)
+    waitFor(function() return ovenStatus()=="Ready to turn off" end,45,"Oven did not become ready")
+    ovenAction("Turn off",function() return ovenStatus()=="Ready to collect" end)
+    ovenAction("Collect",function() return tool("Hot Pizza") end)
     closePanel("OvercookedProcessorContainer")
 end
-
 function api.sell()
     note("Selling Hot Pizza")
     equip("Hot Pizza")
-
-    local npcs = workspace:FindFirstChild("NPCS")
-    local merchant = npcs and npcs:FindFirstChild("Merchant")
-
-    assert(
-        merchant and merchant:IsA("Model"),
-        "Merchant is not loaded"
-    )
-
-    local pos = merchant:GetPivot().Position
-
-    travel(pos + Vector3.new(1.59, 2.8, -2.07), pos)
-
+    local npcs=workspace:FindFirstChild("NPCS")
+    local merchant=npcs and npcs:FindFirstChild("Merchant")
+    assert(merchant and merchant:IsA("Model"),"Merchant is not loaded")
+    local pos=merchant:GetPivot().Position
+    travel(pos+Vector3.new(1.59,2.8,-2.07),pos)
     local function sellButton()
-        local root = panel("ProximityPromptDialog")
+        local root=panel("ProximityPromptDialog")
         if not root then return end
-
         for _, b in ipairs(root:GetDescendants()) do
-            if b:IsA("TextButton")
-                and visible(b)
-                and b.Text:match("^Sell for %d+ credits$") then
-                return b
-            end
+            if b:IsA("TextButton") and visible(b) and b.Text:match("^Sell for %d+ credits$") then return b end
         end
     end
-
-    local p = merchant:FindFirstChildWhichIsA(
-        "ProximityPrompt",
-        true
-    )
-
-    assert(p, "Merchant prompt missing")
-
-    trigger(p, sellButton, "Talk to Merchant")
-
-    local b = sellButton()
+    local p=merchant:FindFirstChildWhichIsA("ProximityPrompt",true)
+    assert(p,"Merchant prompt missing")
+    trigger(p,sellButton,"Talk to Merchant")
+    local b=sellButton()
     note(b.Text)
-
-    click(sellButton, function()
-        return not tool("Hot Pizza")
-    end, "Sell Hot Pizza")
-
+    click(sellButton,function() return not tool("Hot Pizza") end,"Sell Hot Pizza")
     note("Sale submitted; Hot Pizza removed from inventory.")
 end
-
+-- ENGINE BEGIN
 local function runPizza(actions)
     actions.preflight()
-
-    actions.prepare(
-        "Cabbage",
-        "Sliced Cabbage",
-        "Refrigerator",
-        "cutting"
-    )
-
-    actions.prepare(
-        "Brown Mushroom",
-        "Sliced Brown Mushroom",
-        "Refrigerator",
-        "cutting"
-    )
-
-    actions.prepare(
-        "Tomato",
-        "Sliced Tomato",
-        "Refrigerator",
-        "cutting"
-    )
-
-    actions.prepare(
-        "Cheese",
-        "Sliced Cheese",
-        "Refrigerator",
-        "cutting"
-    )
-
-    actions.prepare(
-        "Pepperoni",
-        "Sliced Pepperoni",
-        "Freezer",
-        "cutting"
-    )
-
-    actions.prepare(
-        "Pizza Dough",
-        "Rolled Pizza Dough",
-        "Refrigerator",
-        "rolling"
-    )
-
+    actions.prepare("Cabbage","Sliced Cabbage","Refrigerator","cutting")
+    actions.prepare("Brown Mushroom","Sliced Brown Mushroom","Refrigerator","cutting")
+    actions.prepare("Tomato","Sliced Tomato","Refrigerator","cutting")
+    actions.prepare("Cheese","Sliced Cheese","Refrigerator","cutting")
+    actions.prepare("Pepperoni","Sliced Pepperoni","Freezer","cutting")
+    actions.prepare("Pizza Dough","Rolled Pizza Dough","Refrigerator","rolling")
     actions.combine()
     actions.cook()
     actions.sell()
 end
-
-bind(loopButton.Activated, function()
-    loop = not loop
-    loopButton.Text = loop and "Loop: ON" or "Loop: OFF"
+-- ENGINE END
+bind(loopButton.Activated,function()
+    loop=not loop
+    loopButton.Text=loop and "Loop: ON" or "Loop: OFF"
 end)
-
-bind(stopButton.Activated, function()
-    stop = true
-    note("Stopping...")
+bind(stopButton.Activated,function() stop=true; note("Stopping...") end)
+bind(copyButton.Activated,function()
+    local fn=type(setclipboard)=="function" and setclipboard or toclipboard
+    if type(fn)=="function" then pcall(fn,table.concat(history,"\n")) end
 end)
-
-bind(copyButton.Activated, function()
-    local fn = type(setclipboard) == "function"
-        and setclipboard or toclipboard
-
-    if type(fn) == "function" then
-        pcall(fn, table.concat(history, "\n"))
-    end
-end)
-
-bind(startButton.Activated, function()
+bind(startButton.Activated,function()
     if running then return end
-
-    running = true
-    stop = false
-
+    running=true; stop=false
     task.spawn(function()
-        local ok, err = pcall(function()
-            repeat
-                runPizza(api)
-                pause(1)
-            until not loop
+        local ok,err=pcall(function()
+            repeat runPizza(api); pause(1) until not loop
         end)
-
-        running = false
-
-        if not ok then
-            note(tostring(err))
-        end
+        running=false
+        if not ok then note(tostring(err)) end
     end)
 end)
+
