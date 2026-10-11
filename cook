@@ -24,7 +24,7 @@ local frame = make("Frame", {Size=UDim2.fromOffset(320, 184), Position=UDim2.new
     BackgroundColor3=Color3.fromRGB(23,23,25), BorderSizePixel=0, ClipsDescendants=true}, gui)
 make("UICorner", {CornerRadius=UDim.new(0,10)}, frame)
 local title = make("TextLabel", {Size=UDim2.fromOffset(232,36), Position=UDim2.fromOffset(12,0),
-    BackgroundTransparency=1, Text="Auto cook | Pizza v3", TextSize=14, Font=Enum.Font.GothamMedium,
+    BackgroundTransparency=1, Text="Auto cook | Pizza v4", TextSize=14, Font=Enum.Font.GothamMedium,
     TextColor3=Color3.new(1,1,1), TextXAlignment=Enum.TextXAlignment.Left, Active=true}, frame)
 local status = make("TextLabel", {Size=UDim2.fromOffset(296,65), Position=UDim2.fromOffset(12,40),
     BackgroundTransparency=1, Text="Empty the stations, then press Start.\nAuto sell is enabled.", TextSize=12,
@@ -266,7 +266,10 @@ local stations
 local function approach(s)
     local p=partOf(s.anchor)
     assert(p,"Station position unavailable")
-    travel(p.Position+s.offset,p.Position)
+    local destination=p.Position+s.offset
+    local root=player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+    if root and (root.Position-destination).Magnitude<1.25 then pause(0.2);return end
+    travel(destination,p.Position)
 end
 local function panel(name) return pg:FindFirstChild(name) end
 local panelFrames={
@@ -279,15 +282,20 @@ local function panelOpen(name)
     local content=root and root:FindFirstChild(panelFrames[name] or "Frame")
     return content and visible(content) and content.AbsoluteSize.Y>2
 end
-local function closePanel(name)
-    if not panelOpen(name) then return end
-    click(function()
-        local root=panel(name)
-        local content=root and root:FindFirstChild(panelFrames[name])
-        local b=content and content:FindFirstChild("TextButton")
-        return b and visible(b) and b
-    end,function() return not panelOpen(name) end,"Closing "..name)
-    pause(0.35)
+local function closePanel(name,destination)
+    if not panelOpen(name) then
+        if destination then approach(destination) end
+        return
+    end
+    note("Leaving "..name.." to close it")
+    if destination then approach(destination) end
+    if waitFor(function() return not panelOpen(name) end,2) then return end
+    -- Recorded standing positions inside the kitchen, away from the source.
+    local away=name=="OvercookedProcessorContainer" and stations.fridge or stations.rolling
+    note("Moving farther from "..name)
+    approach(away)
+    waitFor(function() return not panelOpen(name) end,10,"Panel stayed open after moving away: "..name)
+    note("Panel closed by distance: "..name)
 end
 local function setup()
     local map=workspace:FindFirstChild("Map")
@@ -318,7 +326,7 @@ local function setup()
         oven=station("Cookware",Vector3.new(2.2,-0.35,-0.02),"OpenProcessorContainer"),
     }
 end
-local function take(name,storage)
+local function take(name,storage,station)
     note("Taking "..name)
     approach(stations.fridge)
     local listName="StorageList_"..storage
@@ -338,7 +346,7 @@ local function take(name,storage)
         function() return tool(name) end,"Take "..name)
     inventory("Before closing storage")
     requireItem(name,"before closing storage")
-    closePanel(listName)
+    closePanel(listName,stations[station])
     inventory("After closing storage")
     requireItem(name,"after closing storage")
     equip(name)
@@ -418,11 +426,11 @@ function api.preflight()
     end
     note("Moving to Refrigerator")
     approach(stations.fridge)
-    closePanel("OvercookedProcessorContainer")
+    closePanel("OvercookedProcessorContainer",stations.fridge)
 
 end
 function api.prepare(raw,prepared,storage,station)
-    take(raw,storage)
+    take(raw,storage,station)
     note("Preparing "..raw)
     local s=stations[station]
     put(s,raw)
@@ -444,7 +452,8 @@ function api.cook()
     waitFor(function() return ovenStatus()=="Ready to turn off" end,45,"Oven did not become ready")
     ovenAction("Turn off",function() return ovenStatus()=="Ready to collect" end)
     ovenAction("Collect",function() return tool("Hot Pizza") end)
-    closePanel("OvercookedProcessorContainer")
+    requireItem("Hot Pizza","after collecting from oven")
+    note("Hot Pizza collected; oven panel will close on the way to Merchant")
 end
 function api.sell()
     note("Selling Hot Pizza")
@@ -454,6 +463,9 @@ function api.sell()
     assert(merchant and merchant:IsA("Model"),"Merchant is not loaded")
     local pos=merchant:GetPivot().Position
     travel(pos+Vector3.new(1.59,2.8,-2.07),pos)
+    requireItem("Hot Pizza","after moving to Merchant")
+    waitFor(function() return not panelOpen("OvercookedProcessorContainer") end,10,
+        "Oven panel stayed open at Merchant")
     local function sellButton()
         local root=panel("ProximityPromptDialog")
         if not root then return end
