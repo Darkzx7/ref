@@ -24,7 +24,7 @@ local frame = make("Frame", {Size=UDim2.fromOffset(320, 222), Position=UDim2.new
     BackgroundColor3=Color3.fromRGB(23,23,25), BorderSizePixel=0, ClipsDescendants=true}, gui)
 make("UICorner", {CornerRadius=UDim.new(0,10)}, frame)
 local title = make("TextLabel", {Size=UDim2.fromOffset(232,36), Position=UDim2.fromOffset(12,0),
-    BackgroundTransparency=1, Text="Auto cook | Pizza v6", TextSize=14, Font=Enum.Font.GothamMedium,
+    BackgroundTransparency=1, Text="Auto cook | Pizza v7", TextSize=14, Font=Enum.Font.GothamMedium,
     TextColor3=Color3.new(1,1,1), TextXAlignment=Enum.TextXAlignment.Left, Active=true}, frame)
 local status = make("TextLabel", {Size=UDim2.fromOffset(296,65), Position=UDim2.fromOffset(12,40),
     BackgroundTransparency=1, Text="Empty the stations, then press Start.\nAuto sell is enabled.", TextSize=12,
@@ -199,6 +199,44 @@ local function click(getButton,done,label,preferredModes)
     note(label.." — tap manually to continue (30s)")
     waitFor(done,30,"No confirmation: "..label)
 end
+-- Adapted from Mush: ActivateButtonUntil / ClickGuiObjectOnce.
+-- Validate the game state between attempts, not just pcall success.
+local function mushActivate(getButton,done,label)
+    note(label)
+    for _, method in ipairs({"Activated","MouseButton1Click","MouseButton1Down","MouseButton1Up","MouseRaw"}) do
+        if done() then return end
+        local b=waitFor(function() return done() and true or getButton() end,6)
+        if done() then return end
+        if not b or b==true then break end
+        check()
+        local ok,err
+        if method=="MouseRaw" then
+            local p,z=b.AbsolutePosition,b.AbsoluteSize
+            local center=p+z/2
+            local camera=workspace.CurrentCamera
+            if not camera or center.X<0 or center.Y<0 or center.X>camera.ViewportSize.X or center.Y>camera.ViewportSize.Y then
+                ok=false;err="Button outside viewport"
+            else
+                local previous=gui.Enabled
+                gui.Enabled=false
+                ok,err=pcall(function()
+                    VirtualInput:SendMouseMoveEvent(center.X,center.Y,game)
+                    task.wait(0.03)
+                    VirtualInput:SendMouseButtonEvent(center.X,center.Y,0,true,game,0)
+                    task.wait(0.06)
+                    VirtualInput:SendMouseButtonEvent(center.X,center.Y,0,false,game,0)
+                end)
+                if alive then gui.Enabled=previous end
+            end
+        elseif type(firesignal)=="function" then
+            ok,err=pcall(firesignal,b[method])
+        else ok=false;err="firesignal unavailable" end
+        if not ok then history[#history+1]=label.." / "..method..": "..tostring(err) end
+        if waitFor(done,ok and 1.5 or 0.2) then return end
+    end
+    note(label.." — complete this action manually (30s)")
+    waitFor(done,30,"No confirmation: "..label)
+end
 local function tool(name)
     for _, parent in pairs({character=player.Character,backpack=player:FindFirstChildOfClass("Backpack")}) do
         local t=parent:FindFirstChild(name)
@@ -319,8 +357,7 @@ local function closePanel(name)
         local b=content and content:FindFirstChild("TextButton")
         return b and b:IsA("TextButton") and visible(b) and b
     end
-    click(closeButton,closed,"Close "..name,
-        {"MouseButton1Click","Activated","Touch","TouchRaw","Mouse","MouseRaw"})
+    mushActivate(closeButton,closed,"Close "..name)
     pause(0.25)
 end
 local function setup()
@@ -481,6 +518,7 @@ local function process(s,expected)
     trigger(collect,function() return tool(expected) or tool("Rotten Dish") end,"Collect "..expected)
     assert(not tool("Rotten Dish"),"Unexpected Rotten Dish. Stopped without discarding items.")
     assert(tool(expected),"Unexpected result; expected "..expected)
+    equip(expected)
 end
 local function ovenCard()
     local root=panel("OvercookedProcessorContainer")
@@ -508,15 +546,24 @@ local function openOven()
     end,"Open cookware")
 end
 local function ovenAction(label,done)
-    local card=ovenCard()
-    if not findButton(card,label) then
-        click(function()
+    if done() then return end
+    local function actionButton()
+        local card=ovenCard()
+        local spacer=card and card:FindFirstChild("ExpandSpacer")
+        local b=spacer and spacer:FindFirstChild("ActionButton")
+        local body=b and b:FindFirstChild("ActionButtonBody")
+        local text=body and body:FindFirstChild("Label")
+        return b and text and visible(b) and visible(text)
+            and normalize(text.Text)==normalize(label) and b
+    end
+    if not waitFor(actionButton,1.5) then
+        mushActivate(function()
             local c=ovenCard()
             local b=c and c:FindFirstChild("HoverButton",true)
             return b and visible(b) and b
-        end,function() return findButton(ovenCard(),label) end,"Expand Oven")
+        end,function() return done() or actionButton() end,"Expand Oven: "..label)
     end
-    click(function() return findButton(ovenCard(),label) end,done,"Oven: "..label)
+    mushActivate(actionButton,done,"Oven: "..label)
 end
 local api={}
 function api.preflight()
@@ -549,12 +596,21 @@ function api.cook()
     equip("Pizza")
     openOven()
     assert(ovenStatus()=="Waiting for ingredients","Empty the oven first.")
+    equip("Pizza")
+    requireItem("Pizza","before inserting into oven")
     ovenAction("Add ingredient",function() return not tool("Pizza") and ovenStatus()=="1/6 ingredients" end)
     ovenAction("Process",function() return ovenStatus()=="Processing" end)
     waitFor(function() return ovenStatus()=="Ready to turn off" end,45,"Oven did not become ready")
     ovenAction("Turn off",function() return ovenStatus()=="Ready to collect" end)
     ovenAction("Collect",function() return tool("Hot Pizza") end)
     requireItem("Hot Pizza","after collecting from oven")
+    equip("Hot Pizza")
+    waitFor(function()
+        local item=tool("Hot Pizza")
+        return item and item.Parent==player.Character
+    end,5,"Hot Pizza was collected but is not equipped")
+    pause(0.3)
+    requireItem("Hot Pizza","after equipping oven result")
     closePanel("OvercookedProcessorContainer")
     requireItem("Hot Pizza","after leaving oven")
 end
