@@ -20,11 +20,11 @@ local function make(class, props, parent)
     return obj
 end
 local gui = make("ScreenGui", {Name="PizzaTest", ResetOnSpawn=false, DisplayOrder=9999}, pg)
-local frame = make("Frame", {Size=UDim2.fromOffset(320, 184), Position=UDim2.new(0,16,0.25,0),
+local frame = make("Frame", {Size=UDim2.fromOffset(320, 222), Position=UDim2.new(0,16,0.25,0),
     BackgroundColor3=Color3.fromRGB(23,23,25), BorderSizePixel=0, ClipsDescendants=true}, gui)
 make("UICorner", {CornerRadius=UDim.new(0,10)}, frame)
 local title = make("TextLabel", {Size=UDim2.fromOffset(232,36), Position=UDim2.fromOffset(12,0),
-    BackgroundTransparency=1, Text="Auto cook | Pizza v4", TextSize=14, Font=Enum.Font.GothamMedium,
+    BackgroundTransparency=1, Text="Auto cook | Pizza v5", TextSize=14, Font=Enum.Font.GothamMedium,
     TextColor3=Color3.new(1,1,1), TextXAlignment=Enum.TextXAlignment.Left, Active=true}, frame)
 local status = make("TextLabel", {Size=UDim2.fromOffset(296,65), Position=UDim2.fromOffset(12,40),
     BackgroundTransparency=1, Text="Empty the stations, then press Start.\nAuto sell is enabled.", TextSize=12,
@@ -40,12 +40,15 @@ local startButton=button("Start",12,109,92)
 local stopButton=button("Stop",114,109,92)
 local copyButton=button("Copy log",216,109,92)
 local loopButton=button("Loop: OFF",12,146,296)
+local setFridgeButton=button("Set fridge spot",12,184,143)
+local testFridgeButton=button("Test fridge",165,184,143)
+local fridgeCalibration
 local minimize=button("-",246,3,30)
 local close=button("X",282,3,30)
 local minimized=false
 bind(minimize.Activated,function()
     minimized=not minimized
-    frame.Size=UDim2.fromOffset(320,minimized and 36 or 184)
+    frame.Size=UDim2.fromOffset(320,minimized and 36 or 222)
     minimize.Text=minimized and "+" or "-"
 end)
 bind(close.Activated,function() gui:Destroy() end)
@@ -263,13 +266,26 @@ local function trigger(p,done,label,force)
     waitFor(done,10,"No confirmation: "..label)
 end
 local stations
-local function approach(s)
+local function stationPosition(s)
+    if s.fridge then
+        local base=partOf(stations.cutting.anchor)
+        if fridgeCalibration then
+            local cf=base.CFrame*fridgeCalibration
+            return cf.Position,cf.Position+cf.LookVector
+        end
+        -- The refrigerator prompt belongs to a moving door. Use the fixed counter.
+        return base.Position+Vector3.new(1.61,-0.64,-6.58),
+            base.Position+Vector3.new(-0.24,-0.5,-5.17)
+    end
     local p=partOf(s.anchor)
     assert(p,"Station position unavailable")
-    local destination=p.Position+s.offset
+    return p.Position+s.offset,p.Position
+end
+local function approach(s)
+    local destination,target=stationPosition(s)
     local root=player.Character and player.Character:FindFirstChild("HumanoidRootPart")
     if root and (root.Position-destination).Magnitude<1.25 then pause(0.2);return end
-    travel(destination,p.Position)
+    travel(destination,target)
 end
 local function panel(name) return pg:FindFirstChild(name) end
 local panelFrames={
@@ -280,22 +296,56 @@ local panelFrames={
 local function panelOpen(name)
     local root=panel(name)
     local content=root and root:FindFirstChild(panelFrames[name] or "Frame")
-    return content and visible(content) and content.AbsoluteSize.Y>2
+    if not content or not visible(content) or content.AbsoluteSize.Y<=2 then return false end
+    local camera=workspace.CurrentCamera
+    if camera then
+        local p,z,v=content.AbsolutePosition,content.AbsoluteSize,camera.ViewportSize
+        if p.X+z.X<=0 or p.Y+z.Y<=0 or p.X>=v.X or p.Y>=v.Y then return false end
+    end
+    local p=content
+    while p and p~=pg do
+        if p:IsA("CanvasGroup") and p.GroupTransparency>=0.99 then return false end
+        p=p.Parent
+    end
+    return true
+end
+local function walkAway(destination,closed)
+    local pos,target=stationPosition(destination)
+    local char=player.Character
+    local h=char:FindFirstChildOfClass("Humanoid")
+    local root=char:FindFirstChild("HumanoidRootPart")
+    local started=os.clock()
+    h:MoveTo(pos)
+    local ok,err=pcall(function()
+        while os.clock()-started<6 do
+            check()
+            if closed() or (root.Position-pos).Magnitude<1.3 then return end
+            task.wait(0.1)
+        end
+    end)
+    h:MoveTo(root.Position)
+    if not ok then error(err,0) end
+    if not closed() and (root.Position-pos).Magnitude>2 then
+        travel(pos,target)
+    end
 end
 local function closePanel(name,destination)
-    if not panelOpen(name) then
-        if destination then approach(destination) end
-        return
-    end
-    note("Leaving "..name.." to close it")
-    if destination then approach(destination) end
-    if waitFor(function() return not panelOpen(name) end,2) then return end
-    -- Recorded standing positions inside the kitchen, away from the source.
-    local away=name=="OvercookedProcessorContainer" and stations.fridge or stations.rolling
-    note("Moving farther from "..name)
-    approach(away)
-    waitFor(function() return not panelOpen(name) end,10,"Panel stayed open after moving away: "..name)
-    note("Panel closed by distance: "..name)
+    local function closed() return not panelOpen(name) end
+    if closed() then return end
+    note("Walking away from "..name)
+    local away=destination or stations.fridge
+    walkAway(away,closed)
+    if waitFor(closed,1.5) then return end
+    -- If the intended workbench is too near, leave the interaction radius.
+    local farther=name=="OvercookedProcessorContainer" and stations.fridge or stations.rolling
+    walkAway(farther,closed)
+    if waitFor(closed,1.5) then return end
+    click(function()
+        local root=panel(name)
+        local content=root and root:FindFirstChild(panelFrames[name])
+        local b=content and content:FindFirstChild("TextButton")
+        return b and visible(b) and b
+    end,closed,"Close "..name)
 end
 local function setup()
     local map=workspace:FindFirstChild("Map")
@@ -319,29 +369,56 @@ local function setup()
     end
     assert(fridgePrompt,"Refrigerator position not found")
     stations={
-        fridge={anchor=fridgePrompt,offset=Vector3.new(1.85,-0.14,-1.41)},
+        fridge={anchor=fridgePrompt,fridge=true},
         cutting=station("Cutting Table",Vector3.new(2.8,-0.64,-1.05)),
         rolling=station("RollingTable",Vector3.new(-0.87,-0.64,-2.87)),
         combine=station("Combine Edit Table",Vector3.new(-2.74,0.11,0.87)),
         oven=station("Cookware",Vector3.new(2.2,-0.35,-0.02),"OpenProcessorContainer"),
     }
 end
+local function openStorage(storage)
+    local listName="StorageList_"..storage
+    if panelOpen(listName) then return end
+    local function option() return findButton(panel("Action"),storage) end
+    local function actionButton()
+        local a=panel("Action")
+        local f=a and a:FindFirstChild("Frame")
+        local b=f and f:FindFirstChild("ImageButton")
+        return b and visible(b) and b
+    end
+    local base=partOf(stations.cutting.anchor)
+    local candidates={Vector3.new(1.61,-0.64,-6.58),Vector3.new(1.2,-0.64,-6.22),Vector3.new(0.95,-0.64,-5.92)}
+    for attempt,offset in ipairs(candidates) do
+        note("Positioning at Refrigerator: "..attempt)
+        if attempt==1 then approach(stations.fridge)
+        else
+            local pos=base.Position+offset
+            travel(pos,base.Position+Vector3.new(-0.24,-0.5,-5.17))
+        end
+        if waitFor(function() return option() or actionButton() end,3) then
+            if not option() then
+                -- Check for the Refrigerator/Freezer choices after every attempt.
+                for _, mode in ipairs({"Activated","MouseButton1Click","Touch","TouchRaw","Mouse","MouseRaw"}) do
+                    if option() or panelOpen(listName) then break end
+                    local b=actionButton()
+                    if not b then break end
+                    tap(b,mode)
+                    if waitFor(function() return option() or panelOpen(listName) end,1) then break end
+                end
+            end
+            if panelOpen(listName) then return end
+            if option() then
+                click(option,function() return panelOpen(listName) end,"Open "..storage)
+                return
+            end
+        end
+    end
+    error("Refrigerator interaction not found. Stand where Interact works, then use Set fridge spot and Test fridge.",0)
+end
 local function take(name,storage,station)
     note("Taking "..name)
-    approach(stations.fridge)
+    openStorage(storage)
     local listName="StorageList_"..storage
-    local function option() return findButton(panel("Action"),storage) end
-    if not findButton(panel(listName),name) then
-        if not option() then
-            click(function()
-                local a=panel("Action")
-                local f=a and a:FindFirstChild("Frame")
-                local b=f and f:FindFirstChild("ImageButton")
-                return b and visible(b) and b
-            end,option,"Interaction menu")
-        end
-        click(option,function() return findButton(panel(listName),name) end,storage)
-    end
     click(function() return findButton(panel(listName),name) end,
         function() return tool(name) end,"Take "..name)
     inventory("Before closing storage")
@@ -425,7 +502,6 @@ function api.preflight()
         assert(not tool(name),"Remove existing "..name.." before starting.")
     end
     note("Moving to Refrigerator")
-    approach(stations.fridge)
     closePanel("OvercookedProcessorContainer",stations.fridge)
 
 end
@@ -453,7 +529,8 @@ function api.cook()
     ovenAction("Turn off",function() return ovenStatus()=="Ready to collect" end)
     ovenAction("Collect",function() return tool("Hot Pizza") end)
     requireItem("Hot Pizza","after collecting from oven")
-    note("Hot Pizza collected; oven panel will close on the way to Merchant")
+    closePanel("OvercookedProcessorContainer",stations.fridge)
+    requireItem("Hot Pizza","after leaving oven")
 end
 function api.sell()
     note("Selling Hot Pizza")
@@ -478,8 +555,22 @@ function api.sell()
     trigger(p,sellButton,"Talk to Merchant")
     local b=sellButton()
     note(b.Text)
+    local remote=game:GetService("ReplicatedStorage"):FindFirstChild("BLINK_RELIABLE_REMOTE")
+    assert(remote and remote:IsA("RemoteEvent"),"Captured sale remote unavailable")
+    -- Exact observed packet. Its sale meaning is still being verified.
+    -- Send once, only while holding Hot Pizza at Merchant with a sell option.
+    requireItem("Hot Pizza","before captured sale attempt")
+    local packet=buffer.fromstring(string.char(0x1e,0x02,0x00,0x00,0x00))
+    note("Trying captured packet once: 1e02000000")
+    remote:FireServer(packet,{})
+    if waitFor(function() return not tool("Hot Pizza") end,8) then
+        note("Hot Pizza removed after captured packet. Credit change not checked.")
+        return
+    end
+    note("Captured packet did not confirm a sale; using the visible sell option")
+    trigger(p,sellButton,"Reopen Merchant")
     click(sellButton,function() return not tool("Hot Pizza") end,"Sell Hot Pizza")
-    note("Sale submitted; Hot Pizza removed from inventory.")
+    note("Hot Pizza removed after sell button. Credit change not checked.")
 end
 -- ENGINE BEGIN
 local function runPizza(actions)
@@ -516,3 +607,30 @@ bind(startButton.Activated,function()
     end)
 end)
 
+
+bind(setFridgeButton.Activated,function()
+    if running then note("Stop the test before setting the fridge spot.");return end
+    local ok,err=pcall(function()
+        setup()
+        local root=player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+        assert(root,"Character unavailable")
+        local door=partOf(stations.fridge.anchor)
+        assert((root.Position-door.Position).Magnitude<8,"Stand next to the refrigerator first.")
+        fridgeCalibration=partOf(stations.cutting.anchor).CFrame:ToObjectSpace(root.CFrame)
+        note("Fridge spot saved for this session. Press Test fridge.")
+    end)
+    if not ok then note(tostring(err)) end
+end)
+bind(testFridgeButton.Activated,function()
+    if running then return end
+    running=true;stop=false
+    task.spawn(function()
+        local ok,err=pcall(function()
+            setup()
+            openStorage("Refrigerator")
+            note("Refrigerator opened. No ingredients selected.")
+        end)
+        running=false
+        if not ok then note(tostring(err)) end
+    end)
+end)
