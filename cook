@@ -24,7 +24,7 @@ local frame = make("Frame", {Size=UDim2.fromOffset(320, 222), Position=UDim2.new
     BackgroundColor3=Color3.fromRGB(23,23,25), BorderSizePixel=0, ClipsDescendants=true}, gui)
 make("UICorner", {CornerRadius=UDim.new(0,10)}, frame)
 local title = make("TextLabel", {Size=UDim2.fromOffset(232,36), Position=UDim2.fromOffset(12,0),
-    BackgroundTransparency=1, Text="Auto cook | Pizza v5", TextSize=14, Font=Enum.Font.GothamMedium,
+    BackgroundTransparency=1, Text="Auto cook | Pizza v6", TextSize=14, Font=Enum.Font.GothamMedium,
     TextColor3=Color3.new(1,1,1), TextXAlignment=Enum.TextXAlignment.Left, Active=true}, frame)
 local status = make("TextLabel", {Size=UDim2.fromOffset(296,65), Position=UDim2.fromOffset(12,40),
     BackgroundTransparency=1, Text="Empty the stations, then press Start.\nAuto sell is enabled.", TextSize=12,
@@ -173,12 +173,12 @@ local function tap(b, mode)
         end
     end)
 end
-local function click(getButton,done,label)
+local function click(getButton,done,label,preferredModes)
     note(label)
     if done() then return end
-    local modes=Input.TouchEnabled
+    local modes=preferredModes or (Input.TouchEnabled
         and {"Touch","TouchRaw","Activated","MouseButton1Click","Mouse","MouseRaw"}
-        or {"Mouse","MouseRaw","Activated","MouseButton1Click","Touch","TouchRaw"}
+        or {"Mouse","MouseRaw","Activated","MouseButton1Click","Touch","TouchRaw"})
     for _, mode in ipairs(modes) do
         local b=waitFor(function()
             if done() then return true end
@@ -309,43 +309,19 @@ local function panelOpen(name)
     end
     return true
 end
-local function walkAway(destination,closed)
-    local pos,target=stationPosition(destination)
-    local char=player.Character
-    local h=char:FindFirstChildOfClass("Humanoid")
-    local root=char:FindFirstChild("HumanoidRootPart")
-    local started=os.clock()
-    h:MoveTo(pos)
-    local ok,err=pcall(function()
-        while os.clock()-started<6 do
-            check()
-            if closed() or (root.Position-pos).Magnitude<1.3 then return end
-            task.wait(0.1)
-        end
-    end)
-    h:MoveTo(root.Position)
-    if not ok then error(err,0) end
-    if not closed() and (root.Position-pos).Magnitude>2 then
-        travel(pos,target)
-    end
-end
-local function closePanel(name,destination)
+local function closePanel(name)
     local function closed() return not panelOpen(name) end
     if closed() then return end
-    note("Walking away from "..name)
-    local away=destination or stations.fridge
-    walkAway(away,closed)
-    if waitFor(closed,1.5) then return end
-    -- If the intended workbench is too near, leave the interaction radius.
-    local farther=name=="OvercookedProcessorContainer" and stations.fridge or stations.rolling
-    walkAway(farther,closed)
-    if waitFor(closed,1.5) then return end
-    click(function()
+    -- Exact close button, not a descendant search or a click in the item list.
+    local function closeButton()
         local root=panel(name)
         local content=root and root:FindFirstChild(panelFrames[name])
         local b=content and content:FindFirstChild("TextButton")
-        return b and visible(b) and b
-    end,closed,"Close "..name)
+        return b and b:IsA("TextButton") and visible(b) and b
+    end
+    click(closeButton,closed,"Close "..name,
+        {"MouseButton1Click","Activated","Touch","TouchRaw","Mouse","MouseRaw"})
+    pause(0.25)
 end
 local function setup()
     local map=workspace:FindFirstChild("Map")
@@ -415,15 +391,65 @@ local function openStorage(storage)
     end
     error("Refrigerator interaction not found. Stand where Interact works, then use Set fridge spot and Test fridge.",0)
 end
+local function storageItem(listName,name)
+    local root=panel(listName)
+    local list=root and root:FindFirstChild("StorageList")
+    local items=list and list:FindFirstChild("Items")
+    if not items then return end
+    for _, row in ipairs(items:GetChildren()) do
+        if row:IsA("TextButton") and row.Name:match("^StorageItem_%d+$") and visible(row) then
+            local label=row:FindFirstChild("Name")
+            if label and label:IsA("TextLabel") and normalize(label.Text)==normalize(name) then
+                return row
+            end
+        end
+    end
+end
+local function selectIngredient(listName,name)
+    assert(type(firesignal)=="function","Ingredient selection requires firesignal; screen taps are disabled for items.")
+    local before={}
+    local function eachTool(callback)
+        for _, parent in pairs({character=player.Character,backpack=player:FindFirstChildOfClass("Backpack")}) do
+            for _, item in ipairs(parent:GetChildren()) do
+                if item:IsA("Tool") then callback(item) end
+            end
+        end
+    end
+    eachTool(function(item) before[item]=true end)
+    local function received()
+        eachTool(function(item)
+            if not before[item] and item.Name~=name then
+                error("Unexpected item received: "..item.Name.."; expected "..name..". Stopped before processing.",0)
+            end
+        end)
+        return tool(name)
+    end
+    note("Selecting by name: "..name)
+    for _, signal in ipairs({"Activated","MouseButton1Click"}) do
+        if received() then return end
+        local row=waitFor(function()
+            if received() then return true end
+            return storageItem(listName,name)
+        end,8,"Ingredient row not found: "..name)
+        if received() then return end
+        check()
+        -- Resolve again immediately before sending to avoid stale row indices.
+        row=storageItem(listName,name)
+        assert(row,"Ingredient row changed before selection: "..name)
+        local ok,err=pcall(firesignal,row[signal])
+        if not ok then note("Ingredient signal: "..tostring(err)) end
+        if waitFor(received,4) then return end
+    end
+    error("Ingredient not received: "..name..". No coordinate taps attempted.",0)
+end
 local function take(name,storage,station)
     note("Taking "..name)
     openStorage(storage)
     local listName="StorageList_"..storage
-    click(function() return findButton(panel(listName),name) end,
-        function() return tool(name) end,"Take "..name)
+    selectIngredient(listName,name)
     inventory("Before closing storage")
     requireItem(name,"before closing storage")
-    closePanel(listName,stations[station])
+    closePanel(listName)
     inventory("After closing storage")
     requireItem(name,"after closing storage")
     equip(name)
@@ -502,7 +528,7 @@ function api.preflight()
         assert(not tool(name),"Remove existing "..name.." before starting.")
     end
     note("Moving to Refrigerator")
-    closePanel("OvercookedProcessorContainer",stations.fridge)
+    closePanel("OvercookedProcessorContainer")
 
 end
 function api.prepare(raw,prepared,storage,station)
@@ -529,11 +555,11 @@ function api.cook()
     ovenAction("Turn off",function() return ovenStatus()=="Ready to collect" end)
     ovenAction("Collect",function() return tool("Hot Pizza") end)
     requireItem("Hot Pizza","after collecting from oven")
-    closePanel("OvercookedProcessorContainer",stations.fridge)
+    closePanel("OvercookedProcessorContainer")
     requireItem("Hot Pizza","after leaving oven")
 end
 function api.sell()
-    note("Selling Hot Pizza")
+    note("Moving to Merchant with Hot Pizza")
     equip("Hot Pizza")
     local npcs=workspace:FindFirstChild("NPCS")
     local merchant=npcs and npcs:FindFirstChild("Merchant")
@@ -541,36 +567,16 @@ function api.sell()
     local pos=merchant:GetPivot().Position
     travel(pos+Vector3.new(1.59,2.8,-2.07),pos)
     requireItem("Hot Pizza","after moving to Merchant")
-    waitFor(function() return not panelOpen("OvercookedProcessorContainer") end,10,
-        "Oven panel stayed open at Merchant")
-    local function sellButton()
-        local root=panel("ProximityPromptDialog")
-        if not root then return end
-        for _, b in ipairs(root:GetDescendants()) do
-            if b:IsA("TextButton") and visible(b) and b.Text:match("^Sell for %d+ credits$") then return b end
-        end
-    end
-    local p=merchant:FindFirstChildWhichIsA("ProximityPrompt",true)
-    assert(p,"Merchant prompt missing")
-    trigger(p,sellButton,"Talk to Merchant")
-    local b=sellButton()
-    note(b.Text)
+    local root=player.Character:FindFirstChild("HumanoidRootPart")
+    assert(root and (root.Position-pos).Magnitude<=7,"Not close enough to Merchant")
     local remote=game:GetService("ReplicatedStorage"):FindFirstChild("BLINK_RELIABLE_REMOTE")
-    assert(remote and remote:IsA("RemoteEvent"),"Captured sale remote unavailable")
-    -- Exact observed packet. Its sale meaning is still being verified.
-    -- Send once, only while holding Hot Pizza at Merchant with a sell option.
-    requireItem("Hot Pizza","before captured sale attempt")
+    assert(remote and remote:IsA("RemoteEvent"),"Sale remote unavailable")
     local packet=buffer.fromstring(string.char(0x1e,0x02,0x00,0x00,0x00))
-    note("Trying captured packet once: 1e02000000")
+    note("Sending sale packet once")
     remote:FireServer(packet,{})
-    if waitFor(function() return not tool("Hot Pizza") end,8) then
-        note("Hot Pizza removed after captured packet. Credit change not checked.")
-        return
-    end
-    note("Captured packet did not confirm a sale; using the visible sell option")
-    trigger(p,sellButton,"Reopen Merchant")
-    click(sellButton,function() return not tool("Hot Pizza") end,"Sell Hot Pizza")
-    note("Hot Pizza removed after sell button. Credit change not checked.")
+    waitFor(function() return not tool("Hot Pizza") end,10,
+        "Sale not confirmed: Hot Pizza is still in inventory. Packet was not repeated.")
+    note("Hot Pizza removed after sale packet. Credit change not checked.")
 end
 -- ENGINE BEGIN
 local function runPizza(actions)
