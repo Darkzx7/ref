@@ -23,6 +23,12 @@ local function connect(signal, fn)
 end
 local function rounded(n) return math.floor(n * 1000 + 0.5) / 1000 end
 local function stamp() return rounded(os.clock() - origin) end
+local objectIds = setmetatable({}, {__mode="k"})
+local nextObjectId = 0
+local function objectId(obj)
+    if not objectIds[obj] then nextObjectId += 1; objectIds[obj] = nextObjectId end
+    return objectIds[obj]
+end
 local function pathOf(obj)
     local parts, at = {}, obj
     for _ = 1, 64 do
@@ -30,7 +36,16 @@ local function pathOf(obj)
         table.insert(parts, 1, at.Name)
         at = at.Parent
     end
-    return { type = "Instance", class = obj.ClassName, path = table.concat(parts, "."), parts = parts }
+    local result = {type="Instance", id=objectId(obj), class=obj.ClassName, path=table.concat(parts,"."), parts=parts}
+    local at = obj
+    while at and at ~= workspace do
+        if at.Parent and at.Parent.Name == "Snookers" then
+            result.tableId = objectId(at)
+            break
+        end
+        at = at.Parent
+    end
+    return result
 end
 local function xyz(v) return { rounded(v.X), rounded(v.Y), rounded(v.Z) } end
 local function encode(value, depth, seen)
@@ -96,10 +111,22 @@ local function drain()
         end
     end
 end
+local function useful(remote, args)
+    if type(args[1]) == "string" and args[1]:lower():find("snooker",1,true) then return true end
+    if remote.Name:find("BLINK",1,true) then return true end
+    return remote.Name:lower():find("snooker",1,true) ~= nil
+end
+local lastAim = setmetatable({}, {__mode="k"})
 local sink = function(remote, method, ...)
     if not running or not alive then return end
     if #queue >= 250 then dropped += 1; return end
     local args = table.pack(...)
+    if not useful(remote,args) then return end
+    if args[1] == "SnookerAim" and typeof(args[2]) == "Instance" then
+        local now = os.clock()
+        if now - (lastAim[args[2]] or 0) < 0.25 then return end
+        lastAim[args[2]] = now
+    end
     enqueue("remote", {remote=remote, method=method, n=args.n,
         args=snapshot(args,0,{}, {n=0})})
 end
@@ -136,7 +163,7 @@ local function relevant(obj)
     return false
 end
 local function track(obj)
-    if #tracked >= 100 or not obj:IsA("BasePart") or not relevant(obj) then return end
+    if #tracked >= 250 or not obj:IsA("BasePart") or not relevant(obj) then return end
     if not table.find(tracked,obj) then tracked[#tracked+1] = obj end
 end
 local function sample(full)
@@ -149,11 +176,93 @@ local function sample(full)
             if full or not lastPositions[part] or (pos-lastPositions[part]).Magnitude > 0.05 then
                 lastPositions[part] = pos
                 parts[#parts+1] = {object=part, position=pos, velocity=part.AssemblyLinearVelocity,
-                    size=full and part.Size or nil, color=full and part.Color or nil}
+                    size=full and part.Size or nil, color=full and part.Color or nil,
+                    cframe=full and part.CFrame or nil}
             end
         end
     end
     if #parts > 0 then enqueue("table state",parts) end
+end
+-- Receive copies of server events without replacing existing callbacks.
+local incomingSeen = setmetatable({}, {__mode="k"})
+local Replicated = game:GetService("ReplicatedStorage")
+local function watchRemote(obj)
+    if incomingSeen[obj] or not (obj:IsA("RemoteEvent") or obj:IsA("UnreliableRemoteEvent")) then return end
+    if obj.Name ~= "RemoteEvent" and obj.Name ~= "UnreliableRemoteEvent"
+        and not obj.Name:find("BLINK",1,true) and not obj.Name:lower():find("snooker",1,true) then return end
+    incomingSeen[obj] = true
+    connect(obj.OnClientEvent,function(...)
+        if not running or not alive then return end
+        local args=table.pack(...)
+        if not useful(obj,args) and obj.Name ~= "RemoteEvent" then return end
+        pcall(function() enqueue("incoming",{remote=obj,n=args.n,args=snapshot(args,0,{}, {n=0})}) end)
+    end)
+end
+for _,obj in ipairs(Replicated:GetDescendants()) do watchRemote(obj) end
+connect(Replicated.DescendantAdded,watchRemote)
+
+local metadataSeen = setmetatable({}, {__mode="k"})
+local function describe(obj)
+    local entry={object=obj,attributes=obj:GetAttributes()}
+    if obj:IsA("Model") then entry.pivot=obj:GetPivot() end
+    if obj:IsA("BasePart") then entry.cframe=obj.CFrame; entry.size=obj.Size end
+    if obj:IsA("ValueBase") then pcall(function() entry.value=obj.Value end) end
+    return entry
+end
+local function watchMetadata(obj)
+    if metadataSeen[obj] then return end
+    metadataSeen[obj]=true
+    connect(obj.AttributeChanged,function(name)
+        enqueue("attribute",{object=obj,name=name,value=obj:GetAttribute(name)})
+    end)
+    if obj:IsA("ValueBase") then
+        connect(obj.Changed,function(value) enqueue("value",{object=obj,value=value}) end)
+    end
+end
+local function captureMetadata()
+    local tables=workspace:FindFirstChild("Snookers")
+    if tables then
+        local objects={tables}
+        for _,obj in ipairs(tables:GetDescendants()) do objects[#objects+1]=obj end
+        for i,obj in ipairs(objects) do
+            if not alive or not running then return end
+            watchMetadata(obj)
+            enqueue("table object",describe(obj))
+            if i%40==0 then task.wait(0.16) end
+        end
+    end
+    watchMetadata(player)
+    enqueue("player state",describe(player))
+    local modules={}
+    for _,obj in ipairs(Replicated:GetDescendants()) do
+        if obj:IsA("ModuleScript") and relevant(obj) then modules[#modules+1]=obj end
+    end
+    enqueue("module paths",modules)
+end
+if workspace:FindFirstChild("Snookers") then
+    connect(workspace.Snookers.DescendantAdded,function(obj)
+        watchMetadata(obj)
+        enqueue("table object",describe(obj))
+    end)
+end
+local lastUI=""
+local function sampleUI(ignoredGui)
+    local list={}
+    local pg=player:FindFirstChildOfClass("PlayerGui")
+    if not pg then return end
+    for _,obj in ipairs(pg:GetDescendants()) do
+        if not obj:IsDescendantOf(ignoredGui) and relevant(obj) and (obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("Frame") or obj:IsA("ScreenGui")) then
+            local row={object=pathOf(obj)}
+            if obj:IsA("GuiObject") then row.visible=obj.Visible end
+            if obj:IsA("ScreenGui") then row.enabled=obj.Enabled end
+            if obj:IsA("TextLabel") or obj:IsA("TextButton") then row.text=obj.Text end
+            row.attributes=obj:GetAttributes()
+            list[#list+1]=row
+            if #list>=120 then break end
+        end
+    end
+    local ok,key=pcall(function() return Http:JSONEncode(encode(list)) end)
+    if ok and key~=lastUI then lastUI=key; enqueue("snooker ui",list) end
 end
 local function context()
     local camera = workspace.CurrentCamera
@@ -194,7 +303,7 @@ connect(UIS.InputBegan,function(input,p) inputEvent("input began",input,p) end)
 connect(UIS.InputEnded,function(input,p) inputEvent("input ended",input,p) end)
 
 local gui = Instance.new("ScreenGui")
-gui.Name="SnookerRecorder"; gui.ResetOnSpawn=false; gui.DisplayOrder=999
+gui.Name="SnookerRecorder2"; gui.ResetOnSpawn=false; gui.DisplayOrder=999
 gui.Parent=player:WaitForChild("PlayerGui")
 local function create(class,props,parent)
     local obj=Instance.new(class)
@@ -208,7 +317,7 @@ local frame=create("Frame",{Size=UDim2.fromOffset(310,194),Position=UDim2.new(0.
 round(frame,10)
 create("UIStroke",{Color=Color3.fromRGB(65,68,74),Transparency=0.3},frame)
 local title=create("TextLabel",{Size=UDim2.new(1,-90,0,36),Position=UDim2.fromOffset(12,0),
-    Text="snooker recorder",TextSize=14,Font=Enum.Font.GothamMedium,TextXAlignment=Enum.TextXAlignment.Left,
+    Text="snooker recorder 2",TextSize=14,Font=Enum.Font.GothamMedium,TextXAlignment=Enum.TextXAlignment.Left,
     TextColor3=Color3.fromRGB(235,237,240),BackgroundTransparency=1,Active=true},frame)
 local body=create("Frame",{Position=UDim2.fromOffset(12,42),Size=UDim2.new(1,-24,1,-48),BackgroundTransparency=1},frame)
 local label=create("TextLabel",{Size=UDim2.new(1,0,0,42),BackgroundTransparency=1,TextWrapped=true,
@@ -234,9 +343,9 @@ end
 local function report(text) note=text; refresh() end
 local function export()
     drain()
-    return Http:JSONEncode({version="Snooker recorder 1",place=game.PlaceId,exported=os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    return Http:JSONEncode({version="Snooker recorder 2",place=game.PlaceId,exported=os.date("!%Y-%m-%dT%H:%M:%SZ"),
         outgoingHook=hookAvailable,dropped=dropped,records=records,
-        note="Outgoing namecalls only; cached/direct calls may be missed. No replay or server-success inference. Object discovery uses names; buffers over 32768 bytes are truncated."})
+        note="Outgoing calls plus filtered server events. Instance IDs distinguish same-named tables in this session. Aim samples throttled to 4Hz. Direct/cached calls may be missed. No replay or server-success inference."})
 end
 connect(start.Activated,function()
     if running then sample(true); running=false; drain(); report("stopped"); return end
@@ -250,7 +359,7 @@ connect(start.Activated,function()
             track(obj)
             if i%300==0 then task.wait() end
         end
-        sample(true); enqueue("started",context())
+        sample(true); enqueue("started",context()); captureMetadata(); sampleUI(gui)
         report(hookAvailable and "manual actions only" or "executor has no remote hook")
     end)
 end)
@@ -304,10 +413,13 @@ connect(close.Activated,shutdown)
 connect(gui.Destroying,shutdown)
 refresh()
 task.spawn(function()
-    local lastSample=0
+    local lastSample, lastUISample=0,0
     while alive do
         task.wait(0.15)
         if running and os.clock()-lastSample>=0.4 then lastSample=os.clock(); sample(false) end
+        if running and os.clock()-lastUISample>=0.8 then
+            lastUISample=os.clock(); pcall(sampleUI,gui)
+        end
         drain()
         if #records>=LIMIT then note="log full - copy or save" end
         refresh()
