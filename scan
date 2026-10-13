@@ -14,7 +14,7 @@ local mode,aimTime="legit",2
 local connections,logs={},{}
 local Physics,Config,Client,Blink,nativeShot,simulations,pointerFn
 local function log(text)
-    logs[#logs+1]=os.date("%H:%M:%S").." "..text
+    logs[#logs+1]=os.date("%H:%M:%S").." ["..mode.."] "..text
     if #logs>80 then table.remove(logs,1) end
 end
 local function connect(signal,fn)
@@ -31,7 +31,7 @@ end
 local function corner(o) make("UICorner",{CornerRadius=UDim.new(0,7)},o) end
 local frame=make("Frame",{Size=UDim2.fromOffset(308,238),Position=UDim2.new(.5,-154,.2,0),BackgroundColor3=Color3.fromRGB(22,23,26),BorderSizePixel=0},gui)
 corner(frame)
-local title=make("TextLabel",{Text="snooker",TextSize=15,Font=Enum.Font.GothamMedium,TextColor3=Color3.fromRGB(232,233,237),BackgroundTransparency=1,Position=UDim2.fromOffset(12,0),Size=UDim2.fromOffset(210,36),TextXAlignment=Enum.TextXAlignment.Left,Active=true},frame)
+local title=make("TextLabel",{Text="snooker v2",TextSize=15,Font=Enum.Font.GothamMedium,TextColor3=Color3.fromRGB(232,233,237),BackgroundTransparency=1,Position=UDim2.fromOffset(12,0),Size=UDim2.fromOffset(210,36),TextXAlignment=Enum.TextXAlignment.Left,Active=true},frame)
 local body=make("Frame",{BackgroundTransparency=1,Position=UDim2.fromOffset(12,40),Size=UDim2.fromOffset(284,188)},frame)
 local function button(text,x,y,w,parent)
     local b=make("TextButton",{Text=text,Position=UDim2.fromOffset(x,y),Size=UDim2.fromOffset(w,32),BackgroundColor3=Color3.fromRGB(42,44,49),TextColor3=Color3.fromRGB(235,235,239),TextSize=12,Font=Enum.Font.GothamMedium,BorderSizePixel=0},parent or body)
@@ -119,7 +119,7 @@ end)
 connect(copy.Activated,function()
     local clip=setclipboard or toclipboard
     if type(clip)~="function" then say("clipboard unavailable");return end
-    local ok,err=pcall(clip,"Snooker auto v1 | "..mode.."\n"..table.concat(logs,"\n"))
+    local ok,err=pcall(clip,"Snooker auto v2 | "..mode.."\n"..table.concat(logs,"\n"))
     if not ok then say(tostring(err)) end
 end)
 local ready=false
@@ -180,128 +180,287 @@ ready=true;say("join a table and place the white ball, then enable")
 
 -- SOLVER BEGIN
 local function pointSegment(p,a,b)
-    local delta=b-a
-    local t=delta:Dot(delta)>1e-9 and math.clamp((p-a):Dot(delta)/delta:Dot(delta),0,1) or 0
-    return (p-(a+delta*t)).Magnitude
+    local v=b-a
+    local t=v:Dot(v)>1e-12 and math.clamp((p-a):Dot(v)/v:Dot(v),0,1) or 0
+    return (p-a-v*t).Magnitude
 end
-local function legalTargets(snap, team, solids)
+local function legalTargets(snap,team,solids)
     local allowed={}
     local assigned=solids==1 or solids==2
-    local low,high=1,15
-    if assigned then low,high=team==solids and 1 or 9,team==solids and 7 or 15 end
+    local lo,hi=1,15
+    if assigned then lo,hi=team==solids and 1 or 9,team==solids and 7 or 15 end
     for _,b in ipairs(snap) do
-        if not b.pocketed and b.id~=0 and b.id~=8 and b.id>=low and b.id<=high then allowed[b.id]=true end
+        if not b.pocketed and b.id~=0 and b.id~=8 and b.id>=lo and b.id<=hi then allowed[b.id]=true end
     end
-    if assigned and next(allowed)==nil then allowed[8]=true end
+    if assigned and not next(allowed) then allowed[8]=true end
     return allowed
 end
 local function newState(frame,snap)
-    local state=Physics.NewState(frame)
-    for _,b in ipairs(snap) do Physics.AddBall(state,b.id,b.pos).Pocketed=b.pocketed end
-    return state
+    local s=Physics.NewState(frame)
+    for _,b in ipairs(snap) do Physics.AddBall(s,b.id,b.pos).Pocketed=b.pocketed end
+    return s
+end
+-- Backward unfolding includes the cushion's normal restitution, rather than an ideal mirror.
+local function railPath(a,b,rails,frame,pockets)
+    local e=Config.GetRestitution()
+    local unfolded=b
+    for i=#rails,1,-1 do
+        local r=rails[i]
+        if r.axis==1 then unfolded=Vector3.new(r.k+(r.k-unfolded.X)/e,unfolded.Y,0)
+        else unfolded=Vector3.new(unfolded.X,r.k+(r.k-unfolded.Y)/e,0) end
+    end
+    local delta=unfolded-a
+    if delta.Magnitude<1e-7 then return end
+    local dir=delta.Unit
+    local path={a}
+    local at=a
+    local length=0
+    local l,w=frame.HalfLong-frame.Diameter*.5,frame.HalfShort-frame.Diameter*.5
+    for _,r in ipairs(rails) do
+        local denominator=r.axis==1 and dir.X or dir.Y
+        if math.abs(denominator)<1e-7 then return end
+        local distance=(r.k-(r.axis==1 and at.X or at.Y))/denominator
+        if distance<=1e-5 then return end
+        local hit=at+dir*distance
+        if math.abs(hit.X)>l+1e-4 or math.abs(hit.Y)>w+1e-4 then return end
+        for _,p in ipairs(pockets) do
+            if (p-hit).Magnitude<frame.Diameter*.5*Config.GetPocketRadiusFactor()+.02 then return end
+        end
+        length+=distance;path[#path+1]=hit;at=hit
+        dir=(r.axis==1 and Vector3.new(-dir.X*e,dir.Y,0) or Vector3.new(dir.X,-dir.Y*e,0)).Unit
+    end
+    local final=b-at
+    if final.Magnitude<1e-6 or final.Unit:Dot(dir)<.999 then return end
+    length+=final.Magnitude;path[#path+1]=b
+    return path,length
 end
 local function candidates(frame,snap,allowed)
     local white
     for _,b in ipairs(snap) do if b.id==0 and not b.pocketed then white=b end end
     if not white then return {} end
-    local pockets=Physics.NewState(frame).Pockets
-    local result={}
     local d=frame.Diameter
+    local pockets=Physics.NewState(frame).Pockets
+    local l,w=frame.HalfLong-d*.5,frame.HalfShort-d*.5
+    local rails={{axis=1,k=l},{axis=1,k=-l},{axis=2,k=w},{axis=2,k=-w}}
+    local groups={direct={},bank={},kick={},double={},combo={},safety={}}
     local function clear(a,b,ignoreA,ignoreB)
-        for _,other in ipairs(snap) do
-            if not other.pocketed and other.id~=ignoreA and other.id~=ignoreB
-                and pointSegment(other.pos,a,b)<d*1.02 then return false end
+        for _,o in ipairs(snap) do
+            if not o.pocketed and o.id~=ignoreA and o.id~=ignoreB and pointSegment(o.pos,a,b)<d*.995 then return false end
         end
         return true
+    end
+    local function routeClear(path,id,other,cue)
+        for i=1,#path-1 do
+            local second=cue and (i==#path-1 and id or nil) or other
+            if not clear(path[i],path[i+1],cue and 0 or id,second) then return false end
+        end
+        return true
+    end
+    local function add(target,objectPath,objectDistance,cueRails,kind,second,exitCos)
+        local objectDir=(objectPath[2]-objectPath[1]).Unit
+        local ghost=target.pos-objectDir*d
+        if math.abs(ghost.X)>l or math.abs(ghost.Y)>w then return end
+        local cuePath,cueDistance
+        if #cueRails>0 then cuePath,cueDistance=railPath(white.pos,ghost,cueRails,frame,pockets)
+        else cuePath={white.pos,ghost};cueDistance=(ghost-white.pos).Magnitude end
+        if not cuePath or cueDistance<1e-6 then return end
+        local arrival=(cuePath[#cuePath]-cuePath[#cuePath-1]).Unit
+        local cosine=arrival:Dot(objectDir)
+        if cosine<.16 or not routeClear(cuePath,target.id,nil,true) then return end
+        if not routeClear(objectPath,target.id,second or 0,false) then return end
+        local railCount=#cueRails+#objectPath-2
+        local energy=cueDistance+(objectDistance+d*4)/(cosine*cosine*(exitCos or 1)^2)
+        energy/=math.max(.25,Config.GetRestitution()^(railCount*2))
+        local base=math.sqrt(2*Config.GetDecel()*energy)/Config.GetMaxImpulse()
+        if base>1.2 then return end
+        local start=(cuePath[2]-white.pos).Unit
+        groups[kind][#groups[kind]+1]={id=target.id,dir=(frame.Long*start.X+frame.Short*start.Y).Unit,
+            base=base,rank=cosine*4-cueDistance*.04-objectDistance*.035-railCount*.28,
+            kind=kind,cuePath=cuePath,objectPath=objectPath,ghost=ghost,target=target.pos,pocket=objectPath[#objectPath]}
     end
     for _,target in ipairs(snap) do
         if target.pocketed or not allowed[target.id] then continue end
         for _,pocket in ipairs(pockets) do
-            local toward=pocket-target.pos
-            if toward.Magnitude<1e-5 then continue end
-            local ghost=target.pos-toward.Unit*d
-            local aim=ghost-white.pos
-            if aim.Magnitude<1e-5 then continue end
-            local cosine=aim.Unit:Dot(toward.Unit)
-            if cosine<.24 or math.abs(ghost.X)>frame.HalfLong-d*.5
-                or math.abs(ghost.Y)>frame.HalfShort-d*.5 then continue end
-            if not clear(white.pos,ghost,0,target.id) or not clear(target.pos,pocket,target.id,0) then continue end
-            local distance=aim.Magnitude+toward.Magnitude/(cosine*cosine)+d*3
-            local base=math.sqrt(2*Config.GetDecel()*distance)/Config.GetMaxImpulse()
-            result[#result+1]={id=target.id,dir=(frame.Long*aim.Unit.X+frame.Short*aim.Unit.Y).Unit,
-                pocket=pocket,ghost=ghost,target=target.pos,base=base,rank=cosine*4-distance*.04}
-        end
-    end
-    table.sort(result,function(a,b) return a.rank>b.rank end)
-    -- A legal direct contact remains available when every pot is obstructed.
-    if #result==0 then
-        for _,target in ipairs(snap) do
-            if target.pocketed or not allowed[target.id] then continue end
-            local delta=target.pos-white.pos
-            if delta.Magnitude<d or not clear(white.pos,target.pos,0,target.id) then continue end
-            result[#result+1]={id=target.id,dir=(frame.Long*delta.Unit.X+frame.Short*delta.Unit.Y).Unit,
-                ghost=target.pos,target=target.pos,base=math.sqrt(2*Config.GetDecel()*(delta.Magnitude+d*4))/Config.GetMaxImpulse(),rank=-delta.Magnitude}
-        end
-        table.sort(result,function(a,b) return a.rank>b.rank end)
-    end
-    return result
-end
-local function evaluate(frame,snap,allowed,candidate,power,checkpoint)
-    local state=newState(frame,snap)
-    Physics.ApplyStrike(state,power,candidate.dir)
-    local pocketed={}
-    local firstHit
-    local dt=Config.GetFixedDt()
-    for step=1,math.ceil(Config.GetMaxSimTime()/dt) do
-        local cue=Physics.GetBall(state,0)
-        if cue and not firstHit and not cue.Pocketed then
-            local endPos=cue.Pos+cue.Vel*dt
-            local earliest=math.huge
-            for _,ball in ipairs(state.Balls) do
-                if ball.Id==0 or ball.Pocketed then continue end
-                -- Earliest swept circle contact during this fixed step.
-                local v=endPos-cue.Pos
-                local rel=cue.Pos-ball.Pos
-                local aa=v:Dot(v)
-                local bb=2*rel:Dot(v)
-                local cc=rel:Dot(rel)-frame.Diameter^2
-                local disc=bb*bb-4*aa*cc
-                if aa>1e-12 and disc>=0 then
-                    local t=(-bb-math.sqrt(disc))/(2*aa)
-                    if t>=-1e-5 and t<=1 and t<earliest then earliest=t; firstHit=ball.Id end
+            if (pocket-target.pos).Magnitude<1e-6 then continue end
+            local direct={target.pos,pocket}
+            local length=(pocket-target.pos).Magnitude
+            add(target,direct,length,{},"direct")
+            for _,r in ipairs(rails) do
+                local bank,dist=railPath(target.pos,pocket,{r},frame,pockets)
+                if bank then add(target,bank,dist,{},"bank") end
+                add(target,direct,length,{r},"kick")
+            end
+            for i,r1 in ipairs(rails) do
+                for j,r2 in ipairs(rails) do
+                    if i==j then continue end
+                    local bank,dist=railPath(target.pos,pocket,{r1,r2},frame,pockets)
+                    if bank then add(target,bank,dist,{},"double") end
+                    add(target,direct,length,{r1,r2},"double")
+                end
+            end
+            -- Legal ball-to-ball combination: the first contact and the potted ball are ours.
+            for _,other in ipairs(snap) do
+                if other.id==target.id or other.pocketed or not allowed[other.id] then continue end
+                local exit=pocket-other.pos
+                if exit.Magnitude<1e-6 then continue end
+                local nextGhost=other.pos-exit.Unit*d
+                local incoming=nextGhost-target.pos
+                if incoming.Magnitude<d then continue end
+                local cosine=incoming.Unit:Dot(exit.Unit)
+                if cosine>.25 and clear(other.pos,pocket,other.id,0) then
+                    add(target,{target.pos,nextGhost},incoming.Magnitude+exit.Magnitude/(cosine*cosine),{},"combo",other.id)
                 end
             end
         end
-        local events=Physics.Step(state)
-        for _,id in ipairs(events.Pocketed) do pocketed[id]=true end
-        if step%12==0 and not checkpoint() then return end
-        if Physics.Settled(state) then
-            if pocketed[0] or (pocketed[8] and not allowed[8]) or not firstHit or not allowed[firstHit] then return end
-            local score=0
-            for id in pairs(pocketed) do score+=allowed[id] and 100 or -140 end
-            return score-power*2+(candidate.rank or 0)*.01
+        -- Recovery contacts also go around blockers via one or two cushions.
+        local recoveryRoutes={{}}
+        for i,r1 in ipairs(rails) do
+            recoveryRoutes[#recoveryRoutes+1]={r1}
+            for j,r2 in ipairs(rails) do if i~=j then recoveryRoutes[#recoveryRoutes+1]={r1,r2} end end
         end
-    end
-end
-local function choose(frame,snap,allowed,checkpoint)
-    local best,bestScore=nil,-math.huge
-    local options=candidates(frame,snap,allowed)
-    for i=1,math.min(#options,12) do
-        local c=options[i]
-        for _,factor in ipairs({1.08,.9,1.3}) do
-            if not checkpoint() then return best end
-            local power=math.clamp(c.base*factor,.06,1)
-            local score=evaluate(frame,snap,allowed,c,power,checkpoint)
-            if score and score>bestScore then
-                bestScore=score
-                best={id=c.id,dir=c.dir,power=power,ghost=c.ghost,target=c.target,pocket=c.pocket,score=score}
+        for _,rs in ipairs(recoveryRoutes) do
+            local path,distance
+            if #rs==0 then path={white.pos,target.pos};distance=(target.pos-white.pos).Magnitude
+            else path,distance=railPath(white.pos,target.pos,rs,frame,pockets) end
+            if path and distance>d and routeClear(path,target.id,nil,true) then
+                local dir=(path[2]-path[1]).Unit
+                groups.safety[#groups.safety+1]={id=target.id,dir=(frame.Long*dir.X+frame.Short*dir.Y).Unit,
+                    kind="safety",rank=-distance,base=math.max(.24,math.sqrt(2*Config.GetDecel()*(distance+d*12))/Config.GetMaxImpulse()),
+                    cuePath=path,objectPath={},target=target.pos,ghost=target.pos}
             end
         end
-        if bestScore>=99 and i>=3 then break end
     end
-    return best
+    for _,g in pairs(groups) do table.sort(g,function(a,b)return a.rank>b.rank end) end
+    local result={}
+    -- Each route family gets turns; direct candidates cannot starve cushions or combinations.
+    for index=1,24 do
+        for _,kind in ipairs({"direct","bank","kick","double","combo","safety"}) do
+            if groups[kind][index] then result[#result+1]=groups[kind][index] end
+        end
+    end
+    return result
+end
+local function rollout(frame,snap,allowed,c,power,angle)
+    local dir=c.dir
+    if angle and angle~=0 then
+        local a=math.atan2(dir.Z,dir.X)+angle
+        dir=Vector3.new(math.cos(a),0,math.sin(a))
+    end
+    local s=newState(frame,snap)
+    Physics.ApplyStrike(s,power,dir)
+    return {state=s,frame=frame,snap=snap,allowed=allowed,c=c,power=power,dir=dir,steps=0,pocketed={},clearance=math.huge}
+end
+local function rolloutStep(r)
+    local s=r.state
+    local cue=Physics.GetBall(s,0)
+    local before=cue and cue.Pos
+    local event=Physics.Step(s)
+    r.steps+=1
+    for _,id in ipairs(event.Pocketed) do r.pocketed[id]=true end
+    -- Confirm a real transfer of motion, not a projected contact beyond a cushion.
+    if not r.firstHit and before then
+        local nearest,chosen=math.huge,nil
+        for _,b in ipairs(s.Balls) do
+            if b.Id~=0 and b.Vel.Magnitude>1e-7 then
+                local distance=(b.Pos-before).Magnitude
+                if distance<nearest then nearest,chosen=distance,b.Id end
+            end
+        end
+        if chosen then r.firstHit=chosen end
+    end
+    if cue then
+        for _,p in ipairs(s.Pockets) do r.clearance=math.min(r.clearance,(cue.Pos-p).Magnitude-s.PocketRadius) end
+    end
+    if r.pocketed[0] or (r.pocketed[8] and not r.allowed[8]) or (r.firstHit and not r.allowed[r.firstHit]) then return true end
+    if Physics.Settled(s) then
+        if not r.firstHit or r.clearance<r.frame.Diameter*.04 then return true end
+        local own,opponent=0,0
+        for id in pairs(r.pocketed) do
+            if r.allowed[id] then own+=1 else opponent+=1 end
+        end
+        if opponent>0 then return true end
+        r.result={own=own,score=own*1000+math.min(r.clearance,2)*5-r.power*.3,clearance=r.clearance}
+        return true
+    end
+    return r.steps>=math.ceil(Config.GetMaxSimTime()/Config.GetFixedDt())
+end
+local function createSearch(frame,snap,allowed)
+    local options=candidates(frame,snap,allowed)
+    return {frame=frame,snap=snap,allowed=allowed,options=options,index=1,wave=1,completed=0,total=0,validated=0}
+end
+local function makeShot(c,power,result,tests)
+    return {id=c.id,dir=c.dir,power=power,kind=c.kind,cuePath=c.cuePath,objectPath=c.objectPath,
+        ghost=c.ghost,target=c.target,pocket=c.pocket,score=result.score,own=result.own,verified=tests or 0}
+end
+local function advanceSearch(search,checkpoint)
+    local factors={1.22,1.5,1.85,1.04,.9,2.25,1.5,1.5,1.85,1.85,1.22,1.22}
+    local angles={0,0,0,0,0,0,math.rad(.35),-math.rad(.35),math.rad(.7),-math.rad(.7),math.rad(.15),-math.rad(.15)}
+    while not search.done do
+        if not checkpoint() then return search.best end
+        if not search.active then
+            local proposal=search.proposal
+            if proposal then
+                local variants={{.94,0},{1.06,0},{1,-math.rad(.2)},{1,math.rad(.2)}}
+                local variant=variants[proposal.next]
+                if not variant then
+                    local shot=makeShot(proposal.c,proposal.power,proposal.result,4)
+                    search.validated+=1;search.proposal=nil
+                    if proposal.safety then
+                        if not search.safety or shot.score>search.safety.score then search.safety=shot end
+                        continue
+                    end
+                    if not search.best or shot.score>search.best.score then search.best=shot end
+                    return search.best
+                end
+                search.active=rollout(search.frame,search.snap,search.allowed,proposal.c,math.clamp(proposal.power*variant[1],.06,1),variant[2])
+                search.checking=true
+            else
+                if search.wave>#factors or #search.options==0 then search.done=true;break end
+                local c=search.options[search.index]
+                local power=math.clamp(c.base*factors[search.wave],.06,1)
+                local angle=angles[search.wave]
+                search.index+=1
+                if search.index>#search.options then search.index=1;search.wave+=1 end
+                search.active=rollout(search.frame,search.snap,search.allowed,c,power,angle)
+                search.checking=false
+            end
+        end
+        local finished=rolloutStep(search.active)
+        if finished then
+            local r=search.active
+            search.active=nil;search.completed+=1
+            if search.checking then
+                local proposal=search.proposal
+                if not r.result or r.result.own<proposal.result.own then search.proposal=nil
+                else
+                    proposal.result.score=math.min(proposal.result.score,r.result.score)
+                    proposal.next+=1
+                end
+            elseif r.result and r.result.own>0 then
+                local aimed=table.clone(r.c);aimed.dir=r.dir
+                search.proposal={c=aimed,power=r.power,result=r.result,next=1}
+            elseif r.result and r.c.kind=="safety" then
+                -- Kept separately; never advertise simple contact as a verified pot.
+                if not search.safety or r.result.score>search.safety.score then
+                    local aimed=table.clone(r.c);aimed.dir=r.dir
+                    search.proposal={c=aimed,power=r.power,result=r.result,next=1,safety=true}
+                end
+            end
+        end
+    end
+    return search.best
+end
+local function evaluate(frame,snap,allowed,c,power,checkpoint)
+    local r=rollout(frame,snap,allowed,c,power)
+    repeat if not checkpoint() then return end until rolloutStep(r)
+    return r.result and r.result.score
+end
+local function choose(frame,snap,allowed,checkpoint)
+    return advanceSearch(createSearch(frame,snap,allowed),checkpoint)
 end
 -- SOLVER END
+
+
 
 local function ownTable()
     local folder=workspace:FindFirstChild("Snookers")
@@ -369,14 +528,27 @@ local function drawLine(part,a,b)
     part.Size=Vector3.new(.025,.025,len)
     part.CFrame=CFrame.lookAt((a+b)*.5,b);part.Transparency=.25
 end
+local routeLines={}
+local function clearRoutes()
+    for _,part in ipairs(routeLines) do if part.Parent then part.Transparency=1 end end
+end
+local oldHide=hidePreview
+hidePreview=function() clearRoutes();oldHide() end
 local function previewAim(frameData,snap,shot,dir)
     local from=Physics.LocalToWorld(frameData,snap[1].pos)+Vector3.new(0,.12,0)
-    local distance=(shot.ghost-snap[1].pos).Magnitude
+    local path=shot.cuePath or {snap[1].pos,shot.ghost}
+    local distance=(path[2]-path[1]).Magnitude
     drawLine(aimLine,from,from+dir*distance)
-    if shot.pocket then
-        drawLine(targetLine,Physics.LocalToWorld(frameData,shot.target)+Vector3.new(0,.12,0),
-            Physics.LocalToWorld(frameData,shot.pocket)+Vector3.new(0,.12,0))
-    else targetLine.Transparency=1 end
+    targetLine.Transparency=1
+    clearRoutes()
+    local index=0
+    local function segment(a,b)
+        index+=1
+        if not routeLines[index] then routeLines[index]=line() end
+        drawLine(routeLines[index],Physics.LocalToWorld(frameData,a)+Vector3.new(0,.12,0),Physics.LocalToWorld(frameData,b)+Vector3.new(0,.12,0))
+    end
+    for i=2,#path-1 do segment(path[i],path[i+1]) end
+    for i=1,#(shot.objectPath or {})-1 do segment(shot.objectPath[i],shot.objectPath[i+1]) end
     if pointerFn and type(setup)=="function" and workspace.CurrentCamera then
         local p,visible=workspace.CurrentCamera:WorldToScreenPoint(from-Vector3.new(0,.12,0)+dir*math.max(distance,1))
         if visible then
@@ -385,12 +557,22 @@ local function previewAim(frameData,snap,shot,dir)
         end
     end
 end
+local cachedSearch
 local function turn(t,token)
     local turnEnd=t:GetAttribute("TurnEnds")
     local team=t:GetAttribute("Team1Id")==player.UserId and 1 or 2
     local solids=t:GetAttribute("SolidsTeam")
-    local frameData,snap=capture(t)
-    local allowed=legalTargets(snap,team,solids)
+    local cache=cachedSearch
+    if not cache or cache.table~=t or cache.turn~=turnEnd or cache.solids~=solids or not unchanged(cache.snap) then
+        local frameData,snap=capture(t)
+        cache={table=t,turn=turnEnd,solids=solids,frame=frameData,snap=snap,
+            search=createSearch(frameData,snap,legalTargets(snap,team,solids))}
+        cachedSearch=cache
+    end
+    local frameData,snap=cache.frame,cache.snap
+    if cache.search.done and not cache.search.best and not cache.search.safety then
+        say("no safe route in this layout");return
+    end
     local function valid()
         return alive and enabled and epoch==token and t.Parent
             and t:GetAttribute("TurnEnds")==turnEnd and t:GetAttribute("SolidsTeam")==solids
@@ -398,7 +580,7 @@ local function turn(t,token)
     end
     local available=turnEnd-workspace:GetServerTimeNow()-(mode=="legit" and aimTime or 0)-.75
     if available<.2 then say("not enough time left for this turn");return end
-    local deadline=os.clock()+math.min(2.5,available)
+    local deadline=os.clock()+math.min(2.8,available)
     local lastYield=os.clock()
     local function checkpoint()
         if os.clock()>=deadline or not alive or not enabled or epoch~=token then return false end
@@ -408,11 +590,18 @@ local function turn(t,token)
         end
         return true
     end
-    say("calculating shot...")
-    local shot=choose(frameData,snap,allowed,checkpoint)
+    say(string.format("analyzing routes | %d simulations",cache.search.completed))
+    local shot=advanceSearch(cache.search,checkpoint)
+    if not shot and cache.search.safety and (cache.search.done or turnEnd-workspace:GetServerTimeNow()<(mode=="legit" and aimTime or 0)+3.8) then
+        shot=cache.search.safety
+    end
     if not valid() then hidePreview();return end
-    if not shot then say("no verified shot — adjust manually or wait");return end
-    log(string.format("target %d | power %.3f | predicted score %.2f",shot.id,shot.power,shot.score))
+    if not shot then
+        say(cache.search.done and "no safe route in this layout" or string.format("searching cushions / combinations | %d tested",cache.search.completed))
+        return
+    end
+    log(string.format("%s | target %d | power %.3f | predicted pots %d | %d variation checks",shot.kind,shot.id,shot.power,shot.own,shot.verified))
+    if shot.own==0 then say("recovery contact — no pot predicted") end
     if mode=="legit" then
         say(string.format("aiming at %d | %.1fs",shot.id,aimTime))
         local started=os.clock()
@@ -450,7 +639,7 @@ while alive do
     if not available then hidePreview();say(why or reason);continue end
     -- Recalculate when ball or turn state changes. Avoid constantly repeating an unsolved layout.
     local signature=tostring(t)..":"..tostring(t:GetAttribute("TurnEnds"))
-    if failedState==signature and os.clock()-(failedTime or 0)<1.5 then continue end
+    if failedState==signature and os.clock()-(failedTime or 0)<.15 then continue end
     local success,err=pcall(turn,t,epoch)
     if not success then
         hidePreview();say("planning error: "..tostring(err))
