@@ -1,161 +1,461 @@
--- Standalone module reader: no remote calls, hooks or gameplay changes.
-local Players = game:GetService("Players")
-local RS = game:GetService("ReplicatedStorage")
-local Http = game:GetService("HttpService")
-local UIS = game:GetService("UserInputService")
-local player = Players.LocalPlayer
-assert(player, "Run on the client")
-local pg = player:WaitForChild("PlayerGui")
-local previous = pg:FindFirstChild("SnookerModuleReader")
-if previous then previous:Destroy() end
-local gui = Instance.new("ScreenGui")
-gui.Name = "SnookerModuleReader"
-gui.ResetOnSpawn = false
-gui.DisplayOrder = 999
-gui.Parent = pg
-local connections, workers = {}, {}
-local alive, busy = true, false
-local output = {version="Snooker module reader 1", place=game.PlaceId, modules={}}
-local function connect(signal, fn)
+-- Standalone Mush snooker assistant. Uses the game's live physics and native RunShot.
+-- Join a table and place the white ball normally. No queue manipulation or fabricated results.
+local Players=game:GetService("Players")
+local RS=game:GetService("ReplicatedStorage")
+local Run=game:GetService("RunService")
+local UIS=game:GetService("UserInputService")
+local player=Players.LocalPlayer
+assert(player,"Run on the client")
+local env=type(getgenv)=="function" and getgenv() or _G
+local key="__REF_STANDALONE_SNOOKER_AUTO_V1"
+if type(env[key])=="function" then pcall(env[key]) end
+local alive,enabled,epoch=true,false,0
+local mode,aimTime="legit",2
+local connections,logs={},{}
+local Physics,Config,Client,Blink,nativeShot,simulations,pointerFn
+local function log(text)
+    logs[#logs+1]=os.date("%H:%M:%S").." "..text
+    if #logs>80 then table.remove(logs,1) end
+end
+local function connect(signal,fn)
     local c=signal:Connect(fn); connections[#connections+1]=c; return c
 end
-local function create(class, props, parent)
-    local o=Instance.new(class)
-    for k,v in pairs(props) do o[k]=v end
-    o.Parent=parent
-    return o
+local gui=Instance.new("ScreenGui")
+gui.Name="SnookerAutoStandalone";gui.ResetOnSpawn=false;gui.DisplayOrder=999
+gui.Parent=player:WaitForChild("PlayerGui")
+local function make(class,props,parent)
+    local obj=Instance.new(class)
+    for k,v in pairs(props) do obj[k]=v end
+    obj.Parent=parent;return obj
 end
-local function round(o)
-    create("UICorner",{CornerRadius=UDim.new(0,7)},o)
+local function corner(o) make("UICorner",{CornerRadius=UDim.new(0,7)},o) end
+local frame=make("Frame",{Size=UDim2.fromOffset(308,238),Position=UDim2.new(.5,-154,.2,0),BackgroundColor3=Color3.fromRGB(22,23,26),BorderSizePixel=0},gui)
+corner(frame)
+local title=make("TextLabel",{Text="snooker",TextSize=15,Font=Enum.Font.GothamMedium,TextColor3=Color3.fromRGB(232,233,237),BackgroundTransparency=1,Position=UDim2.fromOffset(12,0),Size=UDim2.fromOffset(210,36),TextXAlignment=Enum.TextXAlignment.Left,Active=true},frame)
+local body=make("Frame",{BackgroundTransparency=1,Position=UDim2.fromOffset(12,40),Size=UDim2.fromOffset(284,188)},frame)
+local function button(text,x,y,w,parent)
+    local b=make("TextButton",{Text=text,Position=UDim2.fromOffset(x,y),Size=UDim2.fromOffset(w,32),BackgroundColor3=Color3.fromRGB(42,44,49),TextColor3=Color3.fromRGB(235,235,239),TextSize=12,Font=Enum.Font.GothamMedium,BorderSizePixel=0},parent or body)
+    corner(b);return b
 end
-local frame=create("Frame",{Size=UDim2.fromOffset(308,164),Position=UDim2.new(.5,-154,.3,0),BackgroundColor3=Color3.fromRGB(23,24,27),BorderSizePixel=0},gui)
-round(frame)
-local title=create("TextLabel",{Text="snooker modules",Font=Enum.Font.GothamMedium,TextSize=14,TextColor3=Color3.fromRGB(235,235,235),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Position=UDim2.fromOffset(12,0),Size=UDim2.fromOffset(210,36),Active=true},frame)
-local body=create("Frame",{BackgroundTransparency=1,Position=UDim2.fromOffset(12,40),Size=UDim2.fromOffset(284,112)},frame)
-local status=create("TextLabel",{Text="ready — read once, then save",TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,TextColor3=Color3.fromRGB(185,188,196),Font=Enum.Font.Gotham,TextSize=12,BackgroundTransparency=1,Size=UDim2.fromOffset(284,62)},body)
-local function button(text,x,width,parent,y)
-    local b=create("TextButton",{Text=text,Size=UDim2.fromOffset(width,32),Position=UDim2.fromOffset(x,y or 74),BackgroundColor3=Color3.fromRGB(42,44,49),TextColor3=Color3.fromRGB(235,235,235),Font=Enum.Font.GothamMedium,TextSize=12,BorderSizePixel=0},parent or body)
-    round(b); return b
+local toggle=button("auto: off",0,0,138)
+local modeButton=button("mode: legit",146,0,138)
+make("TextLabel",{Text="aim time (seconds)",TextSize=12,Font=Enum.Font.Gotham,TextColor3=Color3.fromRGB(186,189,198),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Position=UDim2.fromOffset(2,43),Size=UDim2.fromOffset(196,30)},body)
+local delayBox=make("TextBox",{Text="2",ClearTextOnFocus=false,TextSize=13,Font=Enum.Font.Gotham,TextColor3=Color3.fromRGB(235,235,239),BackgroundColor3=Color3.fromRGB(35,37,42),BorderSizePixel=0,Position=UDim2.fromOffset(216,43),Size=UDim2.fromOffset(68,30)},body)
+corner(delayBox)
+local status=make("TextLabel",{Text="loading modules...",TextWrapped=true,TextSize=12,Font=Enum.Font.Gotham,TextColor3=Color3.fromRGB(186,189,198),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Position=UDim2.fromOffset(0,83),Size=UDim2.fromOffset(284,55)},body)
+local copy=button("copy log",0,149,284)
+local mini=button("-",230,2,30,frame)
+local close=button("x",268,2,30,frame)
+local message=""
+local function say(text)
+    if text~=message then message=text;log(text) end
+    if alive then status.Text=text end
 end
-local read=button("read",0,88)
-local copy=button("copy",98,88)
-local save=button("save",196,88)
-local mini=button("-",230,30,frame,2)
-local close=button("x",268,30,frame,2)
-local function report(message) if alive then status.Text=message end end
-local function resolve(parts)
-    local at=RS
-    for _,name in ipairs(parts) do at=at:FindFirstChild(name); if not at then return end end
-    return at
+local preview=Instance.new("Folder")
+preview.Name="SnookerAutoPreview";preview.Parent=workspace
+local function line()
+    return make("Part",{Anchored=true,CanCollide=false,CanTouch=false,CanQuery=false,CastShadow=false,
+        Material=Enum.Material.Neon,Color=Color3.fromRGB(182,212,224),Transparency=1,Size=Vector3.new(.025,.025,1)},preview)
 end
-local function inspect(module, path)
-    local entry={path=path,found=module~=nil}
-    if not module then entry.error="Module not found"; return entry end
-    entry.class=module.ClassName
-    local ok, source=pcall(function() return module.Source end)
-    if ok and type(source)=="string" and #source>0 then
-        entry.source=source; entry.sourceKind="Source property"; return entry
-    end
-    if type(decompile)~="function" then
-        entry.error="Executor does not provide decompile; Source property unavailable"
-        return entry
-    end
-    -- Decompilation does not require or initialize the module.
-    local done, completed, result=false,false,nil
-    local worker=task.spawn(function()
-        local success, value=pcall(decompile,module)
-        completed,result=success,value
-        done=true
-    end)
-    workers[worker]=true
-    local deadline=os.clock()+12
-    while alive and not done and os.clock()<deadline do task.wait(.1) end
-    workers[worker]=nil
-    if not done then
-        pcall(task.cancel,worker)
-        entry.error=alive and "Decompile timed out" or "Reader closed"
-    elseif completed and type(result)=="string" and #result>0 then
-        entry.source=result; entry.sourceKind="Executor decompilation; may be incomplete"
-    else
-        entry.error=tostring(result or "Empty decompiler result")
-    end
-    return entry
+local aimLine,targetLine=line(),line()
+local pointerOwned,pointerBefore=false,nil
+local getups=(debug and debug.getupvalues) or getupvalues
+local setup=(debug and debug.setupvalue) or setupvalue
+local function ups(fn)
+    if type(getups)~="function" then return {} end
+    local ok,result=pcall(getups,fn)
+    return ok and type(result)=="table" and result or {}
 end
-connect(read.Activated,function()
-    if busy then return end
-    busy=true
-    output.modules={}
-    output.exported=os.date("!%Y-%m-%dT%H:%M:%SZ")
-    task.spawn(function()
-        local targets={{"Configuration","Snooker"},{"Modules","SnookerPhysics"},{"Client","Snooker"}}
-        local count=0
-        for _,parts in ipairs(targets) do
-            if not alive then return end
-            local path="ReplicatedStorage."..table.concat(parts,".")
-            report("reading "..parts[1].."."..parts[2].."...")
-            local ok, entry=pcall(inspect,resolve(parts),path)
-            if not ok then entry={path=path,error=tostring(entry)} end
-            output.modules[#output.modules+1]=entry
-            if entry.source then count+=1 end
-        end
-        busy=false
-        report(tostring(count).."/3 source results — save or copy. Decompiler output still needs review.")
-    end)
-end)
-local function export()
-    return Http:JSONEncode(output)
+local function restorePointer()
+    if pointerOwned and pointerFn and type(setup)=="function" then pcall(setup,pointerFn,1,pointerBefore) end
+    pointerOwned=false;pointerBefore=nil
 end
-connect(copy.Activated,function()
-    if busy then report("wait until reading finishes"); return end
-    if #output.modules==0 then report("click read first"); return end
-    local clipboard=setclipboard or toclipboard
-    if type(clipboard)~="function" then report("clipboard unavailable — use save"); return end
-    local ok,err=pcall(function() clipboard(export()) end)
-    report(ok and "copied" or tostring(err))
-end)
-connect(save.Activated,function()
-    if busy then report("wait until reading finishes"); return end
-    if #output.modules==0 then report("click read first"); return end
-    if type(writefile)~="function" then report("writefile unavailable — use copy"); return end
-    local folder=""
-    if type(makefolder)=="function" and type(isfolder)=="function" then
-        local ok=pcall(function()
-            for _,dir in ipairs({"True Ref","True Ref/Scans","True Ref/Scans/snooker"}) do
-                if not isfolder(dir) then makefolder(dir) end
-            end
-            if isfolder("True Ref/Scans/snooker") then folder="True Ref/Scans/snooker/" end
-        end)
-        if not ok then folder="" end
-    end
-    local name=folder.."snooker_modules_"..os.date("%Y%m%d_%H%M%S")..".json"
-    local ok,err=pcall(function() writefile(name,export()) end)
-    report(ok and ("saved: "..name) or tostring(err))
-end)
-local small=false
+local function hidePreview()
+    if aimLine.Parent then aimLine.Transparency=1;targetLine.Transparency=1 end
+    restorePointer()
+end
+local function stop()
+    enabled=false;epoch+=1;toggle.Text="auto: off";hidePreview()
+end
+local function shutdown()
+    if not alive then return end
+    stop();alive=false
+    for _,c in ipairs(connections) do c:Disconnect() end
+    preview:Destroy();gui:Destroy()
+    if env[key]==shutdown then env[key]=nil end
+end
+env[key]=shutdown
+connect(gui.Destroying,shutdown)
+connect(close.Activated,shutdown)
+local minimized=false
 connect(mini.Activated,function()
-    small=not small; body.Visible=not small
-    frame.Size=UDim2.fromOffset(308,small and 36 or 164)
-    mini.Text=small and "+" or "-"
+    minimized=not minimized;body.Visible=not minimized
+    frame.Size=UDim2.fromOffset(308,minimized and 36 or 238);mini.Text=minimized and "+" or "-"
 end)
-local drag, start, position
+local drag,dragStart,frameStart
 connect(title.InputBegan,function(input)
     if input.UserInputType==Enum.UserInputType.Touch or input.UserInputType==Enum.UserInputType.MouseButton1 then
-        drag=input; start=input.Position; position=frame.Position
+        drag=input;dragStart=input.Position;frameStart=frame.Position
     end
 end)
 connect(UIS.InputChanged,function(input)
     if not drag then return end
     if drag.UserInputType==Enum.UserInputType.Touch and input~=drag then return end
     if drag.UserInputType~=Enum.UserInputType.Touch and input.UserInputType~=Enum.UserInputType.MouseMovement then return end
-    local delta=input.Position-start
-    frame.Position=UDim2.new(position.X.Scale,position.X.Offset+delta.X,position.Y.Scale,position.Y.Offset+delta.Y)
+    local d=input.Position-dragStart
+    frame.Position=UDim2.new(frameStart.X.Scale,frameStart.X.Offset+d.X,frameStart.Y.Scale,frameStart.Y.Offset+d.Y)
 end)
-connect(UIS.InputEnded,function(input) if drag==input then drag=nil end end)
-local function cleanup()
-    if not alive then return end
-    alive=false
-    for worker in pairs(workers) do pcall(task.cancel,worker) end
-    for _,c in ipairs(connections) do c:Disconnect() end
+connect(UIS.InputEnded,function(input) if input==drag then drag=nil end end)
+connect(delayBox.FocusLost,function()
+    local n=tonumber(delayBox.Text)
+    if n and n==n then aimTime=math.clamp(n,.2,10) end
+    delayBox.Text=tostring(aimTime);epoch+=1;hidePreview()
+end)
+connect(modeButton.Activated,function()
+    mode=mode=="legit" and "instant" or "legit"
+    modeButton.Text="mode: "..mode;delayBox.TextTransparency=mode=="instant" and .55 or 0
+    epoch+=1;hidePreview()
+end)
+connect(copy.Activated,function()
+    local clip=setclipboard or toclipboard
+    if type(clip)~="function" then say("clipboard unavailable");return end
+    local ok,err=pcall(clip,"Snooker auto v1 | "..mode.."\n"..table.concat(logs,"\n"))
+    if not ok then say(tostring(err)) end
+end)
+local ready=false
+connect(toggle.Activated,function()
+    if not ready then say("not ready — check module error below in log");return end
+    if enabled then stop();say("off — any current shot will finish normally")
+    else enabled=true;epoch+=1;toggle.Text="auto: on";say("waiting for your turn") end
+end)
+local function requiredModule(parts)
+    local at=RS
+    for _,name in ipairs(parts) do at=at:FindFirstChild(name);assert(at,"missing module: "..table.concat(parts,".")) end
+    return require(at)
 end
-connect(gui.Destroying,cleanup)
-connect(close.Activated,function() cleanup(); gui:Destroy() end)
+local function initialize()
+    Physics=requiredModule({"Modules","SnookerPhysics"})
+    Config=requiredModule({"Configuration","Snooker"})
+    Client=requiredModule({"Client","Snooker"})
+    Blink=requiredModule({"Blink","Client"})
+    for _,name in ipairs({"BuildFrame","NewState","AddBall","GetBall","ApplyStrike","Step","Settled","WorldToLocal","LocalToWorld"}) do
+        assert(type(Physics[name])=="function","physics missing "..name)
+    end
+    assert(Blink.Snooker and Blink.Snooker.Strike and type(Blink.Snooker.Strike.Fire)=="function","strike API unavailable")
+    assert(type(getups)=="function","executor needs debug.getupvalues for the native shot")
+    local matches={}
+    for _,fn in pairs(ups(Client.Start)) do
+        if type(fn)~="function" then continue end
+        local hasPhysics,hasConfig=false,false
+        for _,value in pairs(ups(fn)) do
+            if value==Physics then hasPhysics=true end
+            if value==Config then hasConfig=true end
+        end
+        if hasPhysics and hasConfig then matches[#matches+1]=fn end
+        if debug and type(debug.info)=="function" then
+            local ok,name=pcall(debug.info,fn,"n")
+            if ok and name=="TrackPointer" then pointerFn=fn end
+        end
+    end
+    assert(#matches==1,"cannot identify native RunShot; no shot was sent")
+    nativeShot=matches[1]
+    local maps={}
+    for _,value in pairs(ups(nativeShot)) do
+        if type(value)=="table" and value~=Physics and value~=Config and type(value.Fire)~="function" then maps[#maps+1]=value end
+    end
+    assert(#maps==1,"cannot identify active shot state")
+    simulations=maps[1]
+    if pointerFn then
+        for index,value in pairs(ups(pointerFn)) do
+            if index~=1 or (value~=nil and typeof(value)~="Vector2") then pointerFn=nil;break end
+        end
+    end
+    local assets=RS:FindFirstChild("Assets")
+    assert(assets and assets:FindFirstChild("Snooker") and assets.Snooker:FindFirstChild("Ball"),"ball asset unavailable")
+    log("native physics + RunShot ready; pointer: "..tostring(pointerFn~=nil and type(setup)=="function"))
+end
+local ok,err=pcall(initialize)
+if not ok then say("unavailable: "..tostring(err));return end
+ready=true;say("join a table and place the white ball, then enable")
+
+-- SOLVER BEGIN
+local function pointSegment(p,a,b)
+    local delta=b-a
+    local t=delta:Dot(delta)>1e-9 and math.clamp((p-a):Dot(delta)/delta:Dot(delta),0,1) or 0
+    return (p-(a+delta*t)).Magnitude
+end
+local function legalTargets(snap, team, solids)
+    local allowed={}
+    local assigned=solids==1 or solids==2
+    local low,high=1,15
+    if assigned then low,high=team==solids and 1 or 9,team==solids and 7 or 15 end
+    for _,b in ipairs(snap) do
+        if not b.pocketed and b.id~=0 and b.id~=8 and b.id>=low and b.id<=high then allowed[b.id]=true end
+    end
+    if assigned and next(allowed)==nil then allowed[8]=true end
+    return allowed
+end
+local function newState(frame,snap)
+    local state=Physics.NewState(frame)
+    for _,b in ipairs(snap) do Physics.AddBall(state,b.id,b.pos).Pocketed=b.pocketed end
+    return state
+end
+local function candidates(frame,snap,allowed)
+    local white
+    for _,b in ipairs(snap) do if b.id==0 and not b.pocketed then white=b end end
+    if not white then return {} end
+    local pockets=Physics.NewState(frame).Pockets
+    local result={}
+    local d=frame.Diameter
+    local function clear(a,b,ignoreA,ignoreB)
+        for _,other in ipairs(snap) do
+            if not other.pocketed and other.id~=ignoreA and other.id~=ignoreB
+                and pointSegment(other.pos,a,b)<d*1.02 then return false end
+        end
+        return true
+    end
+    for _,target in ipairs(snap) do
+        if target.pocketed or not allowed[target.id] then continue end
+        for _,pocket in ipairs(pockets) do
+            local toward=pocket-target.pos
+            if toward.Magnitude<1e-5 then continue end
+            local ghost=target.pos-toward.Unit*d
+            local aim=ghost-white.pos
+            if aim.Magnitude<1e-5 then continue end
+            local cosine=aim.Unit:Dot(toward.Unit)
+            if cosine<.24 or math.abs(ghost.X)>frame.HalfLong-d*.5
+                or math.abs(ghost.Y)>frame.HalfShort-d*.5 then continue end
+            if not clear(white.pos,ghost,0,target.id) or not clear(target.pos,pocket,target.id,0) then continue end
+            local distance=aim.Magnitude+toward.Magnitude/(cosine*cosine)+d*3
+            local base=math.sqrt(2*Config.GetDecel()*distance)/Config.GetMaxImpulse()
+            result[#result+1]={id=target.id,dir=(frame.Long*aim.Unit.X+frame.Short*aim.Unit.Y).Unit,
+                pocket=pocket,ghost=ghost,target=target.pos,base=base,rank=cosine*4-distance*.04}
+        end
+    end
+    table.sort(result,function(a,b) return a.rank>b.rank end)
+    -- A legal direct contact remains available when every pot is obstructed.
+    if #result==0 then
+        for _,target in ipairs(snap) do
+            if target.pocketed or not allowed[target.id] then continue end
+            local delta=target.pos-white.pos
+            if delta.Magnitude<d or not clear(white.pos,target.pos,0,target.id) then continue end
+            result[#result+1]={id=target.id,dir=(frame.Long*delta.Unit.X+frame.Short*delta.Unit.Y).Unit,
+                ghost=target.pos,target=target.pos,base=math.sqrt(2*Config.GetDecel()*(delta.Magnitude+d*4))/Config.GetMaxImpulse(),rank=-delta.Magnitude}
+        end
+        table.sort(result,function(a,b) return a.rank>b.rank end)
+    end
+    return result
+end
+local function evaluate(frame,snap,allowed,candidate,power,checkpoint)
+    local state=newState(frame,snap)
+    Physics.ApplyStrike(state,power,candidate.dir)
+    local pocketed={}
+    local firstHit
+    local dt=Config.GetFixedDt()
+    for step=1,math.ceil(Config.GetMaxSimTime()/dt) do
+        local cue=Physics.GetBall(state,0)
+        if cue and not firstHit and not cue.Pocketed then
+            local endPos=cue.Pos+cue.Vel*dt
+            local earliest=math.huge
+            for _,ball in ipairs(state.Balls) do
+                if ball.Id==0 or ball.Pocketed then continue end
+                -- Earliest swept circle contact during this fixed step.
+                local v=endPos-cue.Pos
+                local rel=cue.Pos-ball.Pos
+                local aa=v:Dot(v)
+                local bb=2*rel:Dot(v)
+                local cc=rel:Dot(rel)-frame.Diameter^2
+                local disc=bb*bb-4*aa*cc
+                if aa>1e-12 and disc>=0 then
+                    local t=(-bb-math.sqrt(disc))/(2*aa)
+                    if t>=-1e-5 and t<=1 and t<earliest then earliest=t; firstHit=ball.Id end
+                end
+            end
+        end
+        local events=Physics.Step(state)
+        for _,id in ipairs(events.Pocketed) do pocketed[id]=true end
+        if step%12==0 and not checkpoint() then return end
+        if Physics.Settled(state) then
+            if pocketed[0] or (pocketed[8] and not allowed[8]) or not firstHit or not allowed[firstHit] then return end
+            local score=0
+            for id in pairs(pocketed) do score+=allowed[id] and 100 or -140 end
+            return score-power*2+(candidate.rank or 0)*.01
+        end
+    end
+end
+local function choose(frame,snap,allowed,checkpoint)
+    local best,bestScore=nil,-math.huge
+    local options=candidates(frame,snap,allowed)
+    for i=1,math.min(#options,12) do
+        local c=options[i]
+        for _,factor in ipairs({1.08,.9,1.3}) do
+            if not checkpoint() then return best end
+            local power=math.clamp(c.base*factor,.06,1)
+            local score=evaluate(frame,snap,allowed,c,power,checkpoint)
+            if score and score>bestScore then
+                bestScore=score
+                best={id=c.id,dir=c.dir,power=power,ghost=c.ghost,target=c.target,pocket=c.pocket,score=score}
+            end
+        end
+        if bestScore>=99 and i>=3 then break end
+    end
+    return best
+end
+-- SOLVER END
+
+local function ownTable()
+    local folder=workspace:FindFirstChild("Snookers")
+    if not folder then return end
+    local found
+    for _,t in ipairs(folder:GetChildren()) do
+        if t:GetAttribute("Team1Id")==player.UserId or t:GetAttribute("Team2Id")==player.UserId then
+            if found then return nil,"multiple active tables" end
+            found=t
+        end
+    end
+    return found
+end
+local function placing(t)
+    -- Client.Start closes over the native per-table placement map.
+    for _,value in pairs(ups(Client.Start)) do
+        if type(value)=="table" and rawget(value,t)==true then return true end
+    end
+    return false
+end
+local lastSubmission
+local function canPlay(t)
+    if not t or not t.Parent then return false,"join a table" end
+    if t:GetAttribute("ShooterId")~=player.UserId then return false,"waiting for your turn" end
+    if simulations[t] or t:GetAttribute("SnookerBusy") then return false,"balls in motion" end
+    if placing(t) then return false,"place the white ball using the game controls" end
+    local balls=t:FindFirstChild("Balls")
+    local white=balls and balls:FindFirstChild("White")
+    if not white or white:GetAttribute("Pocketed") then return false,"place the white ball using the game controls" end
+    local ends=t:GetAttribute("TurnEnds")
+    if type(ends)~="number" or workspace:GetServerTimeNow()>=ends-.25 then return false,"waiting for turn state" end
+    if lastSubmission and lastSubmission.table==t and lastSubmission.turn==ends then
+        return false,"waiting for shot confirmation"
+    end
+    return true
+end
+local function capture(t)
+    local diameter=RS.Assets.Snooker.Ball:GetExtentsSize().X
+    local frameData=Physics.BuildFrame(t,diameter)
+    assert(frameData and diameter>0,"invalid table geometry")
+    local snap={}
+    for _,model in ipairs(t.Balls:GetChildren()) do
+        if not model:IsA("Model") then continue end
+        local id=model:GetAttribute("BallId")
+        local part=model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
+        if type(id)=="number" and part then
+            snap[#snap+1]={id=id,pos=Physics.WorldToLocal(frameData,part.Position),world=part.Position,
+                model=model,part=part,pocketed=model:GetAttribute("Pocketed")==true}
+        end
+    end
+    table.sort(snap,function(a,b) return a.id<b.id end)
+    assert(#snap>1 and snap[1].id==0,"ball state unavailable")
+    return frameData,snap
+end
+local function unchanged(snap)
+    for _,b in ipairs(snap) do
+        if not b.model.Parent or not b.part.Parent or (b.part.Position-b.world).Magnitude>.025
+            or (b.model:GetAttribute("Pocketed")==true)~=b.pocketed then return false end
+    end
+    return true
+end
+local function drawLine(part,a,b)
+    local len=(b-a).Magnitude
+    if len<.005 then part.Transparency=1;return end
+    part.Size=Vector3.new(.025,.025,len)
+    part.CFrame=CFrame.lookAt((a+b)*.5,b);part.Transparency=.25
+end
+local function previewAim(frameData,snap,shot,dir)
+    local from=Physics.LocalToWorld(frameData,snap[1].pos)+Vector3.new(0,.12,0)
+    local distance=(shot.ghost-snap[1].pos).Magnitude
+    drawLine(aimLine,from,from+dir*distance)
+    if shot.pocket then
+        drawLine(targetLine,Physics.LocalToWorld(frameData,shot.target)+Vector3.new(0,.12,0),
+            Physics.LocalToWorld(frameData,shot.pocket)+Vector3.new(0,.12,0))
+    else targetLine.Transparency=1 end
+    if pointerFn and type(setup)=="function" and workspace.CurrentCamera then
+        local p,visible=workspace.CurrentCamera:WorldToScreenPoint(from-Vector3.new(0,.12,0)+dir*math.max(distance,1))
+        if visible then
+            if not pointerOwned then pointerBefore=ups(pointerFn)[1];pointerOwned=true end
+            pcall(setup,pointerFn,1,Vector2.new(p.X,p.Y))
+        end
+    end
+end
+local function turn(t,token)
+    local turnEnd=t:GetAttribute("TurnEnds")
+    local team=t:GetAttribute("Team1Id")==player.UserId and 1 or 2
+    local solids=t:GetAttribute("SolidsTeam")
+    local frameData,snap=capture(t)
+    local allowed=legalTargets(snap,team,solids)
+    local function valid()
+        return alive and enabled and epoch==token and t.Parent
+            and t:GetAttribute("TurnEnds")==turnEnd and t:GetAttribute("SolidsTeam")==solids
+            and canPlay(t) and unchanged(snap)
+    end
+    local available=turnEnd-workspace:GetServerTimeNow()-(mode=="legit" and aimTime or 0)-.75
+    if available<.2 then say("not enough time left for this turn");return end
+    local deadline=os.clock()+math.min(2.5,available)
+    local lastYield=os.clock()
+    local function checkpoint()
+        if os.clock()>=deadline or not alive or not enabled or epoch~=token then return false end
+        if os.clock()-lastYield>.004 then
+            task.wait();lastYield=os.clock()
+            if not valid() then return false end
+        end
+        return true
+    end
+    say("calculating shot...")
+    local shot=choose(frameData,snap,allowed,checkpoint)
+    if not valid() then hidePreview();return end
+    if not shot then say("no verified shot — adjust manually or wait");return end
+    log(string.format("target %d | power %.3f | predicted score %.2f",shot.id,shot.power,shot.score))
+    if mode=="legit" then
+        say(string.format("aiming at %d | %.1fs",shot.id,aimTime))
+        local started=os.clock()
+        -- Rotate toward the selected line during the configured aiming time.
+        local startAngle=math.atan2(shot.dir.Z,shot.dir.X)+.25
+        while os.clock()-started<aimTime do
+            if not valid() then hidePreview();return end
+            local a=math.clamp((os.clock()-started)/aimTime,0,1)
+            local angle=startAngle-.25*(a*a*(3-2*a))
+            previewAim(frameData,snap,shot,Vector3.new(math.cos(angle),0,math.sin(angle)))
+            Run.RenderStepped:Wait()
+        end
+    end
+    if not valid() then hidePreview();return end
+    previewAim(frameData,snap,shot,shot.dir)
+    -- Same ordering as the client's own shot callback. Native RunShot owns the result.
+    lastSubmission={table=t,turn=turnEnd}
+    local success,err=pcall(function()
+        RS.Modules.Events.RemoteEvent:FireServer("SnookerAimEnd",t)
+        Blink.Snooker.Strike.Fire({Table=t,Power=shot.power,Heading=shot.dir})
+        nativeShot(t,shot.power,shot.dir,true)
+    end)
+    hidePreview()
+    if not success then
+        stop();say("shot error: "..tostring(err));return
+    end
+    say("shot sent — waiting for the balls")
+end
+local failedState,failedTime
+while alive do
+    task.wait(.15)
+    if not enabled then continue end
+    local t,why=ownTable()
+    local available,reason=canPlay(t)
+    if not available then hidePreview();say(why or reason);continue end
+    -- Recalculate when ball or turn state changes. Avoid constantly repeating an unsolved layout.
+    local signature=tostring(t)..":"..tostring(t:GetAttribute("TurnEnds"))
+    if failedState==signature and os.clock()-(failedTime or 0)<1.5 then continue end
+    local success,err=pcall(turn,t,epoch)
+    if not success then
+        hidePreview();say("planning error: "..tostring(err))
+        failedState,failedTime=signature,os.clock()
+    elseif not lastSubmission or lastSubmission.table~=t or lastSubmission.turn~=t:GetAttribute("TurnEnds") then
+        failedState,failedTime=signature,os.clock()
+    end
+end
