@@ -1,5 +1,5 @@
--- Mush auto music v1. Standalone. Select the song in the game, then enable.
--- Uses the current music UI handlers; does not replace hooks or send raw packets.
+-- Mush auto music v2. Standalone. Uses native Judge and Release from the live music session.
+-- Does not change keyboard connections, fabricate scores or replay raw remote packets.
 local Core=(function()
 local Core = {}
 local function finite(n)
@@ -12,7 +12,7 @@ local function propsIn(values)
             and type(rawget(v,"OnNote"))=="function" then return v end
     end
 end
-function Core.inspector(readValues, readName, readConstants)
+function Core.inspector(readValues, readName, readConstants, pause)
     local cache=setmetatable({}, {__mode="k"})
     local function values(fn)
         if cache[fn] then return cache[fn] end
@@ -64,46 +64,58 @@ function Core.inspector(readValues, readName, readConstants)
             end
         end
     end
-    function api.complete(lane,endedRoots)
-        local pressValues=values(lane.press)
+    -- Press and Judge share only the rendered song clock in the captured module.
+    -- Release is shared by all lanes: it does not require a matching keyboard wrapper.
+    function api.native(lane,endedRoots,extraFunctions)
         local pressFns={}
-        for _,v in pairs(pressValues) do if type(v)=="function" then pressFns[v]=true end end
-        for _,ended in ipairs(graph(endedRoots,2)) do
-            local ups=values(ended)
-            local shared=0
-            for _,v in pairs(ups) do if pressFns[v] then shared+=1 end end
-            if shared<3 then continue end
-            for _,release in pairs(ups) do
-                if type(release)~="function" or not named(release,"Release",{"OnNote","GetFinish"})
-                    or propsIn(values(release))~=lane.props then continue end
-                local judgeFns={}
-                for _,v in pairs(values(lane.judge)) do if type(v)=="function" then judgeFns[v]=true end end
-                local clocks={}
-                for _,v in pairs(values(release)) do
-                    if judgeFns[v] then table.insert(clocks,v) end
-                end
-                if #clocks~=1 then continue end
-                local bindings
-                for _,v in pairs(ups) do
-                    if type(v)=="table" and type(rawget(v,"Get"))=="function" then bindings=v; break end
-                end
-                if not bindings then continue end
-                lane.clock=clocks[1]; lane.ended=ended; lane.bindings=bindings; lane.nativeRelease=release
-                return lane
+        for _,v in pairs(values(lane.press)) do
+            if type(v)=="function" then pressFns[v]=true end
+        end
+        local clocks,seenClocks={},{}
+        for _,v in pairs(values(lane.judge)) do
+            if type(v)=="function" and pressFns[v] and not seenClocks[v] then
+                seenClocks[v]=true; table.insert(clocks,v)
             end
         end
+        if #clocks~=1 then return nil,"clock candidates="..#clocks end
+        lane.clock=clocks[1]
+        local function releaseCandidate(f)
+            if type(f)~="function" or not named(f,"Release",{"OnNote","GetFinish"}) then return end
+            local ups=values(f)
+            if propsIn(ups)~=lane.props then return end
+            for _,v in pairs(ups) do
+                if v==lane.clock then lane.nativeRelease=f; return lane end
+            end
+        end
+        -- Each root gets its own traversal budget. A busy game's unrelated input
+        -- listeners cannot exhaust a global cap before reaching the music callback.
+        for _,root in ipairs(endedRoots) do
+            for _,fn in ipairs(graph({root},3)) do
+                local found=releaseCandidate(fn)
+                if found then return found end
+            end
+        end
+        if extraFunctions then
+            for i,fn in ipairs(extraFunctions) do
+                if pause and i%500==0 then pause() end
+                local found=releaseCandidate(fn)
+                if found then return found end
+            end
+        end
+        return nil,"release missing; ended roots="..#endedRoots..", extra functions="..#(extraFunctions or {})
     end
     return api
 end
 function Core.new(sheet,lanes,startTime)
     assert(finite(startTime),"Invalid music clock")
-    local self={notes={},lanes=lanes,cursor=1,active={},last=nil,presses=0,releases=0,late=0}
+    local self={notes={},byIndex={},accepted={},lanes=lanes,cursor=1,active={},last=nil,presses=0,releases=0,late=0,rejected=0,attempts=0}
     for index,n in ipairs(sheet) do
         assert(type(n)=="table" and type(n.Position)=="table","Invalid note "..index)
         local a,b=n.Position[1],n.Position[#n.Position]
         assert(finite(a) and finite(b) and b>=a and lanes[n.Key],"Unsupported note/lane "..index)
         table.insert(self.notes,{index=index,key=n.Key,start=a,finish=b,hold=#n.Position>1})
     end
+    for _,n in ipairs(self.notes) do self.byIndex[n.index]=n end
     table.sort(self.notes,function(a,b) return a.start==b.start and a.index<b.index or a.start<b.start end)
     while self.notes[self.cursor] and self.notes[self.cursor].start<startTime-0.005 do self.cursor+=1 end
     return self
@@ -143,21 +155,31 @@ function Core.step(self,t)
         local n=self.notes[self.cursor]
         self.cursor+=1
         if t-n.start>0.12 then self.late+=1; continue end
-        local held=self.active[n.key]
-        local finish=n.hold and n.finish or t+0.025
-        self.active[n.key]={finish=math.max(finish,held and held.finish or -math.huge)}
-        local ok,e=pcall(self.lanes[n.key].down)
+        if self.accepted[n.index] then continue end
+        self.attempts+=1
+        local ok,hit=pcall(self.lanes[n.key].down,n.index)
         if not ok then
+            -- Judge can send the down event before a later callback throws.
+            pcall(self.lanes[n.key].up)
             Core.stop(self)
-            error("Press: "..tostring(e),0)
+            error("Judge: "..tostring(hit),0)
         end
+        local accepted=self.byIndex[hit]
+        if not accepted or accepted.key~=n.key or self.accepted[hit] then
+            self.rejected+=1
+            continue
+        end
+        self.accepted[hit]=true
         self.presses+=1
+        if accepted.hold then
+            local held=self.active[n.key]
+            self.active[n.key]={finish=math.max(accepted.finish,held and held.finish or -math.huge)}
+        end
     end
 end
 return Core
 
 end)()
-
 local Players=game:GetService("Players")
 local Run=game:GetService("RunService")
 local UIS=game:GetService("UserInputService")
@@ -177,6 +199,8 @@ local alive,enabled=false,false
 alive=true
 local connections={}
 local session=nil
+local generation=0
+local attaching=false
 local lastFault=nil
 local retryAt=0
 local logs={}
@@ -255,10 +279,13 @@ local function findMain()
     end
 end
 local function attach(main)
-    local inspector=Core.inspector(inspectValues,nameOf,inspectConstants)
+    local inspector=Core.inspector(inspectValues,nameOf,inspectConstants,function() task.wait() end)
     local ended=roots(UIS.InputEnded)
     local lanes,props,clock={}
     local laneCount=0
+    local releaseCache=nil
+    local gcFunctions=nil
+    log("connecting; input-ended callbacks="..#ended)
     for _,row in ipairs(main.Hotbar:GetChildren()) do
         if not row:IsA("GuiObject") then continue end
         local b=row:FindFirstChild("ImageButton")
@@ -267,8 +294,27 @@ local function attach(main)
         if not lane then error("Music Press handler unavailable; copy log",0) end
         if props and props~=lane.props then error("Music session changed while connecting",0) end
         props=lane.props
-        lane=inspector.complete(lane,ended)
-        if not lane then error("Music release/clock handler unavailable; copy log",0) end
+        if releaseCache and releaseCache.props==lane.props and releaseCache.judge==lane.judge then
+            lane.clock=releaseCache.clock
+            lane.nativeRelease=releaseCache.nativeRelease
+        else
+            local candidate,reason=inspector.native(lane,ended)
+            if not candidate and lane.clock and type(getgc)=="function" then
+                if not gcFunctions then
+                    local ok,objects=pcall(getgc,false)
+                    gcFunctions={}
+                    if ok and type(objects)=="table" then
+                        for _,object in pairs(objects) do
+                            if type(object)=="function" then gcFunctions[#gcFunctions+1]=object end
+                        end
+                    end
+                    log("native lookup fallback: "..#gcFunctions.." loaded functions")
+                end
+                candidate,reason=inspector.native(lane,{},gcFunctions)
+            end
+            if not candidate then error("Native music lookup: "..tostring(reason).."; getgc="..type(getgc),0) end
+            lane=candidate; releaseCache=lane
+        end
         if clock and clock~=lane.clock then error("Music lanes have different clocks",0) end
         clock=lane.clock
         local key,laneName
@@ -278,22 +324,19 @@ local function attach(main)
             end
         end
         if not key or lanes[key] then error("Unrecognized or duplicate music lane",0) end
-        local bound=lane.bindings.Get(laneName)
-        if typeof(bound)~="EnumItem" or bound.EnumType~=Enum.KeyCode then error("Invalid music key binding",0) end
-        local entry={down=lane.press}
-        entry.up=function()
-            local mapped=lane.bindings.Get(laneName)
-            assert(typeof(mapped)=="EnumItem" and mapped.EnumType==Enum.KeyCode,"Key binding changed")
-            lane.ended({UserInputType=Enum.UserInputType.Keyboard,KeyCode=mapped})
+        local entry={}
+        entry.down=function()
+            if type(props.OnPress)=="function" then props.OnPress() end
+            return lane.judge(key)
         end
-        entry.fallback=function() lane.nativeRelease(key) end
+        entry.up=function() lane.nativeRelease(key) end
         lanes[key]=entry; laneCount+=1
     end
     assert(props and clock and laneCount>0,"Music controls are still loading")
     local t=clock()
     assert(type(t)=="number" and math.abs((Workspace:GetServerTimeNow()-props.StartAt)-t)<0.5,"Music clock is not running")
     local engine=Core.new(props.Sheet,lanes,t)
-    log("connected: "..laneCount.." lanes, "..#engine.notes.." notes; native clock "..string.format("%.3f",t))
+    log("connected: "..laneCount.." lanes, "..#engine.notes.." notes; Judge + Release; native clock "..string.format("%.3f",t))
     return {main=main,props=props,clock=clock,engine=engine,lastTime=t,clockChanged=os.clock()}
 end
 local function detach()
@@ -315,6 +358,7 @@ local function fault(err)
     report(msg)
 end
 connect(toggle.Activated,function()
+    generation+=1
     enabled=not enabled
     toggle.Text=enabled and "auto music: on" or "auto music: off"
     toggle.BackgroundColor3=enabled and Color3.fromRGB(52,68,63) or Color3.fromRGB(42,45,51)
@@ -324,7 +368,7 @@ connect(toggle.Activated,function()
     detail.Text=enabled and "select the instrument and song in the game" or "off"
 end)
 local function export()
-    return "Mush auto music v1 | Place: "..game.PlaceId.."\n"..table.concat(logs,"\n")
+    return "Mush auto music v2 | Place: "..game.PlaceId.."\n"..table.concat(logs,"\n")
 end
 connect(copy.Activated,function()
     local clipboard=type(setclipboard)=="function" and setclipboard or toclipboard
@@ -372,6 +416,7 @@ end)
 connect(UIS.InputEnded,function(input) if input==drag then drag=nil end end)
 local function cleanup()
     if not alive then return end
+    generation+=1
     enabled=false; alive=false; detach()
     for _,c in ipairs(connections) do c:Disconnect() end
     table.clear(connections)
@@ -384,8 +429,8 @@ if not supported then
     report("executor needs getconnections + getupvalues; copy log")
     toggle.Active=false; toggle.AutoButtonColor=false; toggle.Text="executor unsupported"
 else
-    log("ready; native input handlers, no remote replay")
-    log("executor: getconnections="..type(getconnections)..", getupvalues="..type(inspectValues)..", getconstants="..type(inspectConstants))
+    log("ready; native Judge + Release; no keyboard wrapper required")
+    log("executor: getconnections="..type(getconnections)..", getupvalues="..type(inspectValues)..", getconstants="..type(inspectConstants)..", getgc="..type(getgc))
 end
 local nextUI=0
 connect(Run.Heartbeat,function()
@@ -403,10 +448,19 @@ connect(Run.Heartbeat,function()
         retryAt=now+0.5
         local main=findMain()
         if not main then report("waiting for a song"); return end
-        local ok,value=pcall(attach,main)
-        if not ok then fault(value); return end
-        session=value; lastFault=nil
-        report("following the current song")
+        if attaching then return end
+        attaching=true
+        local token=generation
+        report("connecting to the music session...")
+        task.spawn(function()
+            local ok,value=pcall(attach,main)
+            attaching=false
+            if not alive or not enabled or token~=generation or not visible(main) then return end
+            if not ok then fault(value); return end
+            session=value; lastFault=nil
+            report("following the current song")
+        end)
+        return
     end
     local s=session
     local ok,err=pcall(function()
@@ -417,16 +471,20 @@ connect(Run.Heartbeat,function()
         -- Judge reads this same rendered clock. Do not act on a stale frame.
         if math.abs((Workspace:GetServerTimeNow()-s.props.StartAt)-t)>0.08 then return end
         Core.step(s.engine,t)
+        if s.engine.rejected>(s.reportedRejects or 0) then
+            s.reportedRejects=s.engine.rejected
+            if s.reportedRejects<=5 then log("Judge returned no new note at t="..string.format("%.3f",t)) end
+        end
         if now>=(s.nextStats or 0) then
             s.nextStats=now+0.3
             local score=s.main:FindFirstChild("Score")
             local label=score and score:FindFirstChild("TextLabel")
-            detail.Text=string.format("%d presses | %d late | %s",s.engine.presses,s.engine.late,label and label.Text or "")
+            detail.Text=string.format("%d hits | %d skipped | %s",s.engine.presses,s.engine.late+s.engine.rejected,label and label.Text or "")
             if s.engine.cursor>#s.engine.notes and next(s.engine.active)==nil then report("chart finished; waiting for the next song") end
         end
         if now>=(s.nextLog or 0) then
             s.nextLog=now+15
-            log(string.format("t=%.2f | presses=%d | late=%d",t,s.engine.presses,s.engine.late))
+            log(string.format("t=%.3f | hits=%d | attempts=%d | rejected=%d | late=%d",t,s.engine.presses,s.engine.attempts,s.engine.rejected,s.engine.late))
         end
     end)
     if not ok then fault(err) end
