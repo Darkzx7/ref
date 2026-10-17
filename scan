@@ -1,903 +1,162 @@
--- Standalone Mush snooker assistant. Uses the game's live physics and native RunShot.
--- Join a table and place the white ball normally. No queue manipulation or fabricated results.
-local Players=game:GetService("Players")
+-- Read-only cooking diagnostic. No remote replay, input hooks or automation.
 local RS=game:GetService("ReplicatedStorage")
-local Run=game:GetService("RunService")
+local Players=game:GetService("Players")
+local HTTP=game:GetService("HttpService")
 local UIS=game:GetService("UserInputService")
-local player=Players.LocalPlayer
-assert(player,"Run on the client")
 local env=type(getgenv)=="function" and getgenv() or _G
-local key="__REF_STANDALONE_SNOOKER_AUTO_V1"
-if type(env[key])=="function" then pcall(env[key]) end
-local alive,enabled,epoch=true,false,0
-local mode,aimTime="instant",2
-local connections,logs={},{}
-local Physics,Config,Client,Blink,nativeShot,simulations,pointerFn
-local function log(text)
-    logs[#logs+1]=os.date("%H:%M:%S").." ["..mode.."] "..text
-    if #logs>80 then table.remove(logs,1) end
-end
-local function connect(signal,fn)
-    local c=signal:Connect(fn); connections[#connections+1]=c; return c
-end
-local gui=Instance.new("ScreenGui")
-gui.Name="SnookerAutoStandalone";gui.ResetOnSpawn=false;gui.DisplayOrder=999
-gui.Parent=player:WaitForChild("PlayerGui")
+local old=env.__REF_COOK_PROTOCOL_CLOSE
+if type(old)=="function" then pcall(old) end
+local alive=true
+local connections={}
+local result={version="Cooking protocol 1",place=game.PlaceId,exported=os.date("!%Y-%m-%dT%H:%M:%SZ"),modules={},api={},kitchen={},errors={}}
+local encoded
+local output="True Ref/Logs/cooking-protocol.json"
 local function make(class,props,parent)
     local obj=Instance.new(class)
-    for k,v in pairs(props) do obj[k]=v end
+    for key,value in pairs(props) do obj[key]=value end
     obj.Parent=parent;return obj
 end
-local function corner(o) make("UICorner",{CornerRadius=UDim.new(0,7)},o) end
-local frame=make("Frame",{Size=UDim2.fromOffset(308,238),Position=UDim2.new(.5,-154,.2,0),BackgroundColor3=Color3.fromRGB(22,23,26),BorderSizePixel=0},gui)
-corner(frame)
-local title=make("TextLabel",{Text="snooker v4",TextSize=15,Font=Enum.Font.GothamMedium,TextColor3=Color3.fromRGB(232,233,237),BackgroundTransparency=1,Position=UDim2.fromOffset(12,0),Size=UDim2.fromOffset(210,36),TextXAlignment=Enum.TextXAlignment.Left,Active=true},frame)
-local body=make("Frame",{BackgroundTransparency=1,Position=UDim2.fromOffset(12,40),Size=UDim2.fromOffset(284,188)},frame)
-local function button(text,x,y,w,parent)
-    local b=make("TextButton",{Text=text,Position=UDim2.fromOffset(x,y),Size=UDim2.fromOffset(w,32),BackgroundColor3=Color3.fromRGB(42,44,49),TextColor3=Color3.fromRGB(235,235,239),TextSize=12,Font=Enum.Font.GothamMedium,BorderSizePixel=0},parent or body)
-    corner(b);return b
+local gui=make("ScreenGui",{Name="RefCookingDiagnostic",ResetOnSpawn=false,DisplayOrder=100},Players.LocalPlayer:WaitForChild("PlayerGui"))
+local frame=make("Frame",{Size=UDim2.fromOffset(340,152),Position=UDim2.new(.5,-170,.3,0),BackgroundColor3=Color3.fromRGB(19,19,21),BorderSizePixel=0},gui)
+make("UICorner",{CornerRadius=UDim.new(0,10)},frame)
+local title=make("TextLabel",{Size=UDim2.new(1,-70,0,38),Position=UDim2.fromOffset(14,0),BackgroundTransparency=1,Text="cooking diagnostic",Font=Enum.Font.GothamSemibold,TextSize=15,TextColor3=Color3.new(1,1,1),TextXAlignment=Enum.TextXAlignment.Left,Active=true},frame)
+local status=make("TextLabel",{Size=UDim2.new(1,-28,0,57),Position=UDim2.fromOffset(14,40),BackgroundTransparency=1,Text="Reading the current game modules...",TextWrapped=true,Font=Enum.Font.Gotham,TextSize=12,TextColor3=Color3.fromRGB(184,184,190)},frame)
+local function button(text,pos,size,callback)
+    local b=make("TextButton",{Text=text,Position=pos,Size=size,BackgroundColor3=Color3.fromRGB(37,37,40),BorderSizePixel=0,Font=Enum.Font.Gotham,TextSize=13,TextColor3=Color3.new(1,1,1)},frame)
+    make("UICorner",{CornerRadius=UDim.new(0,6)},b)
+    connections[#connections+1]=b.Activated:Connect(callback)
+    return b
 end
-local toggle=button("auto: off",0,0,138)
-local modeButton=button("mode: instant",146,0,138)
-make("TextLabel",{Text="aim time (seconds)",TextSize=12,Font=Enum.Font.Gotham,TextColor3=Color3.fromRGB(186,189,198),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Position=UDim2.fromOffset(2,43),Size=UDim2.fromOffset(196,30)},body)
-local delayBox=make("TextBox",{Text="2",ClearTextOnFocus=false,TextSize=13,Font=Enum.Font.Gotham,TextColor3=Color3.fromRGB(235,235,239),BackgroundColor3=Color3.fromRGB(35,37,42),BorderSizePixel=0,Position=UDim2.fromOffset(216,43),Size=UDim2.fromOffset(68,30)},body)
-corner(delayBox)
-local status=make("TextLabel",{Text="loading modules...",TextWrapped=true,TextSize=12,Font=Enum.Font.Gotham,TextColor3=Color3.fromRGB(186,189,198),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Position=UDim2.fromOffset(0,83),Size=UDim2.fromOffset(284,55)},body)
-local copy=button("copy log",0,149,284)
-local mini=button("-",230,2,30,frame)
-local close=button("x",268,2,30,frame)
-local message=""
-local function say(text)
-    if text~=message then message=text;log(text) end
-    if alive then status.Text=text end
-end
-local preview=Instance.new("Folder")
-preview.Name="SnookerAutoPreview";preview.Parent=workspace
-local function line()
-    return make("Part",{Anchored=true,CanCollide=false,CanTouch=false,CanQuery=false,CastShadow=false,
-        Material=Enum.Material.Neon,Color=Color3.fromRGB(182,212,224),Transparency=1,Size=Vector3.new(.025,.025,1)},preview)
-end
-local aimLine,targetLine=line(),line()
-local pointerOwned,pointerBefore=false,nil
-local getups=(debug and debug.getupvalues) or getupvalues
-local setup=(debug and debug.setupvalue) or setupvalue
-local function ups(fn)
-    if type(getups)~="function" then return {} end
-    local ok,result=pcall(getups,fn)
-    return ok and type(result)=="table" and result or {}
-end
-local function restorePointer()
-    if pointerOwned and pointerFn and type(setup)=="function" then pcall(setup,pointerFn,1,pointerBefore) end
-    pointerOwned=false;pointerBefore=nil
-end
-local function hidePreview()
-    if aimLine.Parent then aimLine.Transparency=1;targetLine.Transparency=1 end
-    restorePointer()
-end
-local function stop()
-    enabled=false;epoch+=1;toggle.Text="auto: off";hidePreview()
-end
-local function shutdown()
+local function close()
     if not alive then return end
-    stop();alive=false
+    alive=false
     for _,c in ipairs(connections) do c:Disconnect() end
-    preview:Destroy();gui:Destroy()
-    if env[key]==shutdown then env[key]=nil end
+    gui:Destroy()
+    if env.__REF_COOK_PROTOCOL_CLOSE==close then env.__REF_COOK_PROTOCOL_CLOSE=nil end
 end
-env[key]=shutdown
-connect(gui.Destroying,shutdown)
-connect(close.Activated,shutdown)
-local minimized=false
-connect(mini.Activated,function()
-    minimized=not minimized;body.Visible=not minimized
-    frame.Size=UDim2.fromOffset(308,minimized and 36 or 238);mini.Text=minimized and "+" or "-"
+env.__REF_COOK_PROTOCOL_CLOSE=close
+button("x",UDim2.new(1,-40,0,7),UDim2.fromOffset(28,26),close)
+local clipboard=setclipboard or toclipboard
+button("copy report",UDim2.new(0,14,1,-43),UDim2.new(1,-28,0,29),function()
+    if not encoded then status.Text="Still reading modules. Please wait.";return end
+    if type(clipboard)=="function" then
+        local ok=pcall(clipboard,encoded)
+        status.Text=ok and "Report copied." or "Copy failed. Use the saved JSON file."
+    else status.Text="Clipboard unavailable. Use the saved JSON file." end
 end)
-local drag,dragStart,frameStart
-connect(title.InputBegan,function(input)
-    if input.UserInputType==Enum.UserInputType.Touch or input.UserInputType==Enum.UserInputType.MouseButton1 then
-        drag=input;dragStart=input.Position;frameStart=frame.Position
+local drag,start,position
+connections[#connections+1]=title.InputBegan:Connect(function(input)
+    if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then drag=input;start=input.Position;position=frame.Position end
+end)
+connections[#connections+1]=UIS.InputChanged:Connect(function(input)
+    if drag and (input==drag or input.UserInputType==Enum.UserInputType.MouseMovement) then
+        local d=input.Position-start
+        frame.Position=UDim2.new(position.X.Scale,position.X.Offset+d.X,position.Y.Scale,position.Y.Offset+d.Y)
     end
 end)
-connect(UIS.InputChanged,function(input)
-    if not drag then return end
-    if drag.UserInputType==Enum.UserInputType.Touch and input~=drag then return end
-    if drag.UserInputType~=Enum.UserInputType.Touch and input.UserInputType~=Enum.UserInputType.MouseMovement then return end
-    local d=input.Position-dragStart
-    frame.Position=UDim2.new(frameStart.X.Scale,frameStart.X.Offset+d.X,frameStart.Y.Scale,frameStart.Y.Offset+d.Y)
-end)
-connect(UIS.InputEnded,function(input) if input==drag then drag=nil end end)
-connect(delayBox.FocusLost,function()
-    local n=tonumber(delayBox.Text)
-    if n and n==n then aimTime=math.clamp(n,.2,10) end
-    delayBox.Text=tostring(aimTime);epoch+=1;hidePreview()
-end)
-connect(modeButton.Activated,function()
-    mode=mode=="legit" and "instant" or "legit"
-    modeButton.Text="mode: "..mode;delayBox.TextTransparency=mode=="instant" and .55 or 0
-    epoch+=1;hidePreview()
-end)
-connect(copy.Activated,function()
-    local clip=setclipboard or toclipboard
-    if type(clip)~="function" then say("clipboard unavailable");return end
-    local ok,err=pcall(clip,"Snooker auto v4 | "..mode.."\n"..table.concat(logs,"\n"))
-    if not ok then say(tostring(err)) end
-end)
-local ready=false
-connect(toggle.Activated,function()
-    if not ready then say("not ready — check module error below in log");return end
-    if enabled then stop();say("off — any current shot will finish normally")
-    else enabled=true;epoch+=1;toggle.Text="auto: on";say("waiting for your turn") end
-end)
-local function requiredModule(parts)
-    local at=RS
-    for _,name in ipairs(parts) do at=at:FindFirstChild(name);assert(at,"missing module: "..table.concat(parts,".")) end
-    return require(at)
+connections[#connections+1]=UIS.InputEnded:Connect(function(input)if input==drag then drag=nil end end)
+local function bounded(fn,seconds)
+    local done,ok,value=false,false,nil
+    task.spawn(function()ok,value=pcall(fn);done=true end)
+    local deadline=os.clock()+seconds
+    while alive and not done and os.clock()<deadline do task.wait(.05) end
+    if not done then return false,"timeout" end
+    return ok,value
 end
-local function initialize()
-    Physics=requiredModule({"Modules","SnookerPhysics"})
-    Config=requiredModule({"Configuration","Snooker"})
-    Client=requiredModule({"Client","Snooker"})
-    Blink=requiredModule({"Blink","Client"})
-    for _,name in ipairs({"BuildFrame","NewState","AddBall","GetBall","ApplyStrike","Step","Settled","WorldToLocal","LocalToWorld"}) do
-        assert(type(Physics[name])=="function","physics missing "..name)
+local function selected(module)
+    local path=module:GetFullName():lower()
+    for _,word in ipairs({"overcook","cooking","kitchen","ingredient","storagelist","refrigerator"}) do
+        if path:find(word,1,true) then return true end
     end
-    assert(Blink.Snooker and Blink.Snooker.Strike and type(Blink.Snooker.Strike.Fire)=="function","strike API unavailable")
-    assert(type(getups)=="function","executor needs debug.getupvalues for the native shot")
-    local matches={}
-    for _,fn in pairs(ups(Client.Start)) do
-        if type(fn)~="function" then continue end
-        local hasPhysics,hasConfig=false,false
-        for _,value in pairs(ups(fn)) do
-            if value==Physics then hasPhysics=true end
-            if value==Config then hasConfig=true end
-        end
-        if hasPhysics and hasConfig then matches[#matches+1]=fn end
-        if debug and type(debug.info)=="function" then
-            local ok,name=pcall(debug.info,fn,"n")
-            if ok and name=="TrackPointer" then pointerFn=fn end
-        end
-    end
-    assert(#matches==1,"cannot identify native RunShot; no shot was sent")
-    nativeShot=matches[1]
-    local maps={}
-    for _,value in pairs(ups(nativeShot)) do
-        if type(value)=="table" and value~=Physics and value~=Config and type(value.Fire)~="function" then maps[#maps+1]=value end
-    end
-    assert(#maps==1,"cannot identify active shot state")
-    simulations=maps[1]
-    if pointerFn then
-        for index,value in pairs(ups(pointerFn)) do
-            if index~=1 or (value~=nil and typeof(value)~="Vector2") then pointerFn=nil;break end
-        end
-    end
-    local assets=RS:FindFirstChild("Assets")
-    assert(assets and assets:FindFirstChild("Snooker") and assets.Snooker:FindFirstChild("Ball"),"ball asset unavailable")
-    log("native physics + RunShot ready; pointer: "..tostring(pointerFn~=nil and type(setup)=="function"))
+    return false
 end
-local ok,err=pcall(initialize)
-if not ok then say("unavailable: "..tostring(err));return end
-ready=true;say("join a table and place the white ball, then enable")
-
--- SOLVER BEGIN
-local function pointSegment(p,a,b)
-    local v=b-a
-    local t=v:Dot(v)>1e-12 and math.clamp((p-a):Dot(v)/v:Dot(v),0,1) or 0
-    return (p-a-v*t).Magnitude
-end
-local function legalTargets(snap,team,solids)
-    local allowed={}
-    local assigned=solids==1 or solids==2
-    local lo,hi=1,15
-    if assigned then lo,hi=team==solids and 1 or 9,team==solids and 7 or 15 end
-    for _,b in ipairs(snap) do
-        if not b.pocketed and b.id~=0 and b.id~=8 and b.id>=lo and b.id<=hi then allowed[b.id]=true end
-    end
-    if assigned and not next(allowed) then allowed[8]=true end
-    return allowed
-end
-local function newState(frame,snap)
-    local s=Physics.NewState(frame)
-    for _,b in ipairs(snap) do Physics.AddBall(s,b.id,b.pos).Pocketed=b.pocketed end
-    return s
-end
--- Backward unfolding includes the cushion's normal restitution, rather than an ideal mirror.
-local function railPath(a,b,rails,frame,pockets)
-    local e=Config.GetRestitution()
-    local unfolded=b
-    for i=#rails,1,-1 do
-        local r=rails[i]
-        if r.axis==1 then unfolded=Vector3.new(r.k+(r.k-unfolded.X)/e,unfolded.Y,0)
-        else unfolded=Vector3.new(unfolded.X,r.k+(r.k-unfolded.Y)/e,0) end
-    end
-    local delta=unfolded-a
-    if delta.Magnitude<1e-7 then return end
-    local dir=delta.Unit
-    local path={a}
-    local at=a
-    local length=0
-    local l,w=frame.HalfLong-frame.Diameter*.5,frame.HalfShort-frame.Diameter*.5
-    for _,r in ipairs(rails) do
-        local denominator=r.axis==1 and dir.X or dir.Y
-        if math.abs(denominator)<1e-7 then return end
-        local distance=(r.k-(r.axis==1 and at.X or at.Y))/denominator
-        if distance<=1e-5 then return end
-        local hit=at+dir*distance
-        if math.abs(hit.X)>l+1e-4 or math.abs(hit.Y)>w+1e-4 then return end
-        for _,p in ipairs(pockets) do
-            if (p-hit).Magnitude<frame.Diameter*.5*Config.GetPocketRadiusFactor()+.02 then return end
+task.spawn(function()
+    local ok,failure=pcall(function()
+        local blink=RS:FindFirstChild("Blink")
+        local client=blink and blink:FindFirstChild("Client")
+        local candidates={}
+        if client and client:IsA("ModuleScript") then candidates[#candidates+1]=client end
+        for _,obj in ipairs(RS:GetDescendants()) do
+            if obj:IsA("ModuleScript") and obj~=client and selected(obj) then candidates[#candidates+1]=obj end
         end
-        length+=distance;path[#path+1]=hit;at=hit
-        dir=(r.axis==1 and Vector3.new(-dir.X*e,dir.Y,0) or Vector3.new(dir.X,-dir.Y*e,0)).Unit
-    end
-    local final=b-at
-    if final.Magnitude<1e-6 or final.Unit:Dot(dir)<.999 then return end
-    length+=final.Magnitude;path[#path+1]=b
-    return path,length
-end
-local function candidates(frame,snap,allowed)
-    local white
-    for _,b in ipairs(snap) do if b.id==0 and not b.pocketed then white=b end end
-    if not white then return {} end
-    local d=frame.Diameter
-    local pockets=Physics.NewState(frame).Pockets
-    local l,w=frame.HalfLong-d*.5,frame.HalfShort-d*.5
-    local rails={{axis=1,k=l},{axis=1,k=-l},{axis=2,k=w},{axis=2,k=-w}}
-    local groups={direct={},bank={},kick={},double={},combo={},safety={}}
-    local function clear(a,b,ignoreA,ignoreB)
-        for _,o in ipairs(snap) do
-            if not o.pocketed and o.id~=ignoreA and o.id~=ignoreB and pointSegment(o.pos,a,b)<d*.995 then return false end
+        local bytes=0
+        for i,module in ipairs(candidates) do
+            if not alive then return end
+            if i>35 or bytes>5000000 then result.errors[#result.errors+1]="Source limit reached";break end
+            status.Text=string.format("Reading module %d/%d\n%s",i,#candidates,module.Name)
+            local entry={path=module:GetFullName()}
+            if type(decompile)=="function" then
+                local read,source=bounded(function()return decompile(module)end,10)
+                if read and type(source)=="string" then
+                    entry.source=source:sub(1,2000000);entry.truncated=#source>2000000;bytes+=#entry.source
+                else entry.error=tostring(source) end
+            else entry.error="decompile unavailable" end
+            result.modules[#result.modules+1]=entry
         end
-        return true
-    end
-    local function routeClear(path,id,other,cue)
-        for i=1,#path-1 do
-            local second=cue and (i==#path-1 and id or nil) or other
-            if not clear(path[i],path[i+1],cue and 0 or id,second) then return false end
-        end
-        return true
-    end
-    local function add(target,objectPath,objectDistance,cueRails,kind,second,exitCos)
-        local objectDir=(objectPath[2]-objectPath[1]).Unit
-        local ghost=target.pos-objectDir*d
-        if math.abs(ghost.X)>l or math.abs(ghost.Y)>w then return end
-        local cuePath,cueDistance
-        if #cueRails>0 then cuePath,cueDistance=railPath(white.pos,ghost,cueRails,frame,pockets)
-        else cuePath={white.pos,ghost};cueDistance=(ghost-white.pos).Magnitude end
-        if not cuePath or cueDistance<1e-6 then return end
-        local arrival=(cuePath[#cuePath]-cuePath[#cuePath-1]).Unit
-        local cosine=arrival:Dot(objectDir)
-        if cosine<.16 or not routeClear(cuePath,target.id,nil,true) then return end
-        if not routeClear(objectPath,target.id,second or 0,false) then return end
-        local railCount=#cueRails+#objectPath-2
-        local energy=cueDistance+(objectDistance+d*4)/(cosine*cosine*(exitCos or 1)^2)
-        energy/=math.max(.25,Config.GetRestitution()^(railCount*2))
-        local base=math.sqrt(2*Config.GetDecel()*energy)/Config.GetMaxImpulse()
-        if base>1.2 then return end
-        local start=(cuePath[2]-white.pos).Unit
-        groups[kind][#groups[kind]+1]={id=target.id,dir=(frame.Long*start.X+frame.Short*start.Y).Unit,
-            base=base,rank=cosine*4-cueDistance*.04-objectDistance*.035-railCount*.28,
-            kind=kind,cuePath=cuePath,objectPath=objectPath,ghost=ghost,target=target.pos,pocket=objectPath[#objectPath]}
-    end
-    for _,target in ipairs(snap) do
-        if target.pocketed or not allowed[target.id] then continue end
-        for _,pocket in ipairs(pockets) do
-            if (pocket-target.pos).Magnitude<1e-6 then continue end
-            local direct={target.pos,pocket}
-            local length=(pocket-target.pos).Magnitude
-            add(target,direct,length,{},"direct")
-            for _,r in ipairs(rails) do
-                local bank,dist=railPath(target.pos,pocket,{r},frame,pockets)
-                if bank then
-                    add(target,bank,dist,{},"bank")
-                    for _,cueRail in ipairs(rails) do add(target,bank,dist,{cueRail},"double") end
-                end
-                add(target,direct,length,{r},"kick")
-            end
-            for i,r1 in ipairs(rails) do
-                for j,r2 in ipairs(rails) do
-                    if i==j then continue end
-                    local bank,dist=railPath(target.pos,pocket,{r1,r2},frame,pockets)
-                    if bank then add(target,bank,dist,{},"double") end
-                    add(target,direct,length,{r1,r2},"double")
-                end
-            end
-            -- Legal ball-to-ball combination: the first contact and the potted ball are ours.
-            for _,other in ipairs(snap) do
-                if other.id==target.id or other.pocketed or not allowed[other.id] then continue end
-                local exit=pocket-other.pos
-                if exit.Magnitude<1e-6 then continue end
-                local nextGhost=other.pos-exit.Unit*d
-                local incoming=nextGhost-target.pos
-                if incoming.Magnitude<d then continue end
-                local cosine=incoming.Unit:Dot(exit.Unit)
-                if cosine>.25 and clear(other.pos,pocket,other.id,0) then
-                    add(target,{target.pos,nextGhost},incoming.Magnitude+exit.Magnitude/(cosine*cosine),{},"combo",other.id)
-                end
-            end
-        end
-        -- Recovery contacts also go around blockers via one or two cushions.
-        local recoveryRoutes={{}}
-        for i,r1 in ipairs(rails) do
-            recoveryRoutes[#recoveryRoutes+1]={r1}
-            for j,r2 in ipairs(rails) do
-                if i~=j then
-                    recoveryRoutes[#recoveryRoutes+1]={r1,r2}
-                    for k,r3 in ipairs(rails) do if k~=j then recoveryRoutes[#recoveryRoutes+1]={r1,r2,r3} end end
-                end
-            end
-        end
-        for _,rs in ipairs(recoveryRoutes) do
-            local path,distance
-            if #rs==0 then path={white.pos,target.pos};distance=(target.pos-white.pos).Magnitude
-            else path,distance=railPath(white.pos,target.pos,rs,frame,pockets) end
-            if path and distance>d then
-                local dir=(path[2]-path[1]).Unit
-                groups.safety[#groups.safety+1]={id=target.id,dir=(frame.Long*dir.X+frame.Short*dir.Y).Unit,
-                    kind="safety",rank=-distance,base=math.max(.24,math.sqrt(2*Config.GetDecel()*(distance+d*12))/Config.GetMaxImpulse()),
-                    cuePath=path,objectPath={},target=target.pos,ghost=target.pos}
-            end
-        end
-    end
-    for _,g in pairs(groups) do table.sort(g,function(a,b)return a.rank>b.rank end) end
-    local result={}
-    -- Each route family gets turns; direct candidates cannot starve cushions or combinations.
-    for index=1,48 do
-        for _,kind in ipairs({"direct","bank","kick","double","combo","safety"}) do
-            if groups[kind][index] then result[#result+1]=groups[kind][index] end
-        end
-    end
-    return result
-end
-local function rollout(frame,snap,allowed,c,power,angle)
-    local dir=c.dir
-    if angle and angle~=0 then
-        local a=math.atan2(dir.Z,dir.X)+angle
-        dir=Vector3.new(math.cos(a),0,math.sin(a))
-    end
-    local s=newState(frame,snap)
-    Physics.ApplyStrike(s,power,dir)
-    return {state=s,frame=frame,snap=snap,allowed=allowed,c=c,power=power,dir=dir,steps=0,pocketed={},clearance=math.huge}
-end
-local function rolloutStep(r)
-    local s=r.state
-    local cue=Physics.GetBall(s,0)
-    local before=cue and cue.Pos
-    local event=Physics.Step(s)
-    r.steps+=1
-    for _,id in ipairs(event.Pocketed) do r.pocketed[id]=true end
-    -- Confirm a real transfer of motion, not a projected contact beyond a cushion.
-    if not r.firstHit and before then
-        local nearest,chosen=math.huge,nil
-        for _,b in ipairs(s.Balls) do
-            if b.Id~=0 and b.Vel.Magnitude>1e-7 then
-                local distance=(b.Pos-before).Magnitude
-                if distance<nearest then nearest,chosen=distance,b.Id end
-            end
-        end
-        if chosen then r.firstHit=chosen end
-    end
-    if cue then
-        for _,p in ipairs(s.Pockets) do r.clearance=math.min(r.clearance,(cue.Pos-p).Magnitude-s.PocketRadius) end
-    end
-    if r.pocketed[0] or (r.pocketed[8] and not r.allowed[8]) or (r.firstHit and not r.allowed[r.firstHit]) then return true end
-    if Physics.Settled(s) then
-        if not r.firstHit or r.clearance<r.frame.Diameter*.04 then return true end
-        local own,opponent=0,0
-        for id in pairs(r.pocketed) do
-            if r.allowed[id] then own+=1 else opponent+=1 end
-        end
-        if opponent>0 then return true end
-        r.result={own=own,score=own*1000+math.min(r.clearance,2)*5-r.power*.3,clearance=r.clearance,pocketed=table.clone(r.pocketed)}
-        return true
-    end
-    return r.steps>=math.ceil(Config.GetMaxSimTime()/Config.GetFixedDt())
-end
--- Numeric broad search; only candidates checked again by the live game physics may be fired.
-local function fastRollout(frame,snap,allowed,c,power,angle)
-    local dir=c.dir
-    if angle and angle~=0 then
-        local a=math.atan2(dir.Z,dir.X)+angle;dir=Vector3.new(math.cos(a),0,math.sin(a))
-    end
-    local vx,vy=dir:Dot(frame.Long),dir:Dot(frame.Short)
-    local mag=math.sqrt(vx*vx+vy*vy)
-    local speed=power*Config.GetMaxImpulse()
-    local r={fast=true,c=c,power=power,dir=dir,frame=frame,allowed=allowed,steps=0,pocketed={},clearance=math.huge,
-        balls={},dt=Config.GetFixedDt(),decel=Config.GetDecel(),e=Config.GetRestitution(),rest=Config.GetRestSpeed(),
-        d=frame.Diameter,limit=math.ceil(Config.GetMaxSimTime()/Config.GetFixedDt()),near=math.huge}
-    local hl,hs=frame.HalfLong,frame.HalfShort
-    r.l=hl-r.d*.5;r.w=hs-r.d*.5;r.pr=r.d*.5*Config.GetPocketRadiusFactor()
-    r.pockets={{hl,hs},{hl,-hs},{-hl,hs},{-hl,-hs},{0,hs},{0,-hs}}
-    for _,b in ipairs(snap) do
-        r.balls[#r.balls+1]={id=b.id,x=b.pos.X,y=b.pos.Y,vx=b.id==0 and vx/mag*speed or 0,
-            vy=b.id==0 and vy/mag*speed or 0,p=b.pocketed}
-    end
-    return r
-end
-local function fastStep(r)
-    local balls,n=r.balls,#r.balls
-    local maxv=0
-    for i=1,n do local b=balls[i];if not b.p then maxv=math.max(maxv,b.vx*b.vx+b.vy*b.vy) end end
-    local subs=math.clamp(math.ceil(math.sqrt(maxv)*r.dt/(r.d*.125)),1,32)
-    local dt=r.dt/subs
-    local d2,pr2=r.d*r.d,r.pr*r.pr
-    for _=1,subs do
-        for i=1,n do
-            local b=balls[i]
-            if b.p then continue end
-            b.x+=b.vx*dt;b.y+=b.vy*dt
-            local speed=math.sqrt(b.vx*b.vx+b.vy*b.vy)
-            if speed>0 then
-                local nextSpeed=math.max(0,speed-r.decel*dt)
-                if nextSpeed<=r.rest then b.vx=0;b.vy=0
-                else local scale=nextSpeed/speed;b.vx*=scale;b.vy*=scale end
-            end
-            for j=1,6 do
-                local p=r.pockets[j];local x,y=b.x-p[1],b.y-p[2]
-                if x*x+y*y<=pr2 then b.p=true;b.vx=0;b.vy=0;r.pocketed[b.id]=true;break end
-            end
-            if not b.p then
-                if b.x>r.l then b.x=r.l;b.vx=-b.vx*r.e elseif b.x< -r.l then b.x=-r.l;b.vx=-b.vx*r.e end
-                if b.y>r.w then b.y=r.w;b.vy=-b.vy*r.e elseif b.y< -r.w then b.y=-r.w;b.vy=-b.vy*r.e end
-            end
-        end
-        for i=1,n do
-            local a=balls[i];if a.p then continue end
-            for j=i+1,n do
-                local b=balls[j];if b.p then continue end
-                local x,y=b.x-a.x,b.y-a.y
-                if math.abs(x)>=r.d or math.abs(y)>=r.d then continue end
-                local q=x*x+y*y
-                if q>=d2 or q<=1e-10 then continue end
-                local length=math.sqrt(q);local nx,ny=x/length,y/length
-                local overlap=r.d-length
-                local av=math.max(a.vx*nx+a.vy*ny,0)
-                local bv=math.max(-b.vx*nx-b.vy*ny,0)
-                local sum=av+bv
-                local wa,wb=.5,.5
-                if sum>1e-5 then wa=bv/sum;wb=av/sum end
-                a.x-=nx*overlap*wa;a.y-=ny*overlap*wa
-                b.x+=nx*overlap*wb;b.y+=ny*overlap*wb
-                local approach=(a.vx-b.vx)*nx+(a.vy-b.vy)*ny
-                if approach<=0 then continue end
-                if not r.firstHit then
-                    if a.id==0 then r.firstHit=b.id elseif b.id==0 then r.firstHit=a.id end
-                end
-                local impulse=approach*(1+r.e)*.5
-                local ix,iy=nx*impulse,ny*impulse
-                a.vx-=ix;a.vy-=iy;b.vx+=ix;b.vy+=iy
-            end
-        end
-    end
-    r.steps+=1
-    local settled=true
-    for i=1,n do
-        local b=balls[i]
-        if not b.p and b.vx*b.vx+b.vy*b.vy>r.rest*r.rest then settled=false end
-        if b.id==0 then
-            for j=1,6 do local p=r.pockets[j];local x,y=b.x-p[1],b.y-p[2]
-                r.clearance=math.min(r.clearance,math.sqrt(x*x+y*y)-r.pr)
-            end
-        end
-    end
-    if r.pocketed[0] or (r.pocketed[8] and not r.allowed[8]) or (r.firstHit and not r.allowed[r.firstHit]) then return true end
-    -- Track promising misses only after legal contact, at a reduced sampling rate.
-    if r.firstHit and r.steps%8==0 then
-        for _,b in ipairs(balls) do
-            if not b.p and r.allowed[b.id] and b.vx*b.vx+b.vy*b.vy>r.rest*r.rest then
-                for _,p in ipairs(r.pockets) do
-                    local x,y=b.x-p[1],b.y-p[2]
-                    r.near=math.min(r.near,x*x+y*y)
-                end
-            end
-        end
-    end
-    if settled then
-        if not r.firstHit or r.clearance<r.d*.04 then return true end
-        local own,opponent=0,0
-        for id in pairs(r.pocketed) do if r.allowed[id] then own+=1 else opponent+=1 end end
-        if opponent==0 then r.result={own=own,score=own*1000+math.min(r.clearance,2)*5-r.power*.3,clearance=r.clearance} end
-        return true
-    end
-    return r.steps>=r.limit
-end
-
-local function createSearch(frame,snap,allowed,style)
-    local options=next(allowed) and candidates(frame,snap,allowed) or {}
-    return {frame=frame,snap=snap,allowed=allowed,options=options,index=1,wave=1,completed=0,total=0,
-        validated=0,fastCount=0,nativeCount=0,seen={},stage=1,sweep=0,style=style or "legit",
-        near={},refinements={},refineIndex=1,issued=0}
-end
-local function makeShot(c,power,result,tests)
-    return {id=c.id,dir=c.dir,power=power,kind=c.kind,cuePath=c.cuePath,objectPath=c.objectPath,
-        ghost=c.ghost,target=c.target,pocket=c.pocket,score=result.score,own=result.own,verified=tests or 0,pocketed=result.pocketed}
-end
-local function sweepTrial(search)
-    local step=search.sweep;search.sweep+=1
-    -- Golden-angle ordering covers the whole table early instead of sweeping one quadrant first.
-    local angle=step*2.399963229728653
-    local dir=Vector3.new(math.cos(angle),0,math.sin(angle))
-    local p=search.snap[1].pos
-    local localDir=Vector3.new(dir:Dot(search.frame.Long),dir:Dot(search.frame.Short),0)
-    return {id=0,kind="ricochet",dir=dir,cuePath={p,p+localDir},objectPath={},ghost=p+localDir,target=p,rank=0},1,0
-end
-local function queueRefinements(search)
-    table.sort(search.near,function(a,b)return a.distance<b.distance end)
-    for i=1,math.min(8,#search.near) do
-        local n=search.near[i]
-        for _,angle in ipairs({.15,-.15,.45,-.45,1,-1}) do
-            search.refinements[#search.refinements+1]={c=n.c,power=n.power,angle=math.rad(angle)}
-        end
-        for _,scale in ipairs({.96,1.04,.85}) do
-            search.refinements[#search.refinements+1]={c=n.c,power=math.clamp(n.power*scale,.06,1),angle=0}
-        end
-    end
-    table.clear(search.near)
-end
-local function nextTrial(search)
-    if not next(search.allowed) then return end
-    search.issued+=1
-    local options=search.options
-    if search.issued%6==0 and search.refineIndex<=#search.refinements then
-        local q=search.refinements[search.refineIndex];search.refineIndex+=1
-        return q.c,q.power,q.angle
-    end
-    -- One broad full-power direction every twelve targeted trials.
-    if search.issued%12==0 and search.sweep<128 then return sweepTrial(search) end
-    while search.stage<=4 do
-        if search.stage==1 then
-            -- Every route family gets full power before low-power fallbacks.
-            if search.index>math.min(24,#options) then search.index=1;search.stage=2;continue end
-            local c=options[search.index];search.index+=1
-            return c,1,0
-        elseif search.stage==2 then
-            -- Rescue straightforward pots before spending the budget on remote possibilities.
-            if search.index>math.min(18,#options) then
-                search.index=25;search.wave=1;search.stage=3;queueRefinements(search);continue
-            end
-            local c=options[search.index];search.index+=1
-            return c,math.clamp(c.base*1.22,.06,1),0
-        elseif search.stage==3 then
-            if search.refineIndex<=#search.refinements and search.issued%3==0 then
-                local q=search.refinements[search.refineIndex];search.refineIndex+=1
-                return q.c,q.power,q.angle
-            end
-            if search.index>#options then search.index=1;search.wave+=1 end
-            if search.wave>3 or #options==0 then search.stage=4;queueRefinements(search);continue end
-            local c=options[search.index];search.index+=1
-            local powers={1,.8,math.clamp(c.base*1.5,.06,1)}
-            return c,powers[search.wave],0
-        else
-            if search.refineIndex<=#search.refinements then
-                local q=search.refinements[search.refineIndex];search.refineIndex+=1
-                return q.c,q.power,q.angle
-            end
-            if search.sweep<128 then return sweepTrial(search) end
-            search.stage=5
-        end
-    end
-end
-local function advanceSearch(search,checkpoint)
-    while not search.done do
-        if not checkpoint() then return search.best end
-        if not search.active then
-            local proposal=search.proposal
-            if proposal then
-                local variants=search.style=="instant" and {{1,0}} or {{1,0},{.94,0},{1.06,0},{1,-math.rad(.2)},{1,math.rad(.2)}}
-                local variant=variants[proposal.next]
-                if not variant then
-                    local shot=makeShot(proposal.c,proposal.power,proposal.result,proposal.next-2)
-                    search.validated+=1;search.proposal=nil
-                    if proposal.safety then
-                        if not search.safety or shot.score>search.safety.score then search.safety=shot end
-                        continue
-                    end
-                    if not search.best or shot.score>search.best.score then search.best=shot end
-                    return search.best
-                end
-                search.active=rollout(search.frame,search.snap,search.allowed,proposal.c,math.clamp(proposal.power*variant[1],.06,1),variant[2])
-                search.checking=true
-            else
-                local c,power,angle=nextTrial(search)
-                if not c then search.done=true;break end
-                local key=string.format("%.5f/%.5f/%.5f/%.5f",c.dir.X,c.dir.Z,power,angle)
-                if search.seen[key] then continue end
-                search.seen[key]=true
-                search.active=fastRollout(search.frame,search.snap,search.allowed,c,power,angle)
-                search.checking=false
-            end
-        end
-        local finished
-        if search.active.fast then finished=fastStep(search.active) else finished=rolloutStep(search.active) end
-        if finished then
-            local r=search.active
-            search.active=nil;search.completed+=1
-            if r.fast then
-                search.fastCount+=1
-                if r.result and r.result.own==0 and r.near< (r.pr+r.d*2)^2 then
-                    local c=table.clone(r.c);c.dir=r.dir
-                    search.near[#search.near+1]={c=c,power=r.power,distance=r.near}
-                    if #search.refinements<12 and r.near<(r.pr+r.d*.5)^2 then
-                        for _,angle in ipairs({.15,-.15,.45,-.45}) do
-                            search.refinements[#search.refinements+1]={c=c,power=r.power,angle=math.rad(angle)}
+        if not alive then return end
+        if client then
+            local loaded,api=bounded(function()return require(client)end,5)
+            if loaded and type(api)=="table" then
+                local visited={}
+                local function describe(value,path,depth)
+                    if visited[value] or depth>5 or #result.api>=700 then return end
+                    visited[value]=true
+                    for key,item in pairs(value) do
+                        if type(key)~="string" then continue end
+                        local name=path.."."..key
+                        if type(item)=="table" then describe(item,name,depth+1)
+                        elseif type(item)=="function" then
+                            local entry={path=name}
+                            -- Metadata only. Never invoke Fire/Invoke or game actions.
+                            for _,reader in pairs({global=getconstants,debug=debug and debug.getconstants}) do
+                                if type(reader)=="function" then
+                                    local good,constants=pcall(reader,item)
+                                    if good and type(constants)=="table" and next(constants) then
+                                        entry.constants={}
+                                        for index,v in pairs(constants) do
+                                            if type(v)=="string" or type(v)=="number" or type(v)=="boolean" then
+                                                entry.constants[#entry.constants+1]={index=tostring(index),value=v}
+                                            end
+                                        end
+                                        break
+                                    end
+                                end
+                            end
+                            result.api[#result.api+1]=entry
                         end
                     end
-                    if #search.near>24 then
-                        table.sort(search.near,function(a,b)return a.distance<b.distance end)
-                        while #search.near>12 do table.remove(search.near) end
-                    end
                 end
-            else search.nativeCount+=1 end
-            if search.checking then
-                local proposal=search.proposal
-                local minimum=proposal.next==1 and (proposal.safety and 0 or 1) or proposal.result.own
-                if not r.result or r.result.own<minimum then search.proposal=nil
-                else
-                    if proposal.next==1 then proposal.result=r.result end
-                    proposal.result.score=math.min(proposal.result.score,r.result.score)
-                    proposal.next+=1
-                end
-            elseif r.result and r.result.own>0 then
-                local aimed=table.clone(r.c);aimed.dir=r.dir;aimed.id=r.firstHit or r.c.id
-                if aimed.kind=="safety" then aimed.kind="ricochet" end
-                search.proposal={c=aimed,power=r.power,result=r.result,next=1}
-            elseif r.result and r.c.kind=="safety" then
-                -- Kept separately; never advertise simple contact as a verified pot.
-                if not search.fallback then
-                    local aimed=table.clone(r.c);aimed.dir=r.dir;aimed.id=r.firstHit or r.c.id
-                    search.fallback={c=aimed,power=r.power,result=r.result,next=1,safety=true}
+                describe(api,"Blink.Client",0)
+            else result.errors[#result.errors+1]="Blink API: "..tostring(api) end
+        end
+        local map=workspace:FindFirstChild("Map")
+        local house=map and map:FindFirstChild("House")
+        house=house and house:FindFirstChild("House")
+        local kitchen=house and house:FindFirstChild("Chicken")
+        if kitchen then
+            for _,obj in ipairs(kitchen:GetDescendants()) do
+                if #result.kitchen>=650 then break end
+                if obj:IsA("Model") or obj:IsA("ProximityPrompt") then
+                    local entry={path=obj:GetFullName(),class=obj.ClassName}
+                    if obj:IsA("ProximityPrompt") then entry.action=obj.ActionText;entry.enabled=obj.Enabled end
+                    result.kitchen[#result.kitchen+1]=entry
                 end
             end
+        else result.errors[#result.errors+1]="Kitchen not loaded" end
+        if type(env.__REF_COOK_EXPORT)=="function" then
+            local got,text=pcall(env.__REF_COOK_EXPORT)
+            if got then result.cookingLog=text end
         end
-    end
-    return search.best
-end
-local function evaluate(frame,snap,allowed,c,power,checkpoint)
-    local r=rollout(frame,snap,allowed,c,power)
-    repeat if not checkpoint() then return end until rolloutStep(r)
-    return r.result and r.result.score
-end
-local function choose(frame,snap,allowed,checkpoint)
-    return advanceSearch(createSearch(frame,snap,allowed),checkpoint)
-end
--- SOLVER END
-
-
-
-
-
-local function ownTable()
-    local folder=workspace:FindFirstChild("Snookers")
-    if not folder then return end
-    local found
-    for _,t in ipairs(folder:GetChildren()) do
-        if t:GetAttribute("Team1Id")==player.UserId or t:GetAttribute("Team2Id")==player.UserId then
-            if found then return nil,"multiple active tables" end
-            found=t
-        end
-    end
-    return found
-end
-local function placing(t)
-    -- Client.Start closes over the native per-table placement map.
-    for _,value in pairs(ups(Client.Start)) do
-        if type(value)=="table" and rawget(value,t)==true then return true end
-    end
-    return false
-end
-local lastSubmission
-local pendingResult
-local function canPlay(t)
-    if not t or not t.Parent then return false,"join a table" end
-    if t:GetAttribute("ShooterId")~=player.UserId then return false,"waiting for your turn" end
-    if simulations[t] or t:GetAttribute("SnookerBusy") then return false,"balls in motion" end
-    if placing(t) then return false,"place the white ball using the game controls" end
-    local balls=t:FindFirstChild("Balls")
-    local white=balls and balls:FindFirstChild("White")
-    if not white or white:GetAttribute("Pocketed") then return false,"place the white ball using the game controls" end
-    local ends=t:GetAttribute("TurnEnds")
-    if type(ends)~="number" or workspace:GetServerTimeNow()>=ends-.25 then return false,"waiting for turn state" end
-    if lastSubmission and lastSubmission.table==t and lastSubmission.turn==ends then
-        return false,"waiting for shot confirmation"
-    end
-    return true
-end
-local function capture(t)
-    local diameter=RS.Assets.Snooker.Ball:GetExtentsSize().X
-    local frameData=Physics.BuildFrame(t,diameter)
-    assert(frameData and diameter>0,"invalid table geometry")
-    local snap={}
-    for _,model in ipairs(t.Balls:GetChildren()) do
-        if not model:IsA("Model") then continue end
-        local id=model:GetAttribute("BallId")
-        local part=model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
-        if type(id)=="number" and part then
-            snap[#snap+1]={id=id,pos=Physics.WorldToLocal(frameData,part.Position),world=part.Position,
-                model=model,part=part,pocketed=model:GetAttribute("Pocketed")==true}
-        end
-    end
-    table.sort(snap,function(a,b) return a.id<b.id end)
-    assert(#snap>1 and snap[1].id==0,"ball state unavailable")
-    return frameData,snap
-end
-local function unchanged(snap)
-    for _,b in ipairs(snap) do
-        if not b.model.Parent or not b.part.Parent or (b.part.Position-b.world).Magnitude>.0005
-            or (b.model:GetAttribute("Pocketed")==true)~=b.pocketed then return false end
-    end
-    return true
-end
-local function drawLine(part,a,b)
-    local len=(b-a).Magnitude
-    if len<.005 then part.Transparency=1;return end
-    part.Size=Vector3.new(.025,.025,len)
-    part.CFrame=CFrame.lookAt((a+b)*.5,b);part.Transparency=.25
-end
-local routeLines={}
-local function clearRoutes()
-    for _,part in ipairs(routeLines) do if part.Parent then part.Transparency=1 end end
-end
-local oldHide=hidePreview
-hidePreview=function() clearRoutes();oldHide() end
-local function previewAim(frameData,snap,shot,dir)
-    local from=Physics.LocalToWorld(frameData,snap[1].pos)+Vector3.new(0,.12,0)
-    local path=shot.cuePath or {snap[1].pos,shot.ghost}
-    local distance=(path[2]-path[1]).Magnitude
-    drawLine(aimLine,from,from+dir*distance)
-    targetLine.Transparency=1
-    clearRoutes()
-    local index=0
-    local function segment(a,b)
-        index+=1
-        if not routeLines[index] then routeLines[index]=line() end
-        drawLine(routeLines[index],Physics.LocalToWorld(frameData,a)+Vector3.new(0,.12,0),Physics.LocalToWorld(frameData,b)+Vector3.new(0,.12,0))
-    end
-    for i=2,#path-1 do segment(path[i],path[i+1]) end
-    for i=1,#(shot.objectPath or {})-1 do segment(shot.objectPath[i],shot.objectPath[i+1]) end
-    if pointerFn and type(setup)=="function" and workspace.CurrentCamera then
-        local p,visible=workspace.CurrentCamera:WorldToScreenPoint(from-Vector3.new(0,.12,0)+dir*math.max(distance,1))
-        if visible then
-            if not pointerOwned then pointerBefore=ups(pointerFn)[1];pointerOwned=true end
-            pcall(setup,pointerFn,1,Vector2.new(p.X,p.Y))
-        end
-    end
-end
-local cachedSearch
-local function turn(t,token)
-    local turnEnd=t:GetAttribute("TurnEnds")
-    local team=t:GetAttribute("Team1Id")==player.UserId and 1 or 2
-    local solids=t:GetAttribute("SolidsTeam")
-    local cache=cachedSearch
-    if not cache or cache.table~=t or cache.turn~=turnEnd or cache.solids~=solids or cache.style~=mode or not unchanged(cache.snap) then
-        local created=os.clock()
-        local frameData,snap=capture(t)
-        cache={started=created,epoch=token,table=t,turn=turnEnd,solids=solids,style=mode,frame=frameData,snap=snap,
-            search=createSearch(frameData,snap,legalTargets(snap,team,solids),mode)}
-        cachedSearch=cache
-    end
-    if cache.epoch~=token then cache.epoch=token;cache.started=os.clock();cache.exhausted=false end
-    if cache.exhausted then say("no confirmed pot within search budget — waiting for a new layout");return end
-    local frameData,snap=cache.frame,cache.snap
-    if cache.search.done and not cache.search.best and not cache.search.safety then
-        say("no safe route in this layout");return
-    end
-    local function valid()
-        return alive and enabled and epoch==token and t.Parent
-            and t:GetAttribute("TurnEnds")==turnEnd and t:GetAttribute("SolidsTeam")==solids
-            and canPlay(t) and unchanged(snap)
-    end
-    local available=turnEnd-workspace:GetServerTimeNow()-(mode=="legit" and aimTime or 0)-.75
-    if available<.2 then say("not enough time left for this turn");return end
-    local cap=mode=="instant" and 2 or 7
-    local elapsed=os.clock()-cache.started
-    local grace=cache.search.proposal and .8 or 0
-    local remaining=math.min(available,math.max(0,cap+grace-elapsed))
-    local deadline=os.clock()+remaining
-    local lastYield=os.clock()
-    local function checkpoint()
-        if os.clock()>=deadline or not alive or not enabled or epoch~=token then return false end
-        if os.clock()-lastYield>.014 then
-            task.wait();lastYield=os.clock()
-            if not valid() then return false end
-        end
-        return true
-    end
-    say(string.format("search | %d fast / %d native",cache.search.fastCount,cache.search.nativeCount))
-    local shot=cache.search.best
-    if remaining>0 then shot=advanceSearch(cache.search,checkpoint) end
-    -- Only validate a recovery contact after the pot search budget, not before it.
-    if not shot and cache.search.fallback and not cache.search.proposal
-        and (os.clock()-cache.started>=cap or cache.search.done) then
-        cache.search.proposal=cache.search.fallback;cache.search.fallback=nil;cache.search.done=false
-        deadline=os.clock()+math.min(.8,math.max(0,turnEnd-workspace:GetServerTimeNow()-.5))
-        shot=advanceSearch(cache.search,checkpoint)
-    end
-    if not shot and cache.search.safety and (os.clock()-cache.started>=cap+(cache.search.proposal and .8 or 0) or cache.search.done or turnEnd-workspace:GetServerTimeNow()<(mode=="legit" and aimTime or 0)+3.8) then
-        shot=cache.search.safety
-    end
-    if not valid() then hidePreview();return end
-    if not shot then
-        if os.clock()-cache.started>=cap+(cache.search.proposal and .8 or 0) then
-            cache.exhausted=true
-            say("search limit — no confirmed shot; use manual play")
-            return
-        end
-        say(cache.search.done and "no safe route in this layout" or string.format("searching cushions / combinations | %d tested",cache.search.completed))
-        return
-    end
-    log(string.format("search finished %.2fs | %d fast / %d native",os.clock()-cache.started,cache.search.fastCount,cache.search.nativeCount))
-    log(string.format("%s | target %d | power %.3f | predicted pots %d | %d variation checks",shot.kind,shot.id,shot.power,shot.own,shot.verified))
-    if shot.own==0 then say("recovery contact — no pot predicted") end
-    if mode=="legit" then
-        say(string.format("aiming at %d | %.1fs",shot.id,aimTime))
-        local started=os.clock()
-        -- Rotate toward the selected line during the configured aiming time.
-        local startAngle=math.atan2(shot.dir.Z,shot.dir.X)+.25
-        while os.clock()-started<aimTime do
-            if not valid() then hidePreview();return end
-            local a=math.clamp((os.clock()-started)/aimTime,0,1)
-            local angle=startAngle-.25*(a*a*(3-2*a))
-            previewAim(frameData,snap,shot,Vector3.new(math.cos(angle),0,math.sin(angle)))
-            Run.RenderStepped:Wait()
-        end
-    end
-    if not valid() then hidePreview();return end
-    previewAim(frameData,snap,shot,shot.dir)
-    -- Same ordering as the client's own shot callback. Native RunShot owns the result.
-    lastSubmission={table=t,turn=turnEnd}
-    local success,err=pcall(function()
-        RS.Modules.Events.RemoteEvent:FireServer("SnookerAimEnd",t)
-        Blink.Snooker.Strike.Fire({Table=t,Power=shot.power,Heading=shot.dir})
-        nativeShot(t,shot.power,shot.dir,true)
-        pendingResult={table=t,snap=snap,expected=shot.pocketed or {},start=os.clock(),busy=false}
     end)
-    hidePreview()
-    if not success then
-        stop();say("shot error: "..tostring(err));return
-    end
-    say("shot sent — waiting for the balls")
-end
-local function observeResult()
-    local p=pendingResult
-    if not p then return false end
-    if not p.table.Parent then log("result unavailable: table removed");pendingResult=nil;return false end
-    if simulations[p.table] or p.table:GetAttribute("SnookerBusy") then p.busy=true;p.settledAt=nil;return true end
-    if not p.busy and os.clock()-p.start<2 then return true end
-    p.settledAt=p.settledAt or os.clock()
-    if os.clock()-p.settledAt<.05 then return true end
-    local actual,expected,match={}, {},true
-    local seen={}
-    for _,b in ipairs(p.snap) do
-        if not b.pocketed and b.model.Parent and b.model:GetAttribute("Pocketed")==true then
-            actual[#actual+1]=b.id;seen[b.id]=true
-            if not p.expected[b.id] then match=false end
-        end
-    end
-    for id in pairs(p.expected) do expected[#expected+1]=id;if not seen[id] then match=false end end
-    table.sort(actual);table.sort(expected)
-    if not match and p.table:GetAttribute("ShooterId")==nil then
-        log("result unavailable: round ended before confirmation")
-        pendingResult=nil;return false
-    end
-    log(string.format("result | predicted [%s] / observed [%s] | %s",table.concat(expected,","),table.concat(actual,","),match and "matched" or "DIFFERENT"))
-    pendingResult=nil
-    return false
-end
-local failedState,failedTime
-while alive do
-    task.wait(mode=="instant" and .03 or .1)
-    local resultPending=observeResult()
-    if not enabled or resultPending then continue end
-    local t,why=ownTable()
-    local available,reason=canPlay(t)
-    if not available then hidePreview();say(why or reason);continue end
-    -- Recalculate when ball or turn state changes. Avoid constantly repeating an unsolved layout.
-    local signature=tostring(t)..":"..tostring(t:GetAttribute("TurnEnds"))
-    if failedState==signature and os.clock()-(failedTime or 0)<.15 then continue end
-    local success,err=pcall(turn,t,epoch)
-    if not success then
-        hidePreview();say("planning error: "..tostring(err))
-        failedState,failedTime=signature,os.clock()
-    elseif not lastSubmission or lastSubmission.table~=t or lastSubmission.turn~=t:GetAttribute("TurnEnds") then
-        failedState,failedTime=signature,os.clock()
-    end
-end
+    if not alive then return end
+    if not ok then result.errors[#result.errors+1]=tostring(failure) end
+    encoded=HTTP:JSONEncode(result)
+    env.__REF_COOK_PROTOCOL_REPORT=encoded
+    local saved,saveError=pcall(function()
+        assert(type(writefile)=="function" and type(makefolder)=="function" and type(isfolder)=="function","File API unavailable")
+        for _,folder in ipairs({"True Ref","True Ref/Logs"}) do if not isfolder(folder) then makefolder(folder) end end
+        writefile(output,encoded)
+    end)
+    status.Text=saved and "Done. Saved in workspace/"..output or "Done. Copy the report below."
+    print("[ref/cooking diagnostic] "..(saved and output or tostring(saveError)))
+end)
