@@ -13,6 +13,7 @@ local remote=assert(eventModule:FindFirstChild("RemoteEvent"),"RemoteEvent missi
 local info=assert(modules:FindFirstChild("Information"),"Information missing")
 local fightModule=assert(info:FindFirstChild("fishFightInfo"),"fishFightInfo missing")
 local alive,armed,ready=false,false,false
+local mode="immediate"
 local fightInfo,active
 local connections,records,counts={},{},{}
 local started=os.clock()
@@ -24,7 +25,7 @@ local function make(class,parent,props)
     for k,v in pairs(props) do o[k]=v end
     o.Parent=parent;return o
 end
-local frame=make("Frame",gui,{Size=UDim2.fromOffset(310,190),Position=UDim2.new(0.5,-155,0,40),
+local frame=make("Frame",gui,{Size=UDim2.fromOffset(310,226),Position=UDim2.new(0.5,-155,0,40),
     BackgroundColor3=Color3.fromRGB(22,22,24),BorderSizePixel=0})
 make("UICorner",frame,{CornerRadius=UDim.new(0,10)})
 make("TextLabel",frame,{Text="park · one-round skip test",Size=UDim2.new(1,-45,0,35),BackgroundTransparency=1,
@@ -51,27 +52,34 @@ connect(gui.Destroying,function()
 end)
 button("×",270,3,30,function() gui:Destroy() end)
 local armButton
-armButton=button("test next fish",12,116,286,function()
+armButton=button("test next fish",12,152,286,function()
     if not ready then message("timing module not ready");return end
     if active and active.sent then message("attempt already sent; waiting for the result");return end
     if active or armed then
         active=nil;armed=false;armButton.Text="test next fish";log("cancel",{});message("cancelled; no pending request")
     else
-        armed=true;armButton.Text="cancel";log("armed",{});message("cast manually; leave the minigame untouched")
+        armed=true;armButton.Text="cancel";log("armed",{mode=mode});message("cast manually; leave the minigame untouched")
     end
 end)
+local modeButton
+modeButton=button("mode: immediate",12,116,286,function()
+    if active or armed then message("cancel or finish the current attempt before changing mode");return end
+    mode=mode=="immediate" and "timed" or "immediate"
+    modeButton.Text="mode: "..mode
+    message(mode=="immediate" and "sends once at round start; server acceptance unverified" or "uses the previously successful timed approach")
+end)
 local function export()
-    return Http:JSONEncode({version="Park skip test 1",place=game.PlaceId,records=records,
+    return Http:JSONEncode({version="Park skip test 2",place=game.PlaceId,records=records,
         note="One result request per armed round. Local submission is not server confirmation. Compare inventory and capture observations; normal game scripts remain active."})
 end
-button("copy log",12,152,139,function()
+button("copy log",12,188,139,function()
     local ok,err=pcall(function()
         local copy=type(setclipboard)=="function" and setclipboard or type(toclipboard)=="function" and toclipboard
         assert(copy,"clipboard unavailable");copy(export())
     end)
     message(ok and "log copied" or tostring(err))
 end)
-button("save log",159,152,139,function()
+button("save log",159,188,139,function()
     local filename="park-skip-test-"..os.date("%Y%m%d-%H%M%S")..".json"
     local ok,err=pcall(function() assert(type(writefile)=="function","writefile unavailable");writefile(filename,export()) end)
     message(ok and ("workspace/"..filename) or tostring(err))
@@ -115,20 +123,21 @@ connect(remote.OnClientEvent,function(event,owner,payload,fish)
         end
         local round={id=payload.id,fish=payload.fish,pattern=payload.pattern,before=counts[payload.fish],sent=false}
         active=round
-        -- Allow the observed 1.25-second preview plus a small scheduling margin.
-        local delay=minimum+1.6
-        log("round",{id=round.id,fish=round.fish,pattern=round.pattern,minimum=minimum,delay=delay})
+        -- Immediate tests server acceptance without falsifying the progress display.
+        local delay=mode=="immediate" and 0 or minimum+1.6
+        log("round",{id=round.id,fish=round.fish,pattern=round.pattern,minimum=minimum,delay=delay,mode=mode})
         message(string.format("%s · %s\none attempt in %.1fs",round.fish,tostring(round.pattern),delay))
-        task.delay(delay,function()
+        local function submit()
             if not alive or active~=round then return end
-            if player:GetAttribute("fishingState")~="battle" then conclude(round,"not in battle");return end
+            if delay>0 and player:GetAttribute("fishingState")~="battle" then conclude(round,"not in battle");return end
             round.sent=true
             local sent,err=pcall(function() remote:FireServer("fishFightResult",round.id,"win",100) end)
             log("submission",{id=round.id,localCallSucceeded=sent,error=not sent and tostring(err) or nil})
             if not sent then conclude(round,"local call failed");return end
             message("request sent once; checking server observations")
             task.delay(8,function() conclude(round,"observation timeout") end)
-        end)
+        end
+        if delay==0 then submit() else task.delay(delay,submit) end
     elseif event=="Effect" and owner=="createFish" and payload==player then
         local round=active
         if round and round.sent and fish==round.fish then round.effect=true;log("capture effect",{fish=fish}) end
