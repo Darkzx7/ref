@@ -1,116 +1,151 @@
--- Inspect only the fishing client modules found in the manual recording.
--- Does not require modules, replace functions, send remotes or modify the game.
+-- One attempt for the next manually started fishing round. No hooks or input injection.
 local Players=game:GetService("Players")
 local RS=game:GetService("ReplicatedStorage")
 local Http=game:GetService("HttpService")
 local player=Players.LocalPlayer
-assert(player,"Run on the client")
 local pg=player:WaitForChild("PlayerGui")
-local old=pg:FindFirstChild("REF_ParkFishingProtocol")
+local old=pg:FindFirstChild("REF_ParkSkipTest")
 if old then old:Destroy() end
-local alive=true
-local report={version="Park fishing protocol 1",place=game.PlaceId,
-    exported=os.date("!%Y-%m-%dT%H:%M:%SZ"),
-    note="Read-only client source inspection. Decompiled source may be inaccurate. No module execution or remote calls.",
-    decompilerAvailable=type(decompile)=="function",modules={}}
-local paths={
-    {"Shared","UI","HUD","FishFight"},
-    {"Shared","Modules","Tools","FishingRod"},
-    {"Shared","Modules","Information","fishFightInfo"},
-    {"Shared","Modules","Information","fishOrientInfo"},
-    {"Shared","Modules","Information","fishGripInfo"},
-    {"Shared","Modules","Information","fishingInfo"},
-    {"Shared","Modules","events"},
-}
+local shared=assert(RS:FindFirstChild("Shared"),"Shared missing")
+local modules=assert(shared:FindFirstChild("Modules"),"Modules missing")
+local eventModule=assert(modules:FindFirstChild("events"),"events missing")
+local remote=assert(eventModule:FindFirstChild("RemoteEvent"),"RemoteEvent missing")
+local info=assert(modules:FindFirstChild("Information"),"Information missing")
+local fightModule=assert(info:FindFirstChild("fishFightInfo"),"fishFightInfo missing")
+local alive,armed,ready=false,false,false
+local fightInfo,active
+local connections,records,counts={},{},{}
+local started=os.clock()
 local gui=Instance.new("ScreenGui")
-gui.Name="REF_ParkFishingProtocol";gui.ResetOnSpawn=false;gui.DisplayOrder=1000;gui.Parent=pg
-gui.Destroying:Connect(function() alive=false end)
+gui.Name="REF_ParkSkipTest";gui.ResetOnSpawn=false;gui.DisplayOrder=1000;gui.Parent=pg
+alive=true
 local function make(class,parent,props)
     local o=Instance.new(class)
     for k,v in pairs(props) do o[k]=v end
     o.Parent=parent;return o
 end
-local frame=make("Frame",gui,{Size=UDim2.fromOffset(300,170),Position=UDim2.new(0.5,-150,0,44),
-    BackgroundColor3=Color3.fromRGB(21,21,24),BorderSizePixel=0})
+local frame=make("Frame",gui,{Size=UDim2.fromOffset(310,190),Position=UDim2.new(0.5,-155,0,40),
+    BackgroundColor3=Color3.fromRGB(22,22,24),BorderSizePixel=0})
 make("UICorner",frame,{CornerRadius=UDim.new(0,10)})
-make("TextLabel",frame,{Text="park · fishing protocol",Size=UDim2.new(1,-45,0,35),BackgroundTransparency=1,
-    Font=Enum.Font.GothamMedium,TextSize=13,TextColor3=Color3.new(1,1,1)})
-local status=make("TextLabel",frame,{Text="inspecting fishing modules...",Size=UDim2.new(1,-24,0,72),
-    Position=UDim2.fromOffset(12,40),BackgroundTransparency=1,TextWrapped=true,
-    Font=Enum.Font.Gotham,TextSize=11,TextColor3=Color3.fromRGB(195,195,200)})
-local function button(text,x,y,w,callback)
+make("TextLabel",frame,{Text="park · one-round skip test",Size=UDim2.new(1,-45,0,35),BackgroundTransparency=1,
+    Font=Enum.Font.GothamMedium,TextSize=12,TextColor3=Color3.new(1,1,1)})
+local status=make("TextLabel",frame,{Text="loading timing information...",Position=UDim2.fromOffset(12,40),
+    Size=UDim2.new(1,-24,0,70),BackgroundTransparency=1,TextWrapped=true,
+    Font=Enum.Font.Gotham,TextSize=11,TextColor3=Color3.fromRGB(205,205,210)})
+local function log(kind,data)
+    if #records<250 then records[#records+1]={t=math.floor((os.clock()-started)*1000)/1000,kind=kind,data=data} end
+end
+local function message(text) if alive then status.Text=text end end
+local function connect(signal,fn)
+    local c=signal:Connect(fn);connections[#connections+1]=c;return c
+end
+local function button(text,x,y,w,fn)
     local b=make("TextButton",frame,{Text=text,Position=UDim2.fromOffset(x,y),Size=UDim2.fromOffset(w,30),
-        BackgroundColor3=Color3.fromRGB(43,43,47),BorderSizePixel=0,Font=Enum.Font.GothamMedium,
-        TextSize=12,TextColor3=Color3.new(1,1,1)})
-    make("UICorner",b,{CornerRadius=UDim.new(0,6)})
-    b.Activated:Connect(callback)
+        BackgroundColor3=Color3.fromRGB(45,45,48),BorderSizePixel=0,Font=Enum.Font.GothamMedium,
+        TextColor3=Color3.new(1,1,1),TextSize=11})
+    make("UICorner",b,{CornerRadius=UDim.new(0,6)});connect(b.Activated,fn);return b
 end
-button("×",262,3,30,function() gui:Destroy() end)
-local ready=false
-local function export() return Http:JSONEncode(report) end
-local filename="park-fishing-protocol-"..os.date("%Y%m%d-%H%M%S")..".json"
-local function save()
-    assert(type(writefile)=="function","writefile unavailable; use copy")
-    writefile(filename,export())
+connect(gui.Destroying,function()
+    alive=false;armed=false;active=nil
+    for _,c in ipairs(connections) do c:Disconnect() end
+end)
+button("×",270,3,30,function() gui:Destroy() end)
+local armButton
+armButton=button("test next fish",12,116,286,function()
+    if not ready then message("timing module not ready");return end
+    if active and active.sent then message("attempt already sent; waiting for the result");return end
+    if active or armed then
+        active=nil;armed=false;armButton.Text="test next fish";log("cancel",{});message("cancelled; no pending request")
+    else
+        armed=true;armButton.Text="cancel";log("armed",{});message("cast manually; leave the minigame untouched")
+    end
+end)
+local function export()
+    return Http:JSONEncode({version="Park skip test 1",place=game.PlaceId,records=records,
+        note="One result request per armed round. Local submission is not server confirmation. Compare inventory and capture observations; normal game scripts remain active."})
 end
-button("copy",12,126,134,function()
-    if not ready then status.Text="inspection still running...";return end
+button("copy log",12,152,139,function()
     local ok,err=pcall(function()
         local copy=type(setclipboard)=="function" and setclipboard or type(toclipboard)=="function" and toclipboard
-        assert(copy,"clipboard unavailable; use save")
-        copy(export())
+        assert(copy,"clipboard unavailable");copy(export())
     end)
-    status.Text=ok and "copied · send the complete JSON" or tostring(err)
+    message(ok and "log copied" or tostring(err))
 end)
-button("save",154,126,134,function()
-    if not ready then status.Text="inspection still running...";return end
-    local ok,err=pcall(save)
-    status.Text=ok and ("workspace/"..filename) or tostring(err)
+button("save log",159,152,139,function()
+    local filename="park-skip-test-"..os.date("%Y%m%d-%H%M%S")..".json"
+    local ok,err=pcall(function() assert(type(writefile)=="function","writefile unavailable");writefile(filename,export()) end)
+    message(ok and ("workspace/"..filename) or tostring(err))
 end)
-local function find(parts)
-    local o=RS
-    for _,name in ipairs(parts) do o=o and o:FindFirstChild(name) end
-    return o
+local function conclude(round,reason)
+    if not alive or active~=round then return end
+    log("observation",{id=round.id,reason=reason,sent=round.sent or false,effect=round.effect or false,
+        inventoryUpdate=round.inventoryUpdate or false,before=round.before,after=round.after})
+    active=nil;armButton.Text="test next fish"
+    if round.sent and round.effect and round.inventoryUpdate then
+        message("capture effect + inventory update observed; save log")
+    elseif not round.sent then message("round ended before the test request; save log")
+    else message("no confirmed capture from this test; save log") end
 end
-local function sourceOf(module)
-    local ok,source=pcall(function() return module.Source end)
-    if ok and type(source)=="string" and #source>0 then return source,"Source" end
-    if type(decompile)~="function" then return nil,"executor cannot read or decompile source" end
-    local good,result=pcall(decompile,module)
-    if not good or type(result)~="string" or result=="" then return nil,tostring(result) end
-    return result,"decompile"
-end
-task.spawn(function()
-    local count=0
-    for index,parts in ipairs(paths) do
-        if not alive then return end
-        local item={path="ReplicatedStorage."..table.concat(parts,".")}
-        report.modules[#report.modules+1]=item
-        status.Text="inspecting "..index.."/"..#paths.."\n"..parts[#parts]
-        local module=find(parts)
-        if not module then item.error="not found"
-        elseif not module:IsA("ModuleScript") then item.error="expected ModuleScript; got "..module.ClassName
-        else
-            local finished,expired,source,method=false,false,nil,nil
-            task.spawn(function()
-                local result,how=sourceOf(module)
-                if not expired and alive then source=result;method=how;finished=true end
-            end)
-            local deadline=os.clock()+18
-            while alive and not finished and os.clock()<deadline do task.wait(0.1) end
-            if not alive then return end
-            expired=true
-            if not finished then item.error="source inspection timed out"
-            elseif not source then item.error=method
-            else
-                item.source=source:sub(1,350000);item.method=method;item.truncated=#source>350000
-                count+=1
-            end
+local watched=setmetatable({},{__mode="k"})
+local function watchInventory(o)
+    if not o:IsA("RemoteEvent") or watched[o] then return end
+    if not o.Parent or o.Parent.Name~="DataService" then return end
+    watched[o]=true
+    connect(o.OnClientEvent,function(operation,keys,value)
+        if operation~=1 or type(keys)~="table" or keys[1]~="fishes" or type(keys[2])~="string" or type(value)~="number" then return end
+        local fish=keys[2];local before=counts[fish];counts[fish]=value
+        local round=active
+        if round and round.sent and round.fish==fish then
+            round.before=round.before or before;round.after=value
+            round.inventoryUpdate=round.before~=nil and value>round.before or round.before==nil and value>0
+            log("inventory",{fish=fish,before=round.before,after=value,baselineKnown=round.before~=nil})
         end
-        task.wait()
+    end)
+end
+for _,o in ipairs(RS:GetDescendants()) do watchInventory(o) end
+connect(RS.DescendantAdded,watchInventory)
+connect(remote.OnClientEvent,function(event,owner,payload,fish)
+    if event=="FishFightStart" and owner==player.Name then
+        if active then conclude(active,"new round") end
+        if not armed or not ready or type(payload)~="table" or type(payload.id)~="string" or type(payload.fish)~="string" then return end
+        armed=false
+        local ok,minimum=pcall(fightInfo.MinWinSeconds,payload.fish,payload.skills or {},payload.pattern)
+        if not ok or type(minimum)~="number" or minimum~=minimum or minimum<0 or minimum>60 then
+            armButton.Text="test next fish";log("timing error",{error=tostring(minimum)});message("invalid timing; no request sent");return
+        end
+        local round={id=payload.id,fish=payload.fish,pattern=payload.pattern,before=counts[payload.fish],sent=false}
+        active=round
+        -- Allow the observed 1.25-second preview plus a small scheduling margin.
+        local delay=minimum+1.6
+        log("round",{id=round.id,fish=round.fish,pattern=round.pattern,minimum=minimum,delay=delay})
+        message(string.format("%s · %s\none attempt in %.1fs",round.fish,tostring(round.pattern),delay))
+        task.delay(delay,function()
+            if not alive or active~=round then return end
+            if player:GetAttribute("fishingState")~="battle" then conclude(round,"not in battle");return end
+            round.sent=true
+            local sent,err=pcall(function() remote:FireServer("fishFightResult",round.id,"win",100) end)
+            log("submission",{id=round.id,localCallSucceeded=sent,error=not sent and tostring(err) or nil})
+            if not sent then conclude(round,"local call failed");return end
+            message("request sent once; checking server observations")
+            task.delay(8,function() conclude(round,"observation timeout") end)
+        end)
+    elseif event=="Effect" and owner=="createFish" and payload==player then
+        local round=active
+        if round and round.sent and fish==round.fish then round.effect=true;log("capture effect",{fish=fish}) end
+    elseif (event=="FishFightEnd" or event=="FishFightCancel") and owner==player.Name then
+        local round=active
+        if round and (event~="FishFightCancel" or not payload or payload==round.id) then
+            log(event,{id=round.id,sent=round.sent})
+            if not round.sent then conclude(round,event)
+            else task.delay(1,function() conclude(round,event) end) end
+        end
     end
+end)
+task.spawn(function()
+    local ok,result=pcall(require,fightModule)
     if not alive then return end
-    ready=true;report.sourcesRead=count
-    local ok,err=pcall(save)
-    status.Text=count.."/"..#paths.." sources read\n"..(ok and ("saved: workspace/"..filename) or ("auto-save failed; try copy\n"..tostring(err):sub(1,110)))
+    if not ok or type(result)~="table" or type(result.MinWinSeconds)~="function" then
+        log("module error",{error=tostring(result)});message("timing unavailable; no requests will be sent");return
+    end
+    fightInfo=result;ready=true;message("disable autofish; test next fish, then cast manually")
 end)
