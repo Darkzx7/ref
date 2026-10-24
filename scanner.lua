@@ -18,6 +18,8 @@ local nativeInit
 local fightInfo,active
 local connections,records,counts={},{},{}
 local started=os.clock()
+local runId=Http:GenerateGUID(false):gsub("-", ""):sub(1,8)
+local exportNumber=0
 local gui=Instance.new("ScreenGui")
 gui.Name="REF_ParkSkipTest";gui.ResetOnSpawn=false;gui.DisplayOrder=1000;gui.Parent=pg
 alive=true
@@ -29,7 +31,7 @@ end
 local frame=make("Frame",gui,{Size=UDim2.fromOffset(310,226),Position=UDim2.new(0.5,-155,0,40),
     BackgroundColor3=Color3.fromRGB(22,22,24),BorderSizePixel=0})
 make("UICorner",frame,{CornerRadius=UDim.new(0,10)})
-make("TextLabel",frame,{Text="park · one-round skip test",Size=UDim2.new(1,-45,0,35),BackgroundTransparency=1,
+make("TextLabel",frame,{Text="park · skip test v3.1",Size=UDim2.new(1,-45,0,35),BackgroundTransparency=1,
     Font=Enum.Font.GothamMedium,TextSize=12,TextColor3=Color3.new(1,1,1)})
 local status=make("TextLabel",frame,{Text="loading timing information...",Position=UDim2.fromOffset(12,40),
     Size=UDim2.new(1,-24,0,70),BackgroundTransparency=1,TextWrapped=true,
@@ -70,7 +72,7 @@ modeButton=button("mode: native timed",12,116,286,function()
     message(mode=="native early" and "native finish when the fight opens; early acceptance unverified" or mode=="native timed" and "native progress + finish after the observed timing" or "direct result request after the observed timing")
 end)
 local function export()
-    return Http:JSONEncode({version="Park skip test 3",place=game.PlaceId,records=records,
+    return Http:JSONEncode({version="Park skip test 3.1",runId=runId,exported=os.date("!%Y-%m-%dT%H:%M:%SZ"),mode=mode,place=game.PlaceId,records=records,
         note="Native modes set the matching live session progress to 100 once and let the original minigame finish. This does not prove server acceptance. Timed remote mode sends one direct result request."})
 end
 button("copy log",12,188,139,function()
@@ -81,7 +83,8 @@ button("copy log",12,188,139,function()
     message(ok and "log copied" or tostring(err))
 end)
 button("save log",159,188,139,function()
-    local filename="park-skip-test-"..os.date("%Y%m%d-%H%M%S")..".json"
+    exportNumber+=1
+    local filename="park-v31-"..os.date("%Y%m%d-%H%M%S").."-"..runId.."-"..exportNumber..".json"
     local ok,err=pcall(function() assert(type(writefile)=="function","writefile unavailable");writefile(filename,export()) end)
     message(ok and ("workspace/"..filename) or tostring(err))
 end)
