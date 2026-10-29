@@ -1,4 +1,4 @@
--- REF voice observer 2. Read-only diagnostics; no hooks, audio capture or remote replay.
+-- REF voice observer 2.1. Read-only diagnostics; no hooks, audio capture or remote replay.
 -- Run BEFORE the other script, use its voice toggle, then copy/save this report.
 local Players=game:GetService("Players")
 local Http=game:GetService("HttpService")
@@ -15,6 +15,7 @@ local alive,recording=true,true
 local started=os.clock()
 local records,connections,capabilities={}, {}, {}
 local dropped,watched=0,0
+local watchedAudio,watchedUI=0,0
 local seen=setmetatable({},{__mode="k"})
 local ids=setmetatable({},{__mode="k"})
 local nextId,clickId=0,0
@@ -60,6 +61,7 @@ local function related(obj)
     return text:find("voice",1,true) or text:find("microphone",1,true)
         or text:find("mute",1,true) or text:find("micbutton",1,true)
         or text:find("mictoggle",1,true)
+        or text:find("vcbypass",1,true)
 end
 local audioKeys={
     AudioDeviceInput={"Muted","Active","IsReady","Volume","Player"},
@@ -88,15 +90,24 @@ local function snapshot(obj,kind)
     return data
 end
 local function inspect(obj,isNew)
-    if not alive or seen[obj] or obj==gui or obj:IsDescendantOf(gui) or watched>=450 then return end
+    if not alive or seen[obj] or obj==gui or obj:IsDescendantOf(gui) then return end
     local audio=audioKeys[obj.ClassName]~=nil
     if obj:IsA("AudioDeviceInput") then
         local ok,owner=pcall(function()return obj.Player end)
         -- Observe unassigned new inputs too: their owner may be assigned later.
         if not ok or (owner~=nil and owner~=player) then return end
-    elseif not audio and not (obj:IsA("GuiButton") and (isNew or related(obj)))
-        and not (obj:IsA("LayerCollector") and (isNew or related(obj)))
+    elseif not audio and not (obj:IsA("GuiButton") and related(obj))
+        and not (obj:IsA("LayerCollector") and related(obj))
         and not (related(obj) and (obj:IsA("ImageLabel") or obj:IsA("Frame") or obj:IsA("TextLabel"))) then return end
+    -- Unrelated command lists must not consume the microphone observation budget.
+    -- Audio and UI have separate limits, released when instances are destroyed.
+    if audio then
+        if watchedAudio>=128 then capabilities.audioLimitReached=true;return end
+        watchedAudio+=1
+    else
+        if watchedUI>=300 then capabilities.voiceUILimitReached=true;return end
+        watchedUI+=1
+    end
     watched+=1
     local bucket={}
     seen[obj]=bucket
@@ -148,6 +159,7 @@ local function inspect(obj,isNew)
         add("removed",{id=id(obj),path=lastPath})
         for _,c in ipairs(bucket)do c:Disconnect()end
         seen[obj]=nil;watched-=1
+        if audio then watchedAudio-=1 else watchedUI-=1 end
     end,bucket)
 end
 local roots,rootSet={},{}
@@ -178,7 +190,7 @@ local function label(text,x,y,w,h)
     v.Font=Enum.Font.Gotham;v.TextSize=12;v.TextColor3=Color3.fromRGB(230,230,232)
     v.Text=text;v.TextWrapped=true;v.Parent=panel;return v
 end
-local title=label("voice observer v2",12,0,210,34);title.TextXAlignment=Enum.TextXAlignment.Left
+local title=label("voice observer v2.1",12,0,210,34);title.TextXAlignment=Enum.TextXAlignment.Left
 local status=label("recording · activate the other script",12,38,286,34)
 local function button(text,x,y,w,fn)
     local b=Instance.new("TextButton");b.Position=UDim2.fromOffset(x,y);b.Size=UDim2.fromOffset(w,28)
@@ -187,7 +199,8 @@ local function button(text,x,y,w,fn)
     connect(b.Activated,fn);return b
 end
 local function export()
-    return Http:JSONEncode({version="REF voice observer 2",runId=runId,place=game.PlaceId,
+    return Http:JSONEncode({version="REF voice observer 2.1",runId=runId,place=game.PlaceId,
+        watched={audio=watchedAudio,voiceUI=watchedUI},
         exported=os.date("!%Y-%m-%dT%H:%M:%SZ"),dropped=dropped,capabilities=capabilities,records=records,
         note="Read-only state/UI/audio-graph observations. No audio samples, tokens, hooks, privilege changes or remote replay. Click samples are AFTER callbacks; compare earlier state samples. Unavailable is not false. Does not prove suspension bypass or identify internal function calls."})
 end
@@ -212,10 +225,10 @@ table.insert(controls,button("save json",12,118,284,function()
     local success,err=pcall(function()
         assert(type(writefile)=="function" and type(makefolder)=="function" and type(isfolder)=="function","file access unavailable")
         for _,dir in ipairs({"True Ref","True Ref/Logs"})do if not isfolder(dir)then makefolder(dir)end end
-        local filename="voice-v2-"..os.date("%Y%m%d-%H%M%S").."-"..runId..".json"
+        local filename="voice-v2.1-"..os.date("%Y%m%d-%H%M%S").."-"..runId..".json"
         writefile("True Ref/Logs/"..filename,export())
     end)
-    status.Text=success and "saved: workspace/True Ref/Logs/voice-v2-...json" or tostring(err):sub(1,100)
+    status.Text=success and "saved: workspace/True Ref/Logs/voice-v2.1-...json" or tostring(err):sub(1,100)
 end))
 local minimized=false
 button("-",242,3,27,function()
@@ -332,13 +345,9 @@ task.spawn(function()
     end
     -- Audio instances can be parented outside Players (e.g. Workspace or SoundService).
     -- One yielded baseline scan; thereafter only new audio nodes are examined.
-    local audioCount=0
     local function inspectAudio(obj,isNew)
         if not alive or not audioKeys[obj.ClassName]then return end
-        if not seen[obj] and audioCount>=128 then capabilities.audioLimitReached=true;return end
-        local wasSeen=seen[obj]~=nil
         inspect(obj,isNew)
-        if not wasSeen and seen[obj]then audioCount+=1 end
     end
     connect(game.DescendantAdded,function(obj)
         if audioKeys[obj.ClassName]then task.defer(function()inspectAudio(obj,true)end)end
@@ -360,3 +369,4 @@ task.spawn(function()
         if alive and recording then captureState("poll")end
     end
 end)
+
