@@ -1,4 +1,4 @@
--- REF voice prototype 2.1: custom microphone after confirmed reconnection.
+-- REF voice prototype 2.3: opt-in AVCB2 sequence and custom microphone.
 -- No automatic reconnect, remote replay or audio recording. Does not establish ban protection.
 -- Startup does not change microphone state. Only StateChanged listeners are candidates;
 -- LocalPlayerModerated is observed, never disabled. Restoration is best-effort and logged.
@@ -81,8 +81,10 @@ local function disableExperimentalListeners(checkOnly)
     end
     log("listener preflight",{total=#list,eligible=#candidates,firstIndex=10})
     if #candidates==0 then
-        return false,#list<10 and ("found "..#list.." connections; source assumes index 10. No listeners changed.")
-            or "connections from index 10 are disabled or owned by this prototype; no changes applied"
+        -- The source's numeric loop does nothing with fewer than ten entries.
+        -- Continue the sequence, but explicitly report that nothing was disabled.
+        log("listener stage",{checkOnly=checkOnly==true,total=#list,changed=0,result="no eligible entries; no changes"})
+        return true
     end
     if checkOnly then return true end
     for _,entry in ipairs(candidates)do
@@ -148,6 +150,13 @@ local function toggleMute()
     if type(state.mute)~="boolean"then return false,"mute state unavailable on this executor"end
     return setMute(not state.mute)
 end
+local function sequenceDelay(seconds,stage)
+    message=stage
+    log("sequence wait",{seconds=seconds,stage=stage})
+    local deadline=os.clock()+seconds
+    while alive and os.clock()<deadline do task.wait(math.min(0.1,deadline-os.clock()))end
+    return alive
+end
 local function reconnect(experimental)
     local before=getState()
     if before.connection=="unavailable"then return false,"connection state unavailable on this executor"end
@@ -158,6 +167,7 @@ local function reconnect(experimental)
     if experimental then
         local supported,supportError=disableExperimentalListeners(true)
         if not supported then return false,supportError end
+        if not sequenceDelay(0.5,"preparing AVCB2 sequence...")then return false,"closed"end
     end
     -- A disconnected session reconnects muted. A connected session retains its known preference.
     local restoreMuted=before.connection~="Joined" or before.mute
@@ -173,9 +183,11 @@ local function reconnect(experimental)
     end
     if not alive then return false,"closed"end
     if experimental then
+        if not sequenceDelay(1.5,"waiting after disconnect...")then return false,"closed"end
         message="applying listener experiment..."
         local applied,applyError=disableExperimentalListeners()
         if not applied then return false,applyError end
+        if not sequenceDelay(1,"waiting before reconnect...")then return false,"closed"end
     end
     message="connecting..."
     local method="joinVoice"
@@ -196,12 +208,15 @@ local function reconnect(experimental)
     end
     log("reconnect confirmed",{state=getState()})
     experimentActive=experimental==true
+    if experimental then
+        log("AVCB2 sequence completed",{listenersChanged=#changedListeners,state=getState(),protectionVerified=false})
+    end
     return true
 end
 -- CORE END
 
 local panel=Instance.new("Frame")
-panel.Size=UDim2.fromOffset(292,226);panel.Position=UDim2.new(0.5,-146,0,70)
+panel.Size=UDim2.fromOffset(292,266);panel.Position=UDim2.new(0.5,-146,0,70)
 panel.BackgroundColor3=Color3.fromRGB(20,21,24);panel.BorderSizePixel=0;panel.Parent=gui
 local corner=Instance.new("UICorner");corner.CornerRadius=UDim.new(0,9);corner.Parent=panel
 local function text(value,x,y,w,h)
@@ -210,7 +225,7 @@ local function text(value,x,y,w,h)
     v.Font=Enum.Font.Gotham;v.TextSize=12;v.TextWrapped=true;v.Text=value;v.Parent=panel
     return v
 end
-local title=text("voice prototype v2.1",12,0,190,32);title.TextXAlignment=Enum.TextXAlignment.Left
+local title=text("voice test v2.3",12,0,190,32);title.TextXAlignment=Enum.TextXAlignment.Left
 local function button(value,x,y,w,h,callback)
     local b=Instance.new("TextButton");b.Position=UDim2.fromOffset(x,y);b.Size=UDim2.fromOffset(w,h)
     b.BackgroundColor3=Color3.fromRGB(38,39,44);b.BorderSizePixel=0
@@ -232,7 +247,7 @@ local function run(name,fn)
             local restored=restoreListeners()
             if not restored then err=tostring(err).."; restoration incomplete"end
         end
-        message=ok and "ready" or tostring(err or "operation failed")
+        message=ok and (type(err)=="string" and err or "ready") or tostring(err or "operation failed")
         log("operation result",{operation=name,confirmed=ok==true,message=message})
         render()
     end)
@@ -249,10 +264,40 @@ floatingMic.Name="Microphone";floatingMic.Size=UDim2.fromOffset(44,44)
 floatingMic.Position=UDim2.new(0.5,-22,0,16);floatingMic.Visible=false
 floatingMic.BackgroundColor3=Color3.fromRGB(25,26,29);floatingMic.BackgroundTransparency=0.12
 floatingMic.BorderSizePixel=0;floatingMic.Text="";floatingMic.Parent=micGui
-local round=Instance.new("UICorner");round.CornerRadius=UDim.new(1,0);round.Parent=floatingMic
-local floatingIcon=Instance.new("ImageLabel")
-floatingIcon.BackgroundTransparency=1;floatingIcon.Size=UDim2.fromScale(0.66,0.66)
-floatingIcon.Position=UDim2.fromScale(0.17,0.17);floatingIcon.Parent=floatingMic
+local round=Instance.new("UICorner");round.CornerRadius=UDim.new(0,10);round.Parent=floatingMic
+-- Locally constructed glyph: no Roblox mic texture or external asset dependency.
+local function createMicGlyph(parent)
+    local glyph=Instance.new("Frame")
+    glyph.Name="RefMicGlyph";glyph.BackgroundTransparency=1
+    glyph.Size=UDim2.fromOffset(32,32);glyph.AnchorPoint=Vector2.new(0.5,0.5)
+    glyph.Position=UDim2.fromScale(0.5,0.5);glyph.Parent=parent
+    local scale=Instance.new("UIScale");scale.Parent=glyph
+    local parts={}
+    local function bar(x,y,w,h,r)
+        local f=Instance.new("Frame");f.BorderSizePixel=0
+        f.Position=UDim2.fromOffset(x,y);f.Size=UDim2.fromOffset(w,h)
+        f.BackgroundColor3=Color3.fromRGB(232,232,236);f.Parent=glyph
+        if r then local c=Instance.new("UICorner");c.CornerRadius=UDim.new(0,r);c.Parent=f end
+        parts[#parts+1]=f;return f
+    end
+    bar(12,2,8,13,4)
+    bar(8,10,2,7,1);bar(22,10,2,7,1)
+    bar(9,16,14,2,1);bar(15,18,2,4,1);bar(11,21,10,2,1)
+    local slash=bar(4,12,25,2,1);slash.Rotation=-45
+    local brand=Instance.new("TextLabel")
+    brand.BackgroundTransparency=1;brand.Position=UDim2.fromOffset(0,25)
+    brand.Size=UDim2.fromOffset(32,7);brand.Text="REF"
+    brand.Font=Enum.Font.GothamBold;brand.TextSize=8
+    brand.TextColor3=Color3.fromRGB(155,155,165);brand.Parent=glyph
+    return function(state,active)
+        scale.Scale=math.clamp(math.min(parent.AbsoluteSize.X,parent.AbsoluteSize.Y)/44,0.5,1.5)
+        slash.Visible=state.mute==true
+        for _,part in ipairs(parts)do part.BackgroundTransparency=active and 0 or 0.55 end
+        brand.TextTransparency=active and 0 or 0.45
+    end
+end
+local updateFloatingGlyph=createMicGlyph(floatingMic)
+local micPlacement="inactive"
 local function restoreNativeMic()
     if nativeMic then pcall(function()nativeMic.Visible=nativeVisible end)end
     nativeMic=nil;nativeVisible=nil
@@ -312,25 +357,26 @@ local function syncCustomMic(state)
         floatingMic.Size=UDim2.fromOffset(44,44)
     end
     floatingMic.Active=not busy and type(state.mute)=="boolean"
-    floatingIcon.Image=type(state.mute)=="boolean" and (state.mute
-        and "rbxasset://textures/ui/VoiceChat/MicLight/Muted.png"
-        or "rbxasset://textures/ui/VoiceChat/MicLight/Unmuted0.png")
-        or "rbxasset://textures/ui/VoiceChat/MicDark/Connecting.png"
-    floatingIcon.ImageTransparency=floatingMic.Active and 0 or 0.5
+    updateFloatingGlyph(state,floatingMic.Active)
+    local placement=nativeMic and "native position" or "separate REF button; Roblox mic not replaced"
+    if placement~=micPlacement then
+        micPlacement=placement
+        log("microphone placement",{placement=placement,nativeMicReplaced=nativeMic~=nil})
+    end
 end
 connect(floatingMic.Activated,function()
     if floatingMic.Active then run("mute",toggleMute)end
 end)
-local function activateCustomMic()
-    local ok,err=reconnect(false)
+local function activateCustomMic(experimental)
+    local ok,err=reconnect(experimental==true)
     if not ok then return false,err end
     customEnabled=true;nextMicSearch=0
     log("custom microphone",{enabled=true,state=getState()})
+    if experimental then return true,"sequence completed; "..#changedListeners.." listeners changed. Protection unverified."end
     return true
 end
 local mic=button("",12,40,44,44,function()run("mute",toggleMute)end)
-local icon=Instance.new("ImageLabel");icon.BackgroundTransparency=1
-icon.Size=UDim2.fromOffset(30,30);icon.Position=UDim2.fromOffset(7,7);icon.Parent=mic
+local updatePanelGlyph=createMicGlyph(mic)
 local muteLabel=text("checking microphone",64,40,216,20);muteLabel.TextXAlignment=Enum.TextXAlignment.Left
 local connectionLabel=text("checking connection",64,61,216,20);connectionLabel.TextXAlignment=Enum.TextXAlignment.Left
 local status=text("ready",12,90,268,40);status.TextSize=11
@@ -340,16 +386,26 @@ local reconnectButton=button("activate mic",12,140,92,30,function()
     if customEnabled then stopCustomMic();render()
     else run("activate mic",activateCustomMic)end
 end)
-local experimentButton=button("legacy listener test",12,182,268,30,function()
-    if #changedListeners>0 then run("restore",restoreListeners)
-    else run("experiment",function()return reconnect(true)end)end
+local placementLabel=text("Custom mic control - no suspension protection",12,182,268,30)
+placementLabel.TextSize=10
+local experimentButton=button("test AVCB2 sequence",12,224,268,30,function()
+    if busy or not alive then return end
+    if experimentActive or #changedListeners>0 then
+        run("restore",function()
+            stopCustomMic()
+            return restoreListeners()
+        end)
+    else
+        stopCustomMic()
+        run("experiment",function()return activateCustomMic(true)end)
+    end
 end)
 local function export()
-    return Http:JSONEncode({version="REF voice prototype 2.1",runId=runId,place=game.PlaceId,
+    return Http:JSONEncode({version="REF voice prototype 2.3",runId=runId,place=game.PlaceId,
         customMicEnabled=customEnabled,nativeMicReplaced=nativeMic~=nil,
         experimentActive=experimentActive,listenersPendingRestore=#changedListeners,
         exported=os.date("!%Y-%m-%dT%H:%M:%SZ"),records=records,dropped=dropped,state=getState(),
-        note="Opt-in StateChanged listener experiment with best-effort restoration. Local readback is not proof of remote audibility or protection against moderation. No audio or credentials recorded."})
+        note="Optional AVCB2 disconnect/wait/listener/rejoin sequence. Original index 10 retained; zero eligible entries is a logged no-op. Extra verification and restoration; not an exact copy. No verified suspension protection. Native replacement reported separately. No audio recorded."})
 end
 local copyButton=button("copy log",112,140,80,30,function()
     local copy=type(setclipboard)=="function" and setclipboard or type(toclipboard)=="function" and toclipboard
@@ -360,15 +416,15 @@ local saveButton=button("save",200,140,80,30,function()
     local success,err=pcall(function()
         assert(type(writefile)=="function" and type(isfolder)=="function" and type(makefolder)=="function","file access unavailable")
         for _,folder in ipairs({"True Ref","True Ref/Logs"})do if not isfolder(folder)then makefolder(folder)end end
-        writefile("True Ref/Logs/voice-prototype-v2.1-"..os.date("%Y%m%d-%H%M%S").."-"..runId..".json",export())
+        writefile("True Ref/Logs/voice-prototype-v2.3-"..os.date("%Y%m%d-%H%M%S").."-"..runId..".json",export())
     end)
     message=success and "saved in workspace/True Ref/Logs" or tostring(err):sub(1,160);render()
 end)
-local contents={mic,muteLabel,connectionLabel,status,reconnectButton,copyButton,saveButton,experimentButton}
+local contents={mic,muteLabel,connectionLabel,status,reconnectButton,copyButton,saveButton,placementLabel,experimentButton}
 local minimized=false
 button("-",222,3,27,26,function()
     minimized=not minimized
-    panel.Size=UDim2.fromOffset(292,minimized and 32 or 226)
+    panel.Size=UDim2.fromOffset(292,minimized and 32 or 266)
     for _,v in ipairs(contents)do v.Visible=not minimized end
 end)
 button("x",253,3,27,26,function()gui:Destroy()end)
@@ -378,15 +434,16 @@ render=function()
     local known=type(state.mute)=="boolean"
     muteLabel.Text=known and (state.mute and "muted" or "unmuted") or "mute unavailable"
     connectionLabel.Text="voice: "..state.connection:lower()
-    icon.Image=known and (state.mute and "rbxasset://textures/ui/VoiceChat/MicLight/Muted.png"
-        or "rbxasset://textures/ui/VoiceChat/MicLight/Unmuted0.png") or "rbxasset://textures/ui/VoiceChat/MicDark/Connecting.png"
     mic.Active=not busy and known and state.connection=="Joined"
-    icon.ImageTransparency=mic.Active and 0 or 0.5
+    updatePanelGlyph(state,mic.Active)
     reconnectButton.Active=not busy and #changedListeners==0
     reconnectButton.Text=customEnabled and "restore mic" or "activate mic"
-    syncCustomMic(state)
     experimentButton.Active=not busy
-    experimentButton.Text=#changedListeners>0 and (experimentActive and "stop experiment / restore" or "retry restore") or "legacy listener test"
+    experimentButton.Text=(experimentActive or #changedListeners>0) and "stop sequence / restore" or "test AVCB2 sequence"
+    syncCustomMic(state)
+    placementLabel.Text=customEnabled and (state.connection~="Joined" and "REF mic waiting for voice connection"
+        or nativeMic and "REF mic in native position" or "REF button at top; Roblox mic not replaced")
+        or "Custom mic control - no suspension protection"
     status.Text=message
 end
 local drag,startPointer,startPosition
