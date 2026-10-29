@@ -1,4 +1,4 @@
--- REF voice prototype 2: manual voice control and an opt-in local listener experiment.
+-- REF voice prototype 2.1: custom microphone after confirmed reconnection.
 -- No automatic reconnect, remote replay or audio recording. Does not establish ban protection.
 -- Startup does not change microphone state. Only StateChanged listeners are candidates;
 -- LocalPlayerModerated is observed, never disabled. Restoration is best-effort and logged.
@@ -80,7 +80,10 @@ local function disableExperimentalListeners(checkOnly)
         end
     end
     log("listener preflight",{total=#list,eligible=#candidates,firstIndex=10})
-    if #candidates==0 then return false,"no eligible listeners from index 10; experiment not applied"end
+    if #candidates==0 then
+        return false,#list<10 and ("found "..#list.." connections; source assumes index 10. No listeners changed.")
+            or "connections from index 10 are disabled or owned by this prototype; no changes applied"
+    end
     if checkOnly then return true end
     for _,entry in ipairs(candidates)do
         if not alive then restoreListeners();return false,"closed"end
@@ -207,7 +210,7 @@ local function text(value,x,y,w,h)
     v.Font=Enum.Font.Gotham;v.TextSize=12;v.TextWrapped=true;v.Text=value;v.Parent=panel
     return v
 end
-local title=text("voice prototype v2",12,0,190,32);title.TextXAlignment=Enum.TextXAlignment.Left
+local title=text("voice prototype v2.1",12,0,190,32);title.TextXAlignment=Enum.TextXAlignment.Left
 local function button(value,x,y,w,h,callback)
     local b=Instance.new("TextButton");b.Position=UDim2.fromOffset(x,y);b.Size=UDim2.fromOffset(w,h)
     b.BackgroundColor3=Color3.fromRGB(38,39,44);b.BorderSizePixel=0
@@ -234,22 +237,116 @@ local function run(name,fn)
         render()
     end)
 end
+-- The replacement only controls PublishPause. It does not alter voice moderation.
+local customEnabled=false
+local nativeMic,nativeVisible
+local nextMicSearch=0
+local micGui=Instance.new("ScreenGui")
+micGui.Name="RefVoiceMic";micGui.IgnoreGuiInset=true;micGui.ResetOnSpawn=false
+micGui.DisplayOrder=10002;micGui.Parent=playerGui
+local floatingMic=Instance.new("TextButton")
+floatingMic.Name="Microphone";floatingMic.Size=UDim2.fromOffset(44,44)
+floatingMic.Position=UDim2.new(0.5,-22,0,16);floatingMic.Visible=false
+floatingMic.BackgroundColor3=Color3.fromRGB(25,26,29);floatingMic.BackgroundTransparency=0.12
+floatingMic.BorderSizePixel=0;floatingMic.Text="";floatingMic.Parent=micGui
+local round=Instance.new("UICorner");round.CornerRadius=UDim.new(1,0);round.Parent=floatingMic
+local floatingIcon=Instance.new("ImageLabel")
+floatingIcon.BackgroundTransparency=1;floatingIcon.Size=UDim2.fromScale(0.66,0.66)
+floatingIcon.Position=UDim2.fromScale(0.17,0.17);floatingIcon.Parent=floatingMic
+local function restoreNativeMic()
+    if nativeMic then pcall(function()nativeMic.Visible=nativeVisible end)end
+    nativeMic=nil;nativeVisible=nil
+end
+local function stopCustomMic()
+    customEnabled=false;floatingMic.Visible=false;restoreNativeMic()
+    log("custom microphone",{enabled=false})
+end
+local function findNativeMic()
+    local roots={playerGui}
+    local ok,core=pcall(function()return game:GetService("CoreGui")end)
+    if ok then roots[#roots+1]=core end
+    for _,root in ipairs(roots)do
+        local readable,descendants=pcall(function()return root:GetDescendants()end)
+        if readable then
+            for _,candidate in ipairs(descendants)do
+                if candidate.Name=="toggle_mic_mute" and candidate:IsA("GuiButton") then
+                    local accessible,visible=pcall(function()
+                        if not candidate.Visible or candidate.AbsoluteSize.X<1 or candidate.AbsoluteSize.Y<1 then return false end
+                        local ancestor=candidate.Parent
+                        while ancestor do
+                            if ancestor:IsA("GuiObject") and not ancestor.Visible then return false end
+                            if ancestor:IsA("ScreenGui") and not ancestor.Enabled then return false end
+                            ancestor=ancestor.Parent
+                        end
+                        return true
+                    end)
+                    if accessible and visible then return candidate end
+                end
+            end
+        end
+    end
+end
+local function syncCustomMic(state)
+    floatingMic.Visible=customEnabled and state.connection=="Joined"
+    if not floatingMic.Visible then restoreNativeMic();return end
+    if nativeMic and not nativeMic.Parent then restoreNativeMic()end
+    if not nativeMic and os.clock()>=nextMicSearch then
+        nextMicSearch=os.clock()+2
+        local found=findNativeMic()
+        if found then
+            local ok,visible=pcall(function()return found.Visible end)
+            if ok then nativeMic=found;nativeVisible=visible end
+        end
+    end
+    if nativeMic then
+        local ok=pcall(function()
+            local position,size=nativeMic.AbsolutePosition,nativeMic.AbsoluteSize
+            floatingMic.Position=UDim2.fromOffset(position.X,position.Y)
+            floatingMic.Size=UDim2.fromOffset(size.X,size.Y)
+            nativeMic.Visible=false
+        end)
+        if not ok then restoreNativeMic()end
+    end
+    if not nativeMic then
+        floatingMic.Position=UDim2.new(0.5,-22,0,16)
+        floatingMic.Size=UDim2.fromOffset(44,44)
+    end
+    floatingMic.Active=not busy and type(state.mute)=="boolean"
+    floatingIcon.Image=type(state.mute)=="boolean" and (state.mute
+        and "rbxasset://textures/ui/VoiceChat/MicLight/Muted.png"
+        or "rbxasset://textures/ui/VoiceChat/MicLight/Unmuted0.png")
+        or "rbxasset://textures/ui/VoiceChat/MicDark/Connecting.png"
+    floatingIcon.ImageTransparency=floatingMic.Active and 0 or 0.5
+end
+connect(floatingMic.Activated,function()
+    if floatingMic.Active then run("mute",toggleMute)end
+end)
+local function activateCustomMic()
+    local ok,err=reconnect(false)
+    if not ok then return false,err end
+    customEnabled=true;nextMicSearch=0
+    log("custom microphone",{enabled=true,state=getState()})
+    return true
+end
 local mic=button("",12,40,44,44,function()run("mute",toggleMute)end)
 local icon=Instance.new("ImageLabel");icon.BackgroundTransparency=1
 icon.Size=UDim2.fromOffset(30,30);icon.Position=UDim2.fromOffset(7,7);icon.Parent=mic
 local muteLabel=text("checking microphone",64,40,216,20);muteLabel.TextXAlignment=Enum.TextXAlignment.Left
 local connectionLabel=text("checking connection",64,61,216,20);connectionLabel.TextXAlignment=Enum.TextXAlignment.Left
 local status=text("ready",12,90,268,40);status.TextSize=11
-local reconnectButton=button("reconnect",12,140,92,30,function()
+local reconnectButton=button("activate mic",12,140,92,30,function()
+    if busy or not alive then return end
     if #changedListeners>0 then message="restore the experiment before reconnecting";render();return end
-    run("reconnect",function()return reconnect(false)end)
+    if customEnabled then stopCustomMic();render()
+    else run("activate mic",activateCustomMic)end
 end)
-local experimentButton=button("start experiment",12,182,268,30,function()
+local experimentButton=button("legacy listener test",12,182,268,30,function()
     if #changedListeners>0 then run("restore",restoreListeners)
     else run("experiment",function()return reconnect(true)end)end
 end)
 local function export()
-    return Http:JSONEncode({version="REF voice prototype 2",runId=runId,place=game.PlaceId,
+    return Http:JSONEncode({version="REF voice prototype 2.1",runId=runId,place=game.PlaceId,
+        customMicEnabled=customEnabled,nativeMicReplaced=nativeMic~=nil,
         experimentActive=experimentActive,listenersPendingRestore=#changedListeners,
         exported=os.date("!%Y-%m-%dT%H:%M:%SZ"),records=records,dropped=dropped,state=getState(),
         note="Opt-in StateChanged listener experiment with best-effort restoration. Local readback is not proof of remote audibility or protection against moderation. No audio or credentials recorded."})
@@ -263,7 +360,7 @@ local saveButton=button("save",200,140,80,30,function()
     local success,err=pcall(function()
         assert(type(writefile)=="function" and type(isfolder)=="function" and type(makefolder)=="function","file access unavailable")
         for _,folder in ipairs({"True Ref","True Ref/Logs"})do if not isfolder(folder)then makefolder(folder)end end
-        writefile("True Ref/Logs/voice-prototype-v2-"..os.date("%Y%m%d-%H%M%S").."-"..runId..".json",export())
+        writefile("True Ref/Logs/voice-prototype-v2.1-"..os.date("%Y%m%d-%H%M%S").."-"..runId..".json",export())
     end)
     message=success and "saved in workspace/True Ref/Logs" or tostring(err):sub(1,160);render()
 end)
@@ -286,8 +383,10 @@ render=function()
     mic.Active=not busy and known and state.connection=="Joined"
     icon.ImageTransparency=mic.Active and 0 or 0.5
     reconnectButton.Active=not busy and #changedListeners==0
+    reconnectButton.Text=customEnabled and "restore mic" or "activate mic"
+    syncCustomMic(state)
     experimentButton.Active=not busy
-    experimentButton.Text=#changedListeners>0 and (experimentActive and "stop experiment / restore" or "retry restore") or "start experiment"
+    experimentButton.Text=#changedListeners>0 and (experimentActive and "stop experiment / restore" or "retry restore") or "legacy listener test"
     status.Text=message
 end
 local drag,startPointer,startPosition
@@ -306,6 +405,8 @@ connect(Input.InputEnded,function(input)if input==drag then drag=nil end end)
 connect(gui.Destroying,function()
     -- Stop pending work first, but retain diagnostics during the restoration attempt.
     alive=false
+    stopCustomMic()
+    micGui:Destroy()
     restoreListeners()
     if #changedListeners>0 then warn("[REF voice prototype] Listener restoration incomplete; rejoin the game to reset the client.")end
     for _,c in ipairs(connections)do c:Disconnect()end
